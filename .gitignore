@@ -6,6 +6,16 @@ __pycache__/
 .venv/
 .venv311/
 *.wav
+*_test.py
+test_*.py
+brain.py
+hearing.py
+phrases.py
+record.py
+wake.py
+agent/decision.py
+agent/heartbeat.py
+tts/streamer.py
 engines/
 agent/core.py
 agent/memory.json
