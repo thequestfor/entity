@@ -1,9 +1,9 @@
 import tempfile
-import subprocess
 
 import soundfile as sf
 
 from kokoro import KPipeline
+from tts.playback import play_wav
 
 
 pipeline = KPipeline(
@@ -52,10 +52,4 @@ def speak(text):
         )
 
 
-        subprocess.run(
-            [
-                "afplay",
-                f.name
-            ],
-            check=True
-        )
+        play_wav(f.name)

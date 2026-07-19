@@ -1,5 +1,7 @@
 import threading
+import time
 
+from agent.audio.activity import is_speaking
 from agent.events import Event
 
 
@@ -30,6 +32,10 @@ class AudioObserver:
 
     def _run(self):
         while self.running:
+            if is_speaking():
+                time.sleep(0.05)
+                continue
+
             event = self.wait_for_event()
 
             if event and self.event_bus:

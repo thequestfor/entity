@@ -1,10 +1,18 @@
 print("BOOT")
 
+import os
+
+import dotenv
+
 from agent.runtime import EntityRuntime
 from tts.manager import set_voice
 
 
-set_voice("kokoro")
+dotenv.load_dotenv()
+
+set_voice(
+    os.getenv("ENTITY_TTS_VOICE", "kokoro")
+)
 
 
 def run_entity():

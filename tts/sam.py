@@ -1,13 +1,28 @@
+import os
 from pathlib import Path
 import subprocess
 import tempfile
 
 from agent.utils.text import chunk_tts
+from tts.playback import play_wav
 
-SAM = Path(__file__).parent.parent / "engines" / "sam"
+DEFAULT_SAM = Path(__file__).parent.parent / "engines" / "sam"
+
+
+def sam_binary():
+    return Path(
+        os.getenv("ENTITY_SAM_PATH") or DEFAULT_SAM
+    )
 
 
 def speak(text: str):
+    sam = sam_binary()
+
+    if not sam.exists():
+        raise RuntimeError(
+            "SAM voice is selected, but no SAM binary was found. "
+            "Set ENTITY_SAM_PATH to the SAM executable."
+        )
 
     for chunk in chunk_tts(text):
 
@@ -15,7 +30,7 @@ def speak(text: str):
 
             subprocess.run(
                 [
-                    str(SAM),
+                    str(sam),
                     "-wav",
                     audio.name,
                     chunk
@@ -23,10 +38,4 @@ def speak(text: str):
                 check=True
             )
 
-            subprocess.run(
-                [
-                    "afplay",
-                    audio.name
-                ],
-                check=True
-            )
+            play_wav(audio.name)

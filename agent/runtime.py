@@ -1,6 +1,6 @@
 import re
 
-from agent.actuators import SpeechActuator
+from agent.actuators import DiagnosticsActuator, SpeechActuator
 from agent.awareness import AwarenessLoop
 from agent.event_bus import EventBus
 from agent.events import Action
@@ -32,6 +32,7 @@ class EntityRuntime:
             audio_observer or AudioObserver()
         ]
         self.actuators = actuators or [
+            DiagnosticsActuator(),
             SpeechActuator()
         ]
         self.policy = policy or Policy()
@@ -132,6 +133,32 @@ class EntityRuntime:
         return response
 
     def _handle_runtime_command(self, command):
+        if self._is_diagnostics_command(command):
+            report = self.execute(
+                Action(
+                    type="diagnostics",
+                    payload={
+                        "runtime": self
+                    }
+                )
+            )
+
+            self.execute(
+                Action(
+                    type="speak",
+                    payload={
+                        "text": report
+                    }
+                )
+            )
+
+            return report
+
+        voice_response = self._handle_voice_command(command)
+
+        if voice_response:
+            return voice_response
+
         reminder = self._parse_reminder(command)
 
         if not reminder:
@@ -181,6 +208,68 @@ class EntityRuntime:
             multiplier = 3600
 
         return amount * multiplier, message
+
+    def _handle_voice_command(self, command):
+        normalized = command.lower().strip()
+
+        if (
+            "what voice" in normalized
+            or "which voice" in normalized
+            or "current voice" in normalized
+        ):
+            from tts.manager import get_voice
+
+            response = f"Current voice: {get_voice()}."
+
+            self.execute(
+                Action(
+                    type="speak",
+                    payload={
+                        "text": response
+                    }
+                )
+            )
+
+            return response
+
+        pattern = re.compile(
+            r"\b(?:use|switch to|set|change to)\s+"
+            r"(?:the\s+)?(kokoro|sam)"
+            r"(?:\s+voice)?\b",
+            re.IGNORECASE
+        )
+        match = pattern.search(command)
+
+        if not match:
+            return None
+
+        voice = match.group(1).lower()
+
+        from tts.manager import set_voice
+
+        set_voice(voice)
+
+        response = f"Voice set to {voice}."
+
+        self.execute(
+            Action(
+                type="speak",
+                payload={
+                    "text": response
+                }
+            )
+        )
+
+        return response
+
+    def _is_diagnostics_command(self, command):
+        normalized = command.lower()
+
+        return (
+            "diagnostic" in normalized
+            or "system status" in normalized
+            or "status report" in normalized
+        )
 
     def execute(self, action):
         if not self.policy.allows(action):

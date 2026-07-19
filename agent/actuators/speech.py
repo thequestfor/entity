@@ -1,3 +1,6 @@
+from agent.audio.activity import speaking
+
+
 class SpeechActuator:
     action_type = "speak"
 
@@ -10,19 +13,20 @@ class SpeechActuator:
         text = action.payload.get("text", "")
         stream = action.payload.get("stream")
 
-        if stream is not None:
-            full_response = ""
+        with speaking():
+            if stream is not None:
+                full_response = ""
 
-            for token in stream:
-                full_response += token
-                speech.stream_text(token)
+                for token in stream:
+                    full_response += token
+                    speech.stream_text(token)
 
-            speech.flush()
-            speech.wait()
+                speech.flush()
+                speech.wait()
 
-            return full_response
+                return full_response
 
-        if text:
-            speech.say(text)
+            if text:
+                speech.say(text)
 
         return text

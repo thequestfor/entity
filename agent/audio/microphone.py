@@ -12,6 +12,7 @@ import torch
 from faster_whisper import WhisperModel
 from openwakeword.model import Model
 
+from agent.audio.activity import is_speaking
 from vad import speech_event, reset_vad
 
 
@@ -32,12 +33,11 @@ class Microphone:
 
         self.wake_event = threading.Event()
 
-        self.state = "wake"
+        self.state = "idle"
+        self.wake_cooldown_until = 0
 
         print("Loading Wake Word...")
-        self.wake_model = Model(
-            inference_framework="onnx"
-        )
+        self.wake_model = self._new_wake_model()
 
         self.whisper = None
 
@@ -79,6 +79,9 @@ class Microphone:
         status
     ):
 
+        if is_speaking() or time.time() < self.wake_cooldown_until:
+            return
+
         audio = np.squeeze(indata.copy())
 
 
@@ -100,6 +103,7 @@ class Microphone:
                 print("Wake:", name)
 
                 self.state = "command"
+                self.wake_cooldown_until = time.time() + 1.5
 
                 self.wake_event.set()
 
@@ -110,27 +114,35 @@ class Microphone:
 
         print("Waiting for wake word...")
 
+        while is_speaking():
+            time.sleep(0.05)
+
+        self.wake_event.clear()
+        self.preroll.clear()
+        self._clear_audio()
+
         self.state = "wake"
 
         self.wake_event.wait()
 
         self.wake_event.clear()
+        self.state = "command"
+        self._reset_wake_model()
 
         reset_vad()
 
         self.preroll.clear()
 
-        while True:
-            try:
-                self.live_audio.get_nowait()
-            except Empty:
-                break
+        self._clear_audio()
         time.sleep(0.2)
 
 
     def listen(self):
 
         print("Listening...")
+
+        if is_speaking():
+            return ""
 
         speaking = False
 
@@ -167,7 +179,7 @@ class Microphone:
 
                 audio_chunks.append(chunk)
 
-        self.state = "wake"
+        self.state = "idle"
 
         if not audio_chunks:
             return ""
@@ -221,3 +233,18 @@ class Microphone:
     def stop(self):
 
         self.running = False
+
+    def _clear_audio(self):
+        while True:
+            try:
+                self.live_audio.get_nowait()
+            except Empty:
+                break
+
+    def _new_wake_model(self):
+        return Model(
+            inference_framework="onnx"
+        )
+
+    def _reset_wake_model(self):
+        self.wake_model = self._new_wake_model()

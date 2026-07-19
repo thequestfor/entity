@@ -1,3 +1,4 @@
+import importlib.util
 import os
 
 from agent.models.base import ModelProvider, ModelUnavailable
@@ -17,7 +18,11 @@ class CloudOpenAIProvider(ModelProvider):
         )
 
     def available(self):
-        return self.enabled and bool(os.getenv("OPENAI_API_KEY"))
+        return (
+            self.enabled
+            and bool(os.getenv("OPENAI_API_KEY"))
+            and importlib.util.find_spec("openai") is not None
+        )
 
     def generate(self, prompt, temperature=0):
         if not self.available():

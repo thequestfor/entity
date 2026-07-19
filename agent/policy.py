@@ -1,6 +1,7 @@
 class Policy:
     def __init__(self):
         self.auto_allowed_actions = {
+            "diagnostics",
             "speak",
             "record_memory"
         }
