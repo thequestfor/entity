@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.idea/
+.venv/
+.venv311/
+*.wav
+engines/
+agent/core.py
+agent/memory.json
+agent/entity_memory.db
+agent/entity_memory.db-*

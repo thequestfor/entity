@@ -1,0 +1,13 @@
+faster-whisper
+kokoro
+langgraph
+numpy
+onnxruntime
+openai
+openwakeword
+python-dotenv
+scipy
+silero-vad
+sounddevice
+soundfile
+torch
