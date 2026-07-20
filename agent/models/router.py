@@ -1,4 +1,5 @@
 import json
+import re
 
 from agent.models.base import ModelUnavailable
 from agent.models.cloud_openai import CloudOpenAIProvider
@@ -6,10 +7,53 @@ from agent.models.local_stub import LocalStubProvider
 from agent.models.ollama import OllamaProvider
 
 
+COMPLEXITY_PATTERNS = [
+    r"\bcalculate\b",
+    r"\bsolve\b",
+    r"\bcompare\b",
+    r"\bplan\b",
+    r"\bcoordinate\b",
+    r"\bschedule\b",
+    r"\bcalendar\b",
+    r"\bevery week\b",
+    r"\brecurring\b",
+    r"\bwhy\b",
+    r"\bhow should\b",
+    r"\bwhat should\b",
+    r"\bdiagnose\b",
+    r"\bdebug\b",
+    r"\banalyze\b",
+    r"\bthink\b",
+    r"\breason\b",
+    r"\bif\b.*\bthen\b",
+    r"\d+\s*[-+*/]\s*\d+",
+    r"\d+\s+(times|multiplied by|divided by|plus|minus)\s+\d+"
+]
+
+
 class ModelRouter:
     def __init__(self, providers=None):
-        self.providers = providers or [
-            OllamaProvider(),
+        if providers is not None:
+            self.providers = providers
+            return
+
+        reasoning_model = self._reasoning_model()
+        local_enabled = (
+            OllamaProvider().enabled
+        )
+
+        self.providers = [
+            OllamaProvider(
+                name="local_fast",
+                model_env="ENTITY_LOCAL_LLM_MODEL",
+                think=False
+            ),
+            OllamaProvider(
+                name="local_thinking",
+                model=reasoning_model,
+                think=True,
+                enabled=local_enabled
+            ),
             CloudOpenAIProvider(),
             LocalStubProvider()
         ]
@@ -21,30 +65,41 @@ class ModelRouter:
 
         return None
 
-    def generate(self, prompt, temperature=0):
-        provider = self.provider()
+    def generate(self, prompt, temperature=0, user_input=None, on_escalation=None):
+        errors = []
 
-        if provider is None:
-            raise ModelUnavailable(
-                "No configured model provider is available."
-            )
+        for provider in self._providers_for(user_input, on_escalation):
+            try:
+                return provider.generate(
+                    prompt,
+                    temperature=temperature
+                )
+            except ModelUnavailable as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
 
-        return provider.generate(
-            prompt,
-            temperature=temperature
+        raise ModelUnavailable(
+            "No configured model provider is available. "
+            + " ".join(errors)
         )
 
-    def stream(self, prompt, temperature=0):
-        provider = self.provider()
+    def stream(self, prompt, temperature=0, user_input=None, on_escalation=None):
+        errors = []
 
-        if provider is None:
-            raise ModelUnavailable(
-                "No configured model provider is available."
-            )
+        for provider in self._providers_for(user_input, on_escalation):
+            try:
+                yield from provider.stream(
+                    prompt,
+                    temperature=temperature
+                )
+                return
+            except ModelUnavailable as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
 
-        yield from provider.stream(
-            prompt,
-            temperature=temperature
+        raise ModelUnavailable(
+            "No configured model provider is available. "
+            + " ".join(errors)
         )
 
     def provider_name(self):
@@ -55,13 +110,90 @@ class ModelRouter:
 
         return provider.name
 
-    def generate_json(self, prompt, temperature=0):
+    def generate_json(self, prompt, temperature=0, user_input=None):
         text = self.generate(
             prompt,
-            temperature=temperature
+            temperature=temperature,
+            user_input=user_input
         )
 
         return self._parse_json(text)
+
+    def should_escalate(self, user_input):
+        if not user_input:
+            return False
+
+        normalized = user_input.lower()
+
+        return any(
+            re.search(pattern, normalized)
+            for pattern in COMPLEXITY_PATTERNS
+        )
+
+    def _providers_for(self, user_input, on_escalation):
+        if self.should_escalate(user_input):
+            return self._available_sequence(
+                preferred=["local_thinking", "cloud_openai", "local_fast"],
+                on_escalation=on_escalation,
+                reason="This request needs calculation, planning, or coordination."
+            )
+
+        return self._available_sequence(
+            preferred=["local_fast", "local_thinking", "cloud_openai"],
+            on_escalation=on_escalation,
+            reason="The fast local model is unavailable."
+        )
+
+    def _available_sequence(self, preferred, on_escalation, reason):
+        providers = {
+            provider.name: provider
+            for provider in self.providers
+        }
+
+        for index, name in enumerate(preferred):
+            provider = providers.get(name)
+
+            if provider is None or not provider.available():
+                continue
+
+            if index > 0 or name in {"local_thinking", "cloud_openai"}:
+                self._notify_escalation(provider, on_escalation, reason)
+
+            yield provider
+
+    def _notify_escalation(self, provider, on_escalation, reason):
+        if on_escalation is None:
+            return
+
+        if provider.name == "local_thinking":
+            message = (
+                "Escalating to the local thinking model. "
+                f"{reason}"
+            )
+        elif provider.name == "cloud_openai":
+            message = (
+                "Escalating to cloud AI. "
+                f"{reason}"
+            )
+        else:
+            message = (
+                f"Using {provider.name}. {reason}"
+            )
+
+        on_escalation(message)
+
+    def _reasoning_model(self):
+        model = self._env("ENTITY_LOCAL_REASONING_LLM_MODEL")
+
+        if model:
+            return model
+
+        return self._env("ENTITY_LOCAL_LLM_MODEL")
+
+    def _env(self, name):
+        import os
+
+        return os.getenv(name)
 
     def _parse_json(self, text):
         text = text.strip()

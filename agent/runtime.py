@@ -2,11 +2,18 @@ import re
 import time
 from datetime import datetime, timedelta
 
-from agent.actuators import DiagnosticsActuator, NotifyActuator, SpeechActuator
+from agent.actuators import (
+    CalendarActuator,
+    DiagnosticsActuator,
+    NotifyActuator,
+    SpeechActuator
+)
 from agent.attention import ImportancePolicy
 from agent.awareness import AwarenessLoop
+from agent.calendar import CalendarCommandParser
 from agent.event_bus import EventBus
 from agent.events import Action
+from agent.math_tools import ArithmeticHandler
 from agent.observers import AudioObserver, NtfyObserver, SchedulerObserver
 from agent.policy import Policy
 
@@ -19,6 +26,8 @@ class EntityRuntime:
         audio_observer=None,
         scheduler_observer=None,
         importance_policy=None,
+        calendar_parser=None,
+        arithmetic_handler=None,
         observers=None,
         actuators=None,
         policy=None
@@ -33,12 +42,15 @@ class EntityRuntime:
         )
         self.task_store = self.scheduler_observer.store
         self.importance_policy = importance_policy or ImportancePolicy()
+        self.calendar_parser = calendar_parser or CalendarCommandParser()
+        self.arithmetic_handler = arithmetic_handler or ArithmeticHandler()
         self.observers = observers or [
             self.scheduler_observer,
             NtfyObserver(),
             audio_observer or AudioObserver()
         ]
         self.actuators = actuators or [
+            CalendarActuator(),
             DiagnosticsActuator(),
             NotifyActuator(),
             SpeechActuator()
@@ -136,7 +148,8 @@ class EntityRuntime:
 
         response_stream = self.brain.respond_stream(
             command,
-            self.awareness.snapshot()
+            self.awareness.snapshot(),
+            on_escalation=lambda message: self._reply(message, channel)
         )
 
         if channel == "remote":
@@ -296,6 +309,16 @@ class EntityRuntime:
         if voice_response:
             return voice_response
 
+        math_response = self.arithmetic_handler.answer(command)
+
+        if math_response:
+            return math_response
+
+        calendar_response = self._handle_calendar_command(command)
+
+        if calendar_response:
+            return calendar_response
+
         reminder = self._parse_reminder(command)
 
         if not reminder:
@@ -320,6 +343,25 @@ class EntityRuntime:
         response = f"Reminder set: {message}."
 
         return response
+
+    def _handle_calendar_command(self, command):
+        if not self.calendar_parser.looks_like_calendar_command(command):
+            return None
+
+        draft = self.calendar_parser.parse(command)
+
+        if draft is None:
+            return None
+
+        return self.execute(
+            Action(
+                type="calendar",
+                payload={
+                    "operation": "create_event",
+                    "draft": draft
+                }
+            )
+        )
 
     def _parse_reminder(self, command):
         relative = self._parse_relative_reminder(command)

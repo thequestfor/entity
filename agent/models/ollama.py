@@ -9,20 +9,22 @@ from agent.models.base import ModelProvider, ModelUnavailable
 class OllamaProvider(ModelProvider):
     name = "ollama"
 
-    def __init__(self):
+    def __init__(
+        self,
+        name="ollama",
+        model=None,
+        model_env="ENTITY_LOCAL_LLM_MODEL",
+        think=None,
+        enabled=None
+    ):
+        self.name = name
         self.url = os.getenv(
             "ENTITY_LOCAL_LLM_URL",
             "http://localhost:11434"
         ).rstrip("/")
-        self.model = os.getenv("ENTITY_LOCAL_LLM_MODEL")
-        self.enabled = (
-            os.getenv("ENTITY_LOCAL_LLM_PROVIDER", "").lower()
-            == "ollama"
-        )
-        self.think = self._env_bool(
-            "ENTITY_LOCAL_LLM_THINK",
-            default=False
-        )
+        self.model = model or os.getenv(model_env)
+        self.enabled = self._provider_enabled(enabled)
+        self.think = self._configured_think(think)
 
     def available(self):
         if not self.enabled or not self.model:
@@ -118,3 +120,21 @@ class OllamaProvider(ModelProvider):
             "yes",
             "on"
         }
+
+    def _provider_enabled(self, enabled):
+        if enabled is not None:
+            return enabled
+
+        return (
+            os.getenv("ENTITY_LOCAL_LLM_PROVIDER", "").lower()
+            == "ollama"
+        )
+
+    def _configured_think(self, think):
+        if think is not None:
+            return think
+
+        return self._env_bool(
+            "ENTITY_LOCAL_LLM_THINK",
+            default=False
+        )

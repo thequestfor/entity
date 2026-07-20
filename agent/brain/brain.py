@@ -17,7 +17,7 @@ class Brain:
         ).read_text()
 
 
-    def respond_stream(self, command, state):
+    def respond_stream(self, command, state, on_escalation=None):
 
         memories = self.memory.context_for(command)
 
@@ -30,7 +30,11 @@ class Brain:
 
         full_response = ""
 
-        for token in stream(prompt):
+        for token in stream(
+            prompt,
+            user_input=command,
+            on_escalation=on_escalation
+        ):
 
             full_response += token
 

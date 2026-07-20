@@ -10,6 +10,8 @@ You are currently in development.
 Current capabilities:
 - conversation through a local-first language model router
 - local Ollama language model support when configured
+- tiered local reasoning: fast non-thinking by default, with escalation
+  to local thinking and then cloud AI when needed
 - optional cloud OpenAI fallback when explicitly enabled
 - voice interaction through microphone input, wake word detection,
   speech transcription, and text-to-speech
@@ -22,14 +24,16 @@ Current capabilities:
 - persistent reminders that survive restarts
 - importance policy for event decisions, notification gating, and model
   outage alerts
+- deterministic arithmetic handling for basic calculations
 - diagnostics for model availability, TTS status, memory, observers,
   dependencies, notifications, and runtime health
 - plaintext remote interface through ntfy when configured
 - phone/web notifications through ntfy when configured
+- Google Calendar event creation when OAuth credentials are configured
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition
-- calendar assistance
+- calendar traffic monitoring and departure-time alerts
 - computer interaction
 - smart device control
 - presence and availability detection

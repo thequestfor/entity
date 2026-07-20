@@ -24,6 +24,7 @@ class DiagnosticsActuator:
         lines.extend(self._model_status())
         lines.extend(self._tts_status())
         lines.extend(self._notification_status())
+        lines.extend(self._calendar_status())
         lines.extend(self._memory_status())
         lines.extend(self._importance_status(runtime))
         lines.extend(self._runtime_status(runtime))
@@ -32,25 +33,40 @@ class DiagnosticsActuator:
         return " ".join(lines)
 
     def _model_status(self):
-        local = OllamaProvider()
+        local = OllamaProvider(name="local_fast", think=False)
+        local_thinking = OllamaProvider(
+            name="local_thinking",
+            model=os.getenv(
+                "ENTITY_LOCAL_REASONING_LLM_MODEL",
+                os.getenv("ENTITY_LOCAL_LLM_MODEL")
+            ),
+            think=True,
+            enabled=local.enabled
+        )
         cloud = CloudOpenAIProvider()
         lines = []
 
         if local.available():
             lines.append(
-                f"Local language model online: {local.model}."
+                f"Fast local language model online: {local.model}."
             )
-            if local.think:
-                lines.append("Local model thinking enabled.")
-            else:
-                lines.append("Local model thinking disabled.")
+            lines.append("Fast local model thinking disabled.")
         elif local.enabled:
             lines.append(
-                "Local language model configured but unavailable."
+                "Fast local language model configured but unavailable."
             )
         else:
             lines.append(
                 "Local language model not configured."
+            )
+
+        if local_thinking.available():
+            lines.append(
+                f"Local thinking model online: {local_thinking.model}."
+            )
+        elif local.enabled:
+            lines.append(
+                "Local thinking model configured but unavailable."
             )
 
         if cloud.available():
@@ -76,9 +92,11 @@ class DiagnosticsActuator:
             )
 
         if local.available():
-            lines.append("Using local AI.")
+            lines.append("Default route: fast local AI.")
+        elif local_thinking.available():
+            lines.append("Default route: local thinking AI.")
         elif cloud.available():
-            lines.append("Using cloud AI.")
+            lines.append("Default route: cloud AI.")
         else:
             lines.append("No language model is currently available.")
 
@@ -129,6 +147,18 @@ class DiagnosticsActuator:
             lines.append("Inbound plaintext topic missing.")
 
         return lines
+
+    def _calendar_status(self):
+        try:
+            from agent.calendar import GoogleCalendarClient
+
+            return [
+                GoogleCalendarClient().setup_status()
+            ]
+        except Exception as exc:
+            return [
+                f"Google Calendar status unavailable: {exc}."
+            ]
 
     def _memory_status(self):
         try:
@@ -206,6 +236,8 @@ class DiagnosticsActuator:
             "Audio input": "sounddevice",
             "Audio files": "soundfile",
             "TTS": "kokoro",
+            "Google Calendar API": "googleapiclient",
+            "Google OAuth": "google_auth_oauthlib",
             "OpenAI client": "openai"
         }
         missing = [
