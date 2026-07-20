@@ -2,6 +2,7 @@ import tempfile
 
 import soundfile as sf
 
+from agent.utils.text import sanitize_tts
 from kokoro import KPipeline
 from tts.playback import play_wav
 
@@ -15,6 +16,10 @@ VOICE = "af_heart"
 
 
 def speak(text):
+    text = sanitize_tts(text)
+
+    if not text:
+        return
 
     audio_chunks = []
 

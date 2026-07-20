@@ -1,6 +1,11 @@
 import re
 
 
+PRONUNCIATION_OVERRIDES = {
+    "sir": "surr"
+}
+
+
 def sanitize_tts(text: str) -> str:
     if not text:
         return ""
@@ -23,7 +28,21 @@ def sanitize_tts(text: str) -> str:
     # Collapse whitespace
     text = re.sub(r"\s+", " ", text)
 
+    text = apply_pronunciation_overrides(text)
+
     return text.strip()
+
+
+def apply_pronunciation_overrides(text: str) -> str:
+    for word, spoken in PRONUNCIATION_OVERRIDES.items():
+        text = re.sub(
+            rf"\b{re.escape(word)}\b",
+            spoken,
+            text,
+            flags=re.IGNORECASE
+        )
+
+    return text
 
 
 def chunk_tts(text: str, max_length: int = 180) -> list[str]:
