@@ -27,9 +27,11 @@ class DiagnosticsActuator:
         lines.extend(self._calendar_status())
         lines.extend(self._route_status())
         lines.extend(self._research_status())
+        lines.extend(self._research_memory_status(runtime))
         lines.extend(self._startup_health_status(runtime))
         lines.extend(self._presence_status(runtime))
         lines.extend(self._learning_status(runtime))
+        lines.extend(self._behavior_feedback_status(runtime))
         lines.extend(self._memory_status())
         lines.extend(self._importance_status(runtime))
         lines.extend(self._runtime_status(runtime))
@@ -189,6 +191,16 @@ class DiagnosticsActuator:
                 f"Internet research status unavailable: {exc}."
             ]
 
+    def _research_memory_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "research_memory_ingestor"):
+            return [
+                "Sourced research memory ingestion status unavailable."
+            ]
+
+        return [
+            runtime.research_memory_ingestor.setup_status()
+        ]
+
     def _startup_health_status(self, runtime):
         if runtime is None or not hasattr(runtime, "startup_health"):
             return [
@@ -227,6 +239,16 @@ class DiagnosticsActuator:
             "Autonomous learning loop online."
         ]
 
+    def _behavior_feedback_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "behavior_feedback_policy"):
+            return [
+                "Behavior feedback learning status unavailable."
+            ]
+
+        return [
+            runtime.behavior_feedback_policy.setup_status()
+        ]
+
     def _memory_status(self):
         try:
             from agent.memory.store import MemoryStore
@@ -238,11 +260,15 @@ class DiagnosticsActuator:
 
             pending = len(store.pending_tasks())
             geocodes = store.count_geocodes()
+            research_memories = store.count_memories(source="research")
+            behavior_rules = store.count_memories(kind="behavior_rule")
 
             return [
                 "Memory database online.",
                 f"Pending tasks: {pending}.",
-                f"Geocode cache entries: {geocodes}."
+                f"Geocode cache entries: {geocodes}.",
+                f"Sourced research memories: {research_memories}.",
+                f"Behavior rules: {behavior_rules}."
             ]
         except Exception as exc:
             return [

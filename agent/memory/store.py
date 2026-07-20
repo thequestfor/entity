@@ -301,6 +301,27 @@ class MemoryStore:
 
         return row["count"]
 
+    def count_memories(self, kind=None, source=None):
+        query = "SELECT COUNT(*) AS count FROM memories"
+        clauses = []
+        params = []
+
+        if kind:
+            clauses.append("kind = ?")
+            params.append(kind)
+
+        if source:
+            clauses.append("source = ?")
+            params.append(source)
+
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+
+        return row["count"]
+
     def get_state(self, key, default=None):
         with self._connect() as conn:
             row = conn.execute(

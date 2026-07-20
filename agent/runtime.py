@@ -10,12 +10,14 @@ from agent.actuators import (
 )
 from agent.attention import ImportancePolicy
 from agent.awareness import AwarenessLoop
+from agent.behavior import BehaviorFeedbackPolicy
 from agent.briefing import TodayBriefing
 from agent.calendar import CalendarIntentExtractor
 from agent.event_bus import EventBus
 from agent.events import Action
 from agent.health import StartupHealthCheck
 from agent.learning import LearningPolicy
+from agent.memory.research import ResearchMemoryIngestor
 from agent.math_tools import ArithmeticHandler
 from agent.observers import (
     AudioObserver,
@@ -47,6 +49,8 @@ class EntityRuntime:
         presence=None,
         learning_policy=None,
         research_tool=None,
+        research_memory_ingestor=None,
+        behavior_feedback_policy=None,
         observers=None,
         actuators=None,
         policy=None
@@ -70,18 +74,33 @@ class EntityRuntime:
         self.presence = presence or PresenceState()
         self.learning_policy = learning_policy or LearningPolicy()
         self.research_tool = research_tool or ResearchTool()
-        self.observers = observers or [
-            self.scheduler_observer,
-            CalendarObserver(),
-            NtfyObserver(),
-            audio_observer or AudioObserver()
-        ]
-        self.actuators = actuators or [
-            CalendarActuator(),
-            DiagnosticsActuator(),
-            NotifyActuator(),
-            SpeechActuator()
-        ]
+        self.research_memory_ingestor = (
+            research_memory_ingestor or ResearchMemoryIngestor()
+        )
+        self.behavior_feedback_policy = (
+            behavior_feedback_policy or BehaviorFeedbackPolicy()
+        )
+        self.last_research_result = None
+        self.recent_actions = []
+        self.recent_responses = []
+        if observers is None:
+            observers = [
+                self.scheduler_observer,
+                CalendarObserver(),
+                NtfyObserver(),
+                audio_observer or AudioObserver()
+            ]
+
+        if actuators is None:
+            actuators = [
+                CalendarActuator(),
+                DiagnosticsActuator(),
+                NotifyActuator(),
+                SpeechActuator()
+            ]
+
+        self.observers = observers
+        self.actuators = actuators
         self.policy = policy or Policy()
 
     def run(self):
@@ -178,6 +197,7 @@ class EntityRuntime:
 
         if runtime_response:
             self.awareness.record_response(runtime_response)
+            self._record_response(runtime_response, source=channel)
             self._reply(runtime_response, channel)
             print(runtime_response)
             return runtime_response
@@ -202,6 +222,7 @@ class EntityRuntime:
             response = self.execute(action)
 
         self.awareness.record_response(response)
+        self._record_response(response, source=channel)
 
         print(response)
 
@@ -394,6 +415,14 @@ class EntityRuntime:
         if presence_response:
             return presence_response
 
+        feedback_response = self._handle_behavior_feedback_command(
+            command,
+            source=source
+        )
+
+        if feedback_response:
+            return feedback_response
+
         math_response = self.arithmetic_handler.answer(command)
 
         if math_response:
@@ -403,6 +432,14 @@ class EntityRuntime:
 
         if briefing_response:
             return briefing_response
+
+        research_memory_response = self._handle_research_memory_command(
+            command,
+            source=source
+        )
+
+        if research_memory_response:
+            return research_memory_response
 
         research_response = self._handle_research_command(command)
 
@@ -487,7 +524,81 @@ class EntityRuntime:
         except Exception as exc:
             return f"Internet research failed: {exc}"
 
+        self.last_research_result = result
+
         return result.format_response()
+
+    def _handle_research_memory_command(self, command, source="user"):
+        normalized = command.lower().strip()
+
+        if normalized in {
+            "remember what you found",
+            "remember that research",
+            "save that research",
+            "store that research"
+        }:
+            if not self.last_research_result:
+                return "I do not have a recent research result to remember."
+
+            return self._ingest_research_result(
+                self.last_research_result,
+                requested_by=source
+            )
+
+        query = self._research_and_remember_query(command)
+
+        if not query:
+            return None
+
+        try:
+            result = self.research_tool.search(query)
+        except Exception as exc:
+            return f"Internet research failed: {exc}"
+
+        self.last_research_result = result
+        response = result.format_response()
+        memory_response = self._ingest_research_result(
+            result,
+            requested_by=source
+        )
+
+        return f"{response} {memory_response}"
+
+    def _ingest_research_result(self, result, requested_by="user"):
+        try:
+            stored_ids = self.research_memory_ingestor.ingest(
+                result,
+                requested_by=requested_by
+            )
+        except Exception as exc:
+            return f"Research memory ingestion failed: {exc}"
+
+        if not stored_ids:
+            return "No new sourced memories were stored from that research."
+
+        count = len(stored_ids)
+        noun = "memory" if count == 1 else "memories"
+
+        return f"Stored {count} sourced research {noun}."
+
+    def _research_and_remember_query(self, command):
+        patterns = [
+            r"^\s*research and remember\s+(.+)$",
+            r"^\s*look up and remember\s+(.+)$",
+            r"^\s*search and remember\s+(.+)$",
+            r"^\s*find and remember\s+(.+)$",
+            r"^\s*research\s+(.+?)\s+and remember(?: it| this)?\s*$",
+            r"^\s*look up\s+(.+?)\s+and remember(?: it| this)?\s*$",
+            r"^\s*search(?: the internet| online| web)? for\s+(.+?)\s+and remember(?: it| this)?\s*$"
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, command, re.IGNORECASE)
+
+            if match:
+                return match.group(1).strip()
+
+        return ""
 
     def _research_query(self, command):
         patterns = [
@@ -559,6 +670,14 @@ class EntityRuntime:
                 return response
 
         return None
+
+    def _handle_behavior_feedback_command(self, command, source="user"):
+        return self.behavior_feedback_policy.handle_feedback(
+            command,
+            recent_actions=self.recent_actions,
+            recent_responses=self.recent_responses,
+            source=source
+        )
 
     def _handle_calendar_command(self, command, channel="voice"):
         draft = self.calendar_extractor.extract(
@@ -813,6 +932,7 @@ class EntityRuntime:
         for actuator in self.actuators:
             if actuator.can_handle(action):
                 result = actuator.execute(action)
+                self._record_action(action, result)
                 self._learn_from_action(action)
                 return result
 
@@ -822,6 +942,28 @@ class EntityRuntime:
         )
 
         return None
+
+    def _record_action(self, action, result):
+        self.recent_actions.append(
+            {
+                "id": action.id,
+                "type": action.type,
+                "payload": action.payload,
+                "result": result,
+                "created_at": action.created_at
+            }
+        )
+        self.recent_actions = self.recent_actions[-10:]
+
+    def _record_response(self, response, source="voice"):
+        self.recent_responses.append(
+            {
+                "source": source,
+                "text": response,
+                "created_at": time.time()
+            }
+        )
+        self.recent_responses = self.recent_responses[-10:]
 
     def _learn_from_action(self, action):
         try:
