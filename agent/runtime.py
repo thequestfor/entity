@@ -23,6 +23,7 @@ from agent.observers import (
     SchedulerObserver
 )
 from agent.policy import Policy
+from agent.presence import PresenceState
 from agent.reminders import ReminderIntentExtractor
 from agent.routes import RoutePlanner
 
@@ -41,6 +42,7 @@ class EntityRuntime:
         route_planner=None,
         startup_health=None,
         today_briefing=None,
+        presence=None,
         observers=None,
         actuators=None,
         policy=None
@@ -61,6 +63,7 @@ class EntityRuntime:
         self.route_planner = route_planner or RoutePlanner()
         self.startup_health = startup_health or StartupHealthCheck()
         self.today_briefing = today_briefing or TodayBriefing()
+        self.presence = presence or PresenceState()
         self.observers = observers or [
             self.scheduler_observer,
             CalendarObserver(),
@@ -154,6 +157,11 @@ class EntityRuntime:
         else:
             print("Heard:", command)
 
+        self.presence.update(
+            interaction_channel=channel,
+            seen=(channel == "voice")
+        )
+
         self.awareness.record_input(command)
 
         runtime_response = self._handle_runtime_command(
@@ -203,26 +211,12 @@ class EntityRuntime:
             awareness_state=self.awareness.snapshot()
         )
 
-        self.execute(
-            Action(
-                type="speak",
-                payload={
-                    "text": message
-                }
-            )
+        self._deliver_alert(
+            message,
+            title="Entity reminder",
+            priority="high",
+            force_notify=decision.should_notify
         )
-
-        if decision.should_notify:
-            self.execute(
-                Action(
-                    type="notify",
-                    payload={
-                        "title": "Entity reminder",
-                        "text": message,
-                        "priority": "high"
-                    }
-                )
-            )
 
         return message
 
@@ -241,23 +235,10 @@ class EntityRuntime:
         if not message:
             return None
 
-        self.execute(
-            Action(
-                type="speak",
-                payload={
-                    "text": message
-                }
-            )
-        )
-        self.execute(
-            Action(
-                type="notify",
-                payload={
-                    "title": "Entity departure alert",
-                    "text": message,
-                    "priority": "high"
-                }
-            )
+        self._deliver_alert(
+            message,
+            title="Entity departure alert",
+            priority="high"
         )
 
         return message
@@ -269,15 +250,10 @@ class EntityRuntime:
         )
 
         if decision.should_notify:
-            return self.execute(
-                Action(
-                    type="notify",
-                    payload={
-                        "title": "Entity alert",
-                        "text": event.message,
-                        "priority": "high"
-                    }
-                )
+            return self._deliver_alert(
+                event.message,
+                title="Entity alert",
+                priority="high"
             )
 
         if decision.decision in {"act", "ask"}:
@@ -299,23 +275,11 @@ class EntityRuntime:
             return None
 
         message = decision.reason
-        self.execute(
-            Action(
-                type="speak",
-                payload={
-                    "text": message
-                }
-            )
-        )
-        self.execute(
-            Action(
-                type="notify",
-                payload={
-                    "title": "Entity system alert",
-                    "text": message,
-                    "priority": "urgent"
-                }
-            )
+        self._deliver_alert(
+            message,
+            title="Entity system alert",
+            priority="urgent",
+            force_notify=True
         )
 
         return message
@@ -350,6 +314,48 @@ class EntityRuntime:
             )
         )
 
+    def _deliver_alert(
+        self,
+        text,
+        title="Entity alert",
+        priority="high",
+        force_notify=False
+    ):
+        if not text:
+            return None
+
+        delivered = None
+        should_speak = self.presence.should_speak()
+        should_notify = (
+            force_notify
+            or self.presence.should_notify()
+            or not should_speak
+        )
+
+        if should_speak:
+            delivered = self.execute(
+                Action(
+                    type="speak",
+                    payload={
+                        "text": text
+                    }
+                )
+            )
+
+        if should_notify:
+            delivered = self.execute(
+                Action(
+                    type="notify",
+                    payload={
+                        "title": title,
+                        "text": text,
+                        "priority": priority
+                    }
+                )
+            )
+
+        return delivered or text
+
     def _handle_runtime_command(self, command, source="voice"):
         if self._is_diagnostics_command(command):
             return self.execute(
@@ -365,6 +371,11 @@ class EntityRuntime:
 
         if voice_response:
             return voice_response
+
+        presence_response = self._handle_presence_command(command)
+
+        if presence_response:
+            return presence_response
 
         math_response = self.arithmetic_handler.answer(command)
 
@@ -419,23 +430,11 @@ class EntityRuntime:
         if not message:
             return None
 
-        self.execute(
-            Action(
-                type="speak",
-                payload={
-                    "text": message
-                }
-            )
-        )
-        self.execute(
-            Action(
-                type="notify",
-                payload={
-                    "title": "Entity startup diagnostic",
-                    "text": message,
-                    "priority": "urgent"
-                }
-            )
+        self._deliver_alert(
+            message,
+            title="Entity startup diagnostic",
+            priority="urgent",
+            force_notify=True
         )
 
         return message
@@ -454,6 +453,61 @@ class EntityRuntime:
             return None
 
         return self.today_briefing.build()
+
+    def _handle_presence_command(self, command):
+        normalized = command.lower().strip()
+
+        updates = [
+            (
+                ("i'm home", "i am home", "i'm back", "i am back"),
+                {"location": "home", "availability": "available"},
+                "Presence updated: home and available."
+            ),
+            (
+                ("i'm leaving", "i am leaving", "i'm away", "i am away"),
+                {"location": "away"},
+                "Presence updated: away."
+            ),
+            (
+                ("i'm going to sleep", "i am going to sleep", "i'm asleep"),
+                {"availability": "sleeping"},
+                "Presence updated: sleeping."
+            ),
+            (
+                ("i'm awake", "i am awake"),
+                {"availability": "available"},
+                "Presence updated: available."
+            ),
+            (
+                ("don't disturb me", "do not disturb", "dnd"),
+                {"availability": "do_not_disturb"},
+                "Presence updated: do not disturb."
+            ),
+            (
+                ("i'm busy", "i am busy"),
+                {"availability": "busy"},
+                "Presence updated: busy."
+            ),
+            (
+                ("i'm available", "i am available"),
+                {"availability": "available"},
+                "Presence updated: available."
+            )
+        ]
+
+        if (
+            "presence status" in normalized
+            or "where am i" in normalized
+            or "am i available" in normalized
+        ):
+            return self.presence.status_text()
+
+        for phrases, payload, response in updates:
+            if any(phrase in normalized for phrase in phrases):
+                self.presence.update(**payload)
+                return response
+
+        return None
 
     def _handle_calendar_command(self, command, channel="voice"):
         draft = self.calendar_extractor.extract(

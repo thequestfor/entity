@@ -38,6 +38,8 @@ Current capabilities:
 - Today Briefing summaries using calendar, reminders, and departure advice
 - startup diagnostic alerts for configured services that are offline or
   missing API credentials
+- persistent presence and availability state for choosing whether to speak,
+  notify, or wait
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition

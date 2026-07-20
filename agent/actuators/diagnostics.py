@@ -27,6 +27,7 @@ class DiagnosticsActuator:
         lines.extend(self._calendar_status())
         lines.extend(self._route_status())
         lines.extend(self._startup_health_status(runtime))
+        lines.extend(self._presence_status(runtime))
         lines.extend(self._memory_status())
         lines.extend(self._importance_status(runtime))
         lines.extend(self._runtime_status(runtime))
@@ -190,6 +191,16 @@ class DiagnosticsActuator:
         return [
             "Startup health issues: "
             + " ".join(issues)
+        ]
+
+    def _presence_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "presence"):
+            return [
+                "Presence status unavailable."
+            ]
+
+        return [
+            runtime.presence.status_text()
         ]
 
     def _memory_status(self):

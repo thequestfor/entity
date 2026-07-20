@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS geocodes (
 CREATE INDEX IF NOT EXISTS idx_geocodes_provider
 ON geocodes(provider);
 
+CREATE TABLE IF NOT EXISTS state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_text TEXT NOT NULL,

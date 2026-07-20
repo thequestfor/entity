@@ -301,6 +301,44 @@ class MemoryStore:
 
         return row["count"]
 
+    def get_state(self, key, default=None):
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT value
+                FROM state
+                WHERE key = ?
+                """,
+                (key,)
+            ).fetchone()
+
+        if not row:
+            return default
+
+        return json.loads(row["value"])
+
+    def set_state(self, key, value):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO state (
+                    key,
+                    value,
+                    updated_at
+                )
+                VALUES (?, ?, ?)
+                ON CONFLICT(key)
+                DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    key,
+                    json.dumps(value),
+                    utc_now()
+                )
+            )
+
     def _geocode_key(self, query):
         return " ".join(query.lower().strip().split())
 
