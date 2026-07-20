@@ -2,6 +2,10 @@ from agent.calendar import GoogleCalendarClient
 
 
 def main():
+    from dotenv import load_dotenv
+
+    load_dotenv()
+
     client = GoogleCalendarClient()
 
     if not client.enabled:
