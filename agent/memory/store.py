@@ -129,6 +129,131 @@ class MemoryStore:
                 )
             )
 
+    def add_planner_decision(
+        self,
+        input_text,
+        channel,
+        intent,
+        confidence=0,
+        tools=None,
+        reason="",
+        confirmation_required=False,
+        outcome="planned",
+        response="",
+        metadata=None,
+        decision_id=None
+    ):
+        decision_id = decision_id or str(uuid4())
+        now = utc_now()
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO planner_decisions (
+                    id,
+                    input_text,
+                    channel,
+                    intent,
+                    confidence,
+                    tools,
+                    reason,
+                    confirmation_required,
+                    outcome,
+                    response,
+                    metadata,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    decision_id,
+                    input_text,
+                    channel,
+                    intent,
+                    float(confidence or 0),
+                    self._json(tools or []),
+                    reason,
+                    1 if confirmation_required else 0,
+                    outcome,
+                    response,
+                    self._json(metadata or {}),
+                    now,
+                    now
+                )
+            )
+
+        return decision_id
+
+    def update_planner_decision(
+        self,
+        decision_id,
+        outcome=None,
+        response=None,
+        metadata=None
+    ):
+        updates = []
+        params = []
+
+        if outcome is not None:
+            updates.append("outcome = ?")
+            params.append(outcome)
+
+        if response is not None:
+            updates.append("response = ?")
+            params.append(response)
+
+        if metadata is not None:
+            updates.append("metadata = ?")
+            params.append(self._json(metadata))
+
+        if not updates:
+            return
+
+        updates.append("updated_at = ?")
+        params.append(utc_now())
+        params.append(decision_id)
+
+        with self._connect() as conn:
+            conn.execute(
+                f"""
+                UPDATE planner_decisions
+                SET {", ".join(updates)}
+                WHERE id = ?
+                """,
+                params
+            )
+
+    def recent_planner_decisions(self, limit=10):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM planner_decisions
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+
+        return [self._planner_decision_from_row(row) for row in rows]
+
+    def last_planner_decision(self):
+        decisions = self.recent_planner_decisions(limit=1)
+
+        if not decisions:
+            return None
+
+        return decisions[0]
+
+    def count_planner_decisions(self):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM planner_decisions"
+            ).fetchone()
+
+        return row["count"]
+
     def add_task(
         self,
         title,
@@ -456,10 +581,22 @@ class MemoryStore:
         item["metadata"] = json.loads(item.get("metadata") or "{}")
         return item
 
+    def _planner_decision_from_row(self, row):
+        item = dict(row)
+        item["tools"] = json.loads(item.get("tools") or "[]")
+        item["metadata"] = json.loads(item.get("metadata") or "{}")
+        item["confirmation_required"] = bool(
+            item.get("confirmation_required")
+        )
+        return item
+
     def _task_from_row(self, row):
         item = dict(row)
         item["metadata"] = json.loads(item.get("metadata") or "{}")
         return item
+
+    def _json(self, value):
+        return json.dumps(value, default=str)
 
     def _fts_query(self, query):
         terms = [

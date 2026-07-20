@@ -74,6 +74,7 @@ class AgentPlanner:
         presence_state=None,
         recent_actions=None,
         recent_responses=None,
+        recent_decisions=None,
         on_escalation=None
     ):
         try:
@@ -83,7 +84,8 @@ class AgentPlanner:
                     awareness_state=awareness_state,
                     presence_state=presence_state,
                     recent_actions=recent_actions or [],
-                    recent_responses=recent_responses or []
+                    recent_responses=recent_responses or [],
+                    recent_decisions=recent_decisions or []
                 ),
                 user_input=text,
                 on_escalation=on_escalation,
@@ -103,7 +105,8 @@ class AgentPlanner:
         awareness_state=None,
         presence_state=None,
         recent_actions=None,
-        recent_responses=None
+        recent_responses=None,
+        recent_decisions=None
     ):
         context = self.store.recall_context(text, limit=6)
         now = datetime.now(self._timezone()).isoformat()
@@ -128,7 +131,8 @@ class AgentPlanner:
             "behavior_rules": behavior_rules,
             "relevant_memories": context.get("relevant_memories", []),
             "recent_actions": recent_actions[-5:],
-            "recent_responses": recent_responses[-5:]
+            "recent_responses": recent_responses[-5:],
+            "recent_decisions": recent_decisions[-5:]
         }
 
         return (
@@ -136,7 +140,9 @@ class AgentPlanner:
             "do with the user's input. You do not directly call APIs; you "
             "return a structured plan for Python to validate and execute. "
             "Prefer local tools over general chat when a tool applies. "
-            "Use behavior rules when relevant. Return JSON only.\n\n"
+            "Use behavior rules when relevant. Use recent decisions and "
+            "tool outcomes to avoid repeating failed choices, stale claims, "
+            "or canceled actions. Return JSON only.\n\n"
             "Allowed tools:\n"
             "- answer: reply with text only.\n"
             "- ask: ask a follow-up question because required details are missing.\n"

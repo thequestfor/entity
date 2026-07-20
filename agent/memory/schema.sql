@@ -72,6 +72,28 @@ CREATE TABLE IF NOT EXISTS conversations (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS planner_decisions (
+    id TEXT PRIMARY KEY,
+    input_text TEXT NOT NULL,
+    channel TEXT NOT NULL,
+    intent TEXT NOT NULL,
+    confidence REAL NOT NULL DEFAULT 0,
+    tools TEXT NOT NULL DEFAULT '[]',
+    reason TEXT NOT NULL DEFAULT '',
+    confirmation_required INTEGER NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT 'planned',
+    response TEXT NOT NULL DEFAULT '',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_planner_decisions_created_at
+ON planner_decisions(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_planner_decisions_outcome
+ON planner_decisions(outcome);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
 USING fts5(
     content,

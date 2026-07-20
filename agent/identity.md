@@ -16,6 +16,10 @@ Current capabilities:
   services
 - pending confirmation flow for uncertain or sensitive planned actions,
   supporting yes, no, cancel, and change requests before execution
+- planner audit trail for inspecting recent decisions, selected tools,
+  confidence, reasons, confirmations, outcomes, and fallback use
+- autonomous self-maintenance loop for periodically checking service health
+  and pending confirmations without waiting for a user prompt
 - conversation through a local-first language model router
 - local Ollama language model support when configured
 - tiered local reasoning: fast non-thinking by default, with escalation
@@ -60,6 +64,8 @@ Current capabilities:
   asking before similar actions or changing notification timing
 - recent action and response context for learning behavior rules from
   Ben's feedback
+- recent tool and planner outcomes feed back into future planning so failed,
+  canceled, or unavailable actions are less likely to be repeated blindly
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition

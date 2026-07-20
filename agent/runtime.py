@@ -23,6 +23,7 @@ from agent.memory.research import ResearchMemoryIngestor
 from agent.math_tools import ArithmeticHandler
 from agent.observers import (
     AudioObserver,
+    AutonomyObserver,
     CalendarObserver,
     NtfyObserver,
     SchedulerObserver
@@ -97,6 +98,11 @@ class EntityRuntime:
         if observers is None:
             observers = [
                 self.scheduler_observer,
+                AutonomyObserver(
+                    store=self.task_store,
+                    health_check=self.startup_health,
+                    confirmation_store=self.confirmation_store
+                ),
                 CalendarObserver(),
                 NtfyObserver(),
                 audio_observer or AudioObserver()
@@ -169,6 +175,9 @@ class EntityRuntime:
 
         if event.type == "calendar_event_upcoming":
             return self.handle_calendar_event_upcoming(event)
+
+        if event.type == "autonomy_check":
+            return self.handle_autonomy_check(event)
 
         if event.message:
             return self.handle_observed_event(event)
@@ -281,6 +290,19 @@ class EntityRuntime:
         )
 
         return message
+
+    def handle_autonomy_check(self, event):
+        message = event.message
+
+        if not message:
+            return None
+
+        return self._deliver_alert(
+            message,
+            title="Entity autonomous maintenance",
+            priority="urgent" if event.priority >= 8 else "high",
+            force_notify=event.priority >= 8
+        )
 
     def handle_observed_event(self, event):
         decision = self.importance_policy.evaluate(
@@ -406,6 +428,11 @@ class EntityRuntime:
         return delivered or text
 
     def _handle_runtime_command(self, command, source="voice"):
+        audit_response = self._handle_decision_audit_command(command)
+
+        if audit_response:
+            return audit_response
+
         confirmation_response = self._handle_confirmation_command(
             command,
             source=source
@@ -422,7 +449,19 @@ class EntityRuntime:
         if planned_response:
             return planned_response
 
-        return self._handle_runtime_command_fallback(command, source=source)
+        fallback_response = self._handle_runtime_command_fallback(
+            command,
+            source=source
+        )
+
+        if fallback_response:
+            self._record_fallback_decision(
+                command,
+                source=source,
+                response=fallback_response
+            )
+
+        return fallback_response
 
     def _handle_runtime_command_fallback(self, command, source="voice"):
         if self._is_diagnostics_command(command):
@@ -486,6 +525,9 @@ class EntityRuntime:
             presence_state=self.presence.snapshot(),
             recent_actions=self.recent_actions,
             recent_responses=self.recent_responses,
+            recent_decisions=self.task_store.recent_planner_decisions(
+                limit=5
+            ),
             on_escalation=lambda message: self._reply(message, source)
         )
 
@@ -493,29 +535,64 @@ class EntityRuntime:
             return None
 
         responses = []
+        needs_confirmation = self._plan_needs_confirmation(plan)
+        decision_id = self._record_plan_decision(
+            plan,
+            command,
+            source=source,
+            confirmation_required=needs_confirmation
+        )
 
-        if self._plan_needs_confirmation(plan):
+        if needs_confirmation:
             pending = self.confirmation_store.create(
                 plan,
                 original_text=command,
-                source=source
+                source=source,
+                decision_id=decision_id
             )
-            return self._confirmation_prompt(plan, pending)
+            prompt = self._confirmation_prompt(plan, pending)
+            self.task_store.update_planner_decision(
+                decision_id,
+                outcome="pending_confirmation",
+                response=prompt,
+                metadata={
+                    "pending_confirmation_id": pending["id"]
+                }
+            )
+            return prompt
 
+        step_results = []
         for step in plan.steps:
             response = self._execute_plan_step(
                 step,
                 command,
                 source=source
             )
+            step_results.append(
+                {
+                    "tool": step.tool,
+                    "result": response
+                }
+            )
 
             if response:
                 responses.append(response)
 
         if responses:
-            return " ".join(responses)
+            final_response = " ".join(responses)
+        else:
+            final_response = plan.response or None
 
-        return plan.response or None
+        self.task_store.update_planner_decision(
+            decision_id,
+            outcome="executed",
+            response=final_response or "",
+            metadata={
+                "step_results": step_results
+            }
+        )
+
+        return final_response
 
     def _handle_confirmation_command(self, command, source="voice"):
         normalized = command.lower().strip()
@@ -545,13 +622,34 @@ class EntityRuntime:
             "stop"
         }:
             self.confirmation_store.clear()
+            decision_id = pending.get("decision_id")
+
+            if decision_id:
+                self.task_store.update_planner_decision(
+                    decision_id,
+                    outcome="canceled",
+                    response="Canceled the pending action."
+                )
+
             return "Canceled the pending action."
 
         change = self._confirmation_change_text(command)
 
         if change:
             original = pending.get("original_text", "")
+            decision_id = pending.get("decision_id")
             self.confirmation_store.clear()
+
+            if decision_id:
+                self.task_store.update_planner_decision(
+                    decision_id,
+                    outcome="revised",
+                    response=f"Change requested: {change}",
+                    metadata={
+                        "change_request": change
+                    }
+                )
+
             revised = f"{original}. Change request: {change}"
             return self._handle_planned_command(revised, source=source)
 
@@ -562,8 +660,10 @@ class EntityRuntime:
 
         plan = AgentPlan.from_dict(pending.get("plan") or {})
         original_text = pending.get("original_text", "")
+        decision_id = pending.get("decision_id")
         self.confirmation_store.clear()
         responses = []
+        step_results = []
 
         for step in plan.steps:
             response = self._execute_plan_step(
@@ -571,14 +671,68 @@ class EntityRuntime:
                 original_text,
                 source=source
             )
+            step_results.append(
+                {
+                    "tool": step.tool,
+                    "result": response
+                }
+            )
 
             if response:
                 responses.append(response)
 
         if responses:
-            return " ".join(responses)
+            final_response = " ".join(responses)
+        else:
+            final_response = "Confirmed."
 
-        return "Confirmed."
+        if decision_id:
+            self.task_store.update_planner_decision(
+                decision_id,
+                outcome="confirmed_executed",
+                response=final_response,
+                metadata={
+                    "step_results": step_results
+                }
+            )
+
+        return final_response
+
+    def _handle_decision_audit_command(self, command):
+        normalized = command.lower().strip()
+
+        if normalized not in {
+            "why did you do that",
+            "what did you just decide",
+            "show last decision",
+            "last decision",
+            "planner audit",
+            "decision audit"
+        }:
+            return None
+
+        decision = self.task_store.last_planner_decision()
+
+        if not decision:
+            return "No planner decisions have been recorded yet."
+
+        return self._format_planner_decision(decision)
+
+    def _format_planner_decision(self, decision):
+        tools = [
+            item.get("tool", "unknown")
+            for item in decision.get("tools", [])
+            if isinstance(item, dict)
+        ]
+        tool_text = ", ".join(tools) if tools else "none"
+        reason = decision.get("reason") or "No reason recorded."
+
+        return (
+            f"Last decision: intent {decision['intent']}, "
+            f"confidence {decision['confidence']:.2f}, "
+            f"tools {tool_text}, outcome {decision['outcome']}. "
+            f"Reason: {reason}"
+        )
 
     def _confirmation_change_text(self, command):
         patterns = [
@@ -643,6 +797,45 @@ class EntityRuntime:
             return ""
 
         return "I plan to " + ", then ".join(tools) + "."
+
+    def _record_plan_decision(
+        self,
+        plan,
+        command,
+        source="voice",
+        confirmation_required=False
+    ):
+        return self.task_store.add_planner_decision(
+            input_text=command,
+            channel=source,
+            intent=plan.intent,
+            confidence=plan.confidence,
+            tools=[
+                {
+                    "tool": step.tool,
+                    "args": step.args,
+                    "requires_confirmation": step.requires_confirmation
+                }
+                for step in plan.steps
+            ],
+            reason=plan.reason,
+            confirmation_required=confirmation_required,
+            outcome="planned",
+            response=plan.response
+        )
+
+    def _record_fallback_decision(self, command, source="voice", response=""):
+        return self.task_store.add_planner_decision(
+            input_text=command,
+            channel=source,
+            intent="fallback",
+            confidence=0,
+            tools=[],
+            reason="Planner unavailable or did not return a usable plan.",
+            confirmation_required=False,
+            outcome="fallback_used",
+            response=response
+        )
 
     def _execute_plan_step(self, step, command, source="voice"):
         tool = step.tool

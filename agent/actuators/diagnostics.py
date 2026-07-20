@@ -284,13 +284,15 @@ class DiagnosticsActuator:
             geocodes = store.count_geocodes()
             research_memories = store.count_memories(source="research")
             behavior_rules = store.count_memories(kind="behavior_rule")
+            planner_decisions = store.count_planner_decisions()
 
             return [
                 "Memory database online.",
                 f"Pending tasks: {pending}.",
                 f"Geocode cache entries: {geocodes}.",
                 f"Sourced research memories: {research_memories}.",
-                f"Behavior rules: {behavior_rules}."
+                f"Behavior rules: {behavior_rules}.",
+                f"Planner decisions recorded: {planner_decisions}."
             ]
         except Exception as exc:
             return [

@@ -13,9 +13,10 @@ class ConfirmationStore:
         self.store = store or MemoryStore()
         self.ttl_seconds = ttl_seconds
 
-    def create(self, plan, original_text, source="user"):
+    def create(self, plan, original_text, source="user", decision_id=None):
         pending = {
             "id": str(uuid4()),
+            "decision_id": decision_id,
             "original_text": original_text,
             "source": source,
             "plan": self._plan_payload(plan),
