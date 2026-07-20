@@ -23,6 +23,7 @@ class DiagnosticsActuator:
 
         lines.extend(self._model_status())
         lines.extend(self._tts_status())
+        lines.extend(self._notification_status())
         lines.extend(self._memory_status())
         lines.extend(self._runtime_status(runtime))
         lines.extend(self._dependency_status())
@@ -101,6 +102,33 @@ class DiagnosticsActuator:
             f"TTS voice selected: {voice}."
         ]
 
+    def _notification_status(self):
+        provider = os.getenv("ENTITY_NOTIFY_PROVIDER", "").lower()
+        base_url = os.getenv("ENTITY_NTFY_URL", "https://ntfy.sh")
+        out_topic = os.getenv("ENTITY_NTFY_OUT_TOPIC", "")
+        in_topic = os.getenv("ENTITY_NTFY_IN_TOPIC", "")
+
+        if provider != "ntfy":
+            return [
+                "Plaintext notifications disabled."
+            ]
+
+        lines = [
+            f"Plaintext notifications configured through ntfy at {base_url}."
+        ]
+
+        if out_topic:
+            lines.append("Outbound plaintext topic configured.")
+        else:
+            lines.append("Outbound plaintext topic missing.")
+
+        if in_topic:
+            lines.append("Inbound plaintext topic configured.")
+        else:
+            lines.append("Inbound plaintext topic missing.")
+
+        return lines
+
     def _memory_status(self):
         try:
             from agent.memory.store import MemoryStore
@@ -110,8 +138,11 @@ class DiagnosticsActuator:
             with store._connect() as conn:
                 conn.execute("SELECT 1").fetchone()
 
+            pending = len(store.pending_tasks())
+
             return [
-                "Memory database online."
+                "Memory database online.",
+                f"Pending tasks: {pending}."
             ]
         except Exception as exc:
             return [

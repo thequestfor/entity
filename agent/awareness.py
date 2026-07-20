@@ -27,6 +27,9 @@ class AwarenessLoop:
             "activity": "idle",
             "user_present": True,
             "priority": 0,
+            "current_time": None,
+            "current_date": None,
+            "timezone": None,
             "last_input": None,
             "last_response": None,
             "last_awareness_tick": None,
@@ -78,7 +81,14 @@ class AwarenessLoop:
 
         with self._lock:
             now = time.time()
-            self._state["last_awareness_tick"] = datetime.now().isoformat(
+            local_now = datetime.now().astimezone()
+            self._state["current_time"] = local_now.strftime("%H:%M:%S")
+            self._state["current_date"] = local_now.date().isoformat()
+            self._state["timezone"] = (
+                local_now.tzname()
+                or str(local_now.utcoffset())
+            )
+            self._state["last_awareness_tick"] = local_now.isoformat(
                 timespec="seconds"
             )
 

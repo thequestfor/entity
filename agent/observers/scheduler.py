@@ -12,6 +12,7 @@ class Reminder:
     due_at: float
     message: str = field(compare=False)
     priority: int = field(default=7, compare=False)
+    task_id: str | None = field(default=None, compare=False)
     id: str = field(
         default_factory=lambda: str(uuid4()),
         compare=False
@@ -19,15 +20,17 @@ class Reminder:
 
 
 class SchedulerObserver:
-    def __init__(self):
+    def __init__(self, store=None):
         self.event_bus = None
         self.running = False
         self.thread = None
         self.condition = threading.Condition()
         self.reminders = []
+        self.store = store or self._default_store()
 
     def start(self, event_bus):
         self.event_bus = event_bus
+        self._load_pending_tasks()
         self.running = True
         self.thread = threading.Thread(
             target=self._run,
@@ -47,12 +50,28 @@ class SchedulerObserver:
         self,
         delay_seconds,
         message,
-        priority=7
+        priority=7,
+        task_id=None
+    ):
+        return self.add_reminder_at(
+            time.time() + delay_seconds,
+            message,
+            priority=priority,
+            task_id=task_id
+        )
+
+    def add_reminder_at(
+        self,
+        due_at,
+        message,
+        priority=7,
+        task_id=None
     ):
         reminder = Reminder(
-            due_at=time.time() + delay_seconds,
+            due_at=due_at,
             message=message,
-            priority=priority
+            priority=priority,
+            task_id=task_id
         )
 
         with self.condition:
@@ -92,8 +111,26 @@ class SchedulerObserver:
                 type="reminder",
                 payload={
                     "message": reminder.message,
-                    "reminder_id": reminder.id
+                    "reminder_id": reminder.id,
+                    "task_id": reminder.task_id
                 },
                 priority=reminder.priority
             )
         )
+
+        if reminder.task_id:
+            self.store.complete_task(reminder.task_id)
+
+    def _load_pending_tasks(self):
+        for task in self.store.pending_tasks():
+            self.add_reminder_at(
+                task["due_at"],
+                task["message"],
+                priority=task["priority"],
+                task_id=task["id"]
+            )
+
+    def _default_store(self):
+        from agent.memory.store import MemoryStore
+
+        return MemoryStore()

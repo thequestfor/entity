@@ -28,6 +28,23 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_created_at
 ON events(created_at);
 
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    due_at REAL NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 7,
+    source TEXT NOT NULL DEFAULT 'user',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_status_due_at
+ON tasks(status, due_at);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_text TEXT NOT NULL,

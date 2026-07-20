@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from pathlib import Path
+from uuid import uuid4
 
 from agent.events import Event, utc_now
 
@@ -128,6 +129,83 @@ class MemoryStore:
                 )
             )
 
+    def add_task(
+        self,
+        title,
+        message,
+        due_at,
+        kind="reminder",
+        priority=7,
+        source="user",
+        metadata=None,
+        task_id=None
+    ):
+        task_id = task_id or str(uuid4())
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO tasks (
+                    id,
+                    kind,
+                    title,
+                    message,
+                    status,
+                    due_at,
+                    priority,
+                    source,
+                    metadata,
+                    created_at,
+                    completed_at
+                )
+                VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, NULL)
+                """,
+                (
+                    task_id,
+                    kind,
+                    title,
+                    message,
+                    due_at,
+                    priority,
+                    source,
+                    json.dumps(metadata or {}),
+                    utc_now()
+                )
+            )
+
+        return task_id
+
+    def pending_tasks(self):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM tasks
+                WHERE status = 'pending'
+                ORDER BY due_at ASC
+                """
+            ).fetchall()
+
+        return [
+            self._task_from_row(row)
+            for row in rows
+        ]
+
+    def complete_task(self, task_id):
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'completed',
+                    completed_at = ?
+                WHERE id = ?
+                """,
+                (
+                    utc_now(),
+                    task_id
+                )
+            )
+
     def list_memories(self, kind=None, limit=20):
         query = """
             SELECT *
@@ -217,6 +295,11 @@ class MemoryStore:
         }
 
     def _memory_from_row(self, row):
+        item = dict(row)
+        item["metadata"] = json.loads(item.get("metadata") or "{}")
+        return item
+
+    def _task_from_row(self, row):
         item = dict(row)
         item["metadata"] = json.loads(item.get("metadata") or "{}")
         return item
