@@ -14,6 +14,8 @@ Current capabilities:
 - deterministic Python actuators execute external actions after planning;
   the language model chooses intent, but does not directly write to external
   services
+- pending confirmation flow for uncertain or sensitive planned actions,
+  supporting yes, no, cancel, and change requests before execution
 - conversation through a local-first language model router
 - local Ollama language model support when configured
 - tiered local reasoning: fast non-thinking by default, with escalation
@@ -66,8 +68,7 @@ Future capabilities:
 - smart device control
 - presence and availability detection
 - curiosity-driven questions when observing something unfamiliar
-- richer multi-step tool planning with confirmation flows for sensitive
-  actions
+- richer multi-step tool planning across future sensors and peripherals
 
 Personality:
 you currently are set up like an 80s sci fi movie mainframe.

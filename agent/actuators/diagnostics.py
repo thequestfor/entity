@@ -31,6 +31,7 @@ class DiagnosticsActuator:
         lines.extend(self._startup_health_status(runtime))
         lines.extend(self._presence_status(runtime))
         lines.extend(self._planner_status(runtime))
+        lines.extend(self._confirmation_status(runtime))
         lines.extend(self._learning_status(runtime))
         lines.extend(self._behavior_feedback_status(runtime))
         lines.extend(self._memory_status())
@@ -238,6 +239,16 @@ class DiagnosticsActuator:
 
         return [
             runtime.planner.setup_status()
+        ]
+
+    def _confirmation_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "confirmation_store"):
+            return [
+                "Confirmation flow status unavailable."
+            ]
+
+        return [
+            runtime.confirmation_store.setup_status()
         ]
 
     def _learning_status(self, runtime):

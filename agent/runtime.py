@@ -1,3 +1,4 @@
+import os
 import re
 import time
 from datetime import datetime, timedelta
@@ -13,6 +14,7 @@ from agent.awareness import AwarenessLoop
 from agent.behavior import BehaviorFeedbackPolicy
 from agent.briefing import TodayBriefing
 from agent.calendar import CalendarIntentExtractor
+from agent.confirmations import ConfirmationStore
 from agent.event_bus import EventBus
 from agent.events import Action
 from agent.health import StartupHealthCheck
@@ -53,6 +55,7 @@ class EntityRuntime:
         research_memory_ingestor=None,
         behavior_feedback_policy=None,
         planner=None,
+        confirmation_store=None,
         observers=None,
         actuators=None,
         policy=None
@@ -83,6 +86,11 @@ class EntityRuntime:
             behavior_feedback_policy or BehaviorFeedbackPolicy()
         )
         self.planner = planner or AgentPlanner()
+        self.confirmation_store = (
+            confirmation_store or ConfirmationStore(
+                ttl_seconds=self._confirmation_ttl_seconds()
+            )
+        )
         self.last_research_result = None
         self.recent_actions = []
         self.recent_responses = []
@@ -398,6 +406,14 @@ class EntityRuntime:
         return delivered or text
 
     def _handle_runtime_command(self, command, source="voice"):
+        confirmation_response = self._handle_confirmation_command(
+            command,
+            source=source
+        )
+
+        if confirmation_response:
+            return confirmation_response
+
         planned_response = self._handle_planned_command(
             command,
             source=source
@@ -478,14 +494,15 @@ class EntityRuntime:
 
         responses = []
 
-        for step in plan.steps:
-            if step.requires_confirmation:
-                responses.append(
-                    plan.response
-                    or "I need confirmation before doing that."
-                )
-                continue
+        if self._plan_needs_confirmation(plan):
+            pending = self.confirmation_store.create(
+                plan,
+                original_text=command,
+                source=source
+            )
+            return self._confirmation_prompt(plan, pending)
 
+        for step in plan.steps:
             response = self._execute_plan_step(
                 step,
                 command,
@@ -499,6 +516,133 @@ class EntityRuntime:
             return " ".join(responses)
 
         return plan.response or None
+
+    def _handle_confirmation_command(self, command, source="voice"):
+        normalized = command.lower().strip()
+        pending = self.confirmation_store.current()
+
+        if not pending:
+            return None
+
+        if normalized in {
+            "yes",
+            "yeah",
+            "yep",
+            "confirm",
+            "confirmed",
+            "do it",
+            "go ahead",
+            "proceed"
+        }:
+            return self._confirm_pending_plan(pending, source=source)
+
+        if normalized in {
+            "no",
+            "nope",
+            "cancel",
+            "never mind",
+            "nevermind",
+            "stop"
+        }:
+            self.confirmation_store.clear()
+            return "Canceled the pending action."
+
+        change = self._confirmation_change_text(command)
+
+        if change:
+            original = pending.get("original_text", "")
+            self.confirmation_store.clear()
+            revised = f"{original}. Change request: {change}"
+            return self._handle_planned_command(revised, source=source)
+
+        return None
+
+    def _confirm_pending_plan(self, pending, source="voice"):
+        from agent.planner import AgentPlan
+
+        plan = AgentPlan.from_dict(pending.get("plan") or {})
+        original_text = pending.get("original_text", "")
+        self.confirmation_store.clear()
+        responses = []
+
+        for step in plan.steps:
+            response = self._execute_plan_step(
+                step,
+                original_text,
+                source=source
+            )
+
+            if response:
+                responses.append(response)
+
+        if responses:
+            return " ".join(responses)
+
+        return "Confirmed."
+
+    def _confirmation_change_text(self, command):
+        patterns = [
+            r"^\s*change it to\s+(.+)$",
+            r"^\s*change that to\s+(.+)$",
+            r"^\s*instead\s+(.+)$",
+            r"^\s*make it\s+(.+)$"
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, command, re.IGNORECASE)
+
+            if match:
+                return match.group(1).strip()
+
+        return ""
+
+    def _plan_needs_confirmation(self, plan):
+        if any(step.requires_confirmation for step in plan.steps):
+            return True
+
+        confirmable_tools = {
+            "set_presence",
+            "set_voice",
+            "research_and_remember",
+            "remember_last_research",
+            "create_calendar_event",
+            "create_reminder",
+            "store_memory",
+            "behavior_feedback"
+        }
+
+        if plan.confidence < 0.65:
+            return any(
+                step.tool in confirmable_tools
+                for step in plan.steps
+            )
+
+        return False
+
+    def _confirmation_prompt(self, plan, pending):
+        summary = plan.response or self._plan_summary(plan)
+
+        if not summary:
+            summary = "I have an action ready that needs confirmation."
+
+        seconds = max(1, pending["expires_at"] - time.time())
+        minutes = max(1, int((seconds + 59) // 60))
+
+        return (
+            f"{summary} Confirm? You can say yes, no, or change it. "
+            f"This expires in about {minutes} minutes."
+        )
+
+    def _plan_summary(self, plan):
+        tools = [
+            step.tool.replace("_", " ")
+            for step in plan.steps
+        ]
+
+        if not tools:
+            return ""
+
+        return "I plan to " + ", then ".join(tools) + "."
 
     def _execute_plan_step(self, step, command, source="voice"):
         tool = step.tool
@@ -683,6 +827,15 @@ class EntityRuntime:
         )
 
         return f"Remembered: {content}"
+
+    def _confirmation_ttl_seconds(self):
+        try:
+            return max(
+                30,
+                int(os.getenv("ENTITY_CONFIRMATION_TTL_SECONDS", "600"))
+            )
+        except ValueError:
+            return 600
 
     def _run_startup_health_check(self):
         message = self.startup_health.alert_message()

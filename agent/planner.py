@@ -41,6 +41,26 @@ class AgentPlan:
     response: str = ""
     reason: str = ""
 
+    @classmethod
+    def from_dict(cls, payload):
+        return cls(
+            intent=str(payload.get("intent", "unknown")),
+            confidence=float(payload.get("confidence", 0.0)),
+            response=str(payload.get("response", "")),
+            reason=str(payload.get("reason", "")),
+            steps=[
+                PlanStep(
+                    tool=str(item.get("tool", "")),
+                    args=item.get("args") or {},
+                    requires_confirmation=bool(
+                        item.get("requires_confirmation", False)
+                    )
+                )
+                for item in payload.get("steps", [])
+                if isinstance(item, dict)
+            ]
+        )
+
 
 class AgentPlanner:
     def __init__(self, router=None, store=None):
