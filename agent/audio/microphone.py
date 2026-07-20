@@ -242,9 +242,15 @@ class Microphone:
                 break
 
     def _new_wake_model(self):
-        return Model(
-            inference_framework="onnx"
-        )
+        try:
+            return Model(
+                inference_framework="onnx"
+            )
+        except TypeError as exc:
+            if "inference_framework" not in str(exc):
+                raise
+
+            return Model()
 
     def _reset_wake_model(self):
         self.wake_model = self._new_wake_model()
