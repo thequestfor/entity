@@ -28,6 +28,7 @@ class DiagnosticsActuator:
         lines.extend(self._route_status())
         lines.extend(self._startup_health_status(runtime))
         lines.extend(self._presence_status(runtime))
+        lines.extend(self._learning_status(runtime))
         lines.extend(self._memory_status())
         lines.extend(self._importance_status(runtime))
         lines.extend(self._runtime_status(runtime))
@@ -201,6 +202,16 @@ class DiagnosticsActuator:
 
         return [
             runtime.presence.status_text()
+        ]
+
+    def _learning_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "learning_policy"):
+            return [
+                "Autonomous learning status unavailable."
+            ]
+
+        return [
+            "Autonomous learning loop online."
         ]
 
     def _memory_status(self):

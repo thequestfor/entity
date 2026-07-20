@@ -15,6 +15,7 @@ from agent.calendar import CalendarIntentExtractor
 from agent.event_bus import EventBus
 from agent.events import Action
 from agent.health import StartupHealthCheck
+from agent.learning import LearningPolicy
 from agent.math_tools import ArithmeticHandler
 from agent.observers import (
     AudioObserver,
@@ -43,6 +44,7 @@ class EntityRuntime:
         startup_health=None,
         today_briefing=None,
         presence=None,
+        learning_policy=None,
         observers=None,
         actuators=None,
         policy=None
@@ -64,6 +66,7 @@ class EntityRuntime:
         self.startup_health = startup_health or StartupHealthCheck()
         self.today_briefing = today_briefing or TodayBriefing()
         self.presence = presence or PresenceState()
+        self.learning_policy = learning_policy or LearningPolicy()
         self.observers = observers or [
             self.scheduler_observer,
             CalendarObserver(),
@@ -120,6 +123,7 @@ class EntityRuntime:
 
     def handle_event(self, event):
         self._record_event(event)
+        self._learn_from_event(event)
 
         if event.type == "user_speech":
             return self.handle_text_input(event, channel="voice")
@@ -289,6 +293,16 @@ class EntityRuntime:
             self.task_store.add_event(event)
         except Exception as exc:
             print("Failed to record event:", exc)
+
+    def _learn_from_event(self, event):
+        try:
+            self.learning_policy.observe_event(
+                event,
+                awareness_state=self.awareness.snapshot(),
+                presence_state=self.presence.snapshot()
+            )
+        except Exception as exc:
+            print("Learning from event failed:", exc)
 
     def _reply(self, text, channel):
         if not text:
@@ -761,7 +775,9 @@ class EntityRuntime:
 
         for actuator in self.actuators:
             if actuator.can_handle(action):
-                return actuator.execute(action)
+                result = actuator.execute(action)
+                self._learn_from_action(action)
+                return result
 
         print(
             "No actuator for action:",
@@ -769,3 +785,13 @@ class EntityRuntime:
         )
 
         return None
+
+    def _learn_from_action(self, action):
+        try:
+            self.learning_policy.observe_action(
+                action,
+                awareness_state=self.awareness.snapshot(),
+                presence_state=self.presence.snapshot()
+            )
+        except Exception as exc:
+            print("Learning from action failed:", exc)

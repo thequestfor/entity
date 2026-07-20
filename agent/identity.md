@@ -40,6 +40,8 @@ Current capabilities:
   missing API credentials
 - persistent presence and availability state for choosing whether to speak,
   notify, or wait
+- passive autonomous learning loop for durable facts, routines, places,
+  and patterns from meaningful events and actions
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition

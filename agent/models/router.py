@@ -225,6 +225,13 @@ class ModelRouter:
                 reason="The fast local model is unavailable for reminder extraction."
             )
 
+        if routing == "learning":
+            return self._available_sequence(
+                preferred=["local_fast", "local_thinking", "cloud_openai"],
+                on_escalation=on_escalation,
+                reason="The fast local model is unavailable for learning."
+            )
+
         if self.should_escalate(user_input):
             return self._available_sequence(
                 preferred=["local_thinking", "cloud_openai", "local_fast"],
