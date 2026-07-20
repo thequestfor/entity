@@ -26,6 +26,7 @@ from agent.observers import (
 from agent.policy import Policy
 from agent.presence import PresenceState
 from agent.reminders import ReminderIntentExtractor
+from agent.research import ResearchTool
 from agent.routes import RoutePlanner
 
 
@@ -45,6 +46,7 @@ class EntityRuntime:
         today_briefing=None,
         presence=None,
         learning_policy=None,
+        research_tool=None,
         observers=None,
         actuators=None,
         policy=None
@@ -67,6 +69,7 @@ class EntityRuntime:
         self.today_briefing = today_briefing or TodayBriefing()
         self.presence = presence or PresenceState()
         self.learning_policy = learning_policy or LearningPolicy()
+        self.research_tool = research_tool or ResearchTool()
         self.observers = observers or [
             self.scheduler_observer,
             CalendarObserver(),
@@ -401,6 +404,11 @@ class EntityRuntime:
         if briefing_response:
             return briefing_response
 
+        research_response = self._handle_research_command(command)
+
+        if research_response:
+            return research_response
+
         calendar_response = self._handle_calendar_command(
             command,
             channel=source
@@ -467,6 +475,35 @@ class EntityRuntime:
             return None
 
         return self.today_briefing.build()
+
+    def _handle_research_command(self, command):
+        query = self._research_query(command)
+
+        if not query:
+            return None
+
+        try:
+            result = self.research_tool.search(query)
+        except Exception as exc:
+            return f"Internet research failed: {exc}"
+
+        return result.format_response()
+
+    def _research_query(self, command):
+        patterns = [
+            r"^\s*research\s+(.+)$",
+            r"^\s*look up\s+(.+)$",
+            r"^\s*search(?: the internet| online| web)? for\s+(.+)$",
+            r"^\s*find(?: online)?\s+(.+)$"
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, command, re.IGNORECASE)
+
+            if match:
+                return match.group(1).strip()
+
+        return ""
 
     def _handle_presence_command(self, command):
         normalized = command.lower().strip()

@@ -16,6 +16,7 @@ class StartupHealthCheck:
         issues.extend(self._notification_issues())
         issues.extend(self._calendar_issues())
         issues.extend(self._route_issues())
+        issues.extend(self._research_issues())
 
         return issues
 
@@ -86,6 +87,28 @@ class StartupHealthCheck:
 
         if not planner.home_address:
             issues.append("Home address is missing for route planning.")
+
+        return issues
+
+    def _research_issues(self):
+        if not self._env_bool("ENTITY_RESEARCH_ENABLED"):
+            return []
+
+        try:
+            max_results = int(os.getenv("ENTITY_RESEARCH_MAX_RESULTS", "3"))
+            timeout = int(os.getenv("ENTITY_RESEARCH_TIMEOUT_SECONDS", "10"))
+        except ValueError:
+            return [
+                "Internet research configuration has invalid numeric values."
+            ]
+
+        issues = []
+
+        if max_results < 1:
+            issues.append("Internet research max results must be at least 1.")
+
+        if timeout < 1:
+            issues.append("Internet research timeout must be at least 1 second.")
 
         return issues
 

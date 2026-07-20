@@ -26,6 +26,7 @@ class DiagnosticsActuator:
         lines.extend(self._notification_status())
         lines.extend(self._calendar_status())
         lines.extend(self._route_status())
+        lines.extend(self._research_status())
         lines.extend(self._startup_health_status(runtime))
         lines.extend(self._presence_status(runtime))
         lines.extend(self._learning_status(runtime))
@@ -174,6 +175,18 @@ class DiagnosticsActuator:
         except Exception as exc:
             return [
                 f"Route planning status unavailable: {exc}."
+            ]
+
+    def _research_status(self):
+        try:
+            from agent.research import ResearchTool
+
+            return [
+                ResearchTool().setup_status()
+            ]
+        except Exception as exc:
+            return [
+                f"Internet research status unavailable: {exc}."
             ]
 
     def _startup_health_status(self, runtime):

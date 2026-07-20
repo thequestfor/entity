@@ -42,6 +42,8 @@ Current capabilities:
   notify, or wait
 - passive autonomous learning loop for durable facts, routines, places,
   and patterns from meaningful events and actions
+- explicit internet research when enabled, with concise summaries and
+  source links
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition
