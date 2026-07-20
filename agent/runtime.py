@@ -10,7 +10,7 @@ from agent.actuators import (
 )
 from agent.attention import ImportancePolicy
 from agent.awareness import AwarenessLoop
-from agent.calendar import CalendarCommandParser
+from agent.calendar import CalendarIntentExtractor
 from agent.event_bus import EventBus
 from agent.events import Action
 from agent.math_tools import ArithmeticHandler
@@ -26,7 +26,7 @@ class EntityRuntime:
         audio_observer=None,
         scheduler_observer=None,
         importance_policy=None,
-        calendar_parser=None,
+        calendar_extractor=None,
         arithmetic_handler=None,
         observers=None,
         actuators=None,
@@ -42,7 +42,7 @@ class EntityRuntime:
         )
         self.task_store = self.scheduler_observer.store
         self.importance_policy = importance_policy or ImportancePolicy()
-        self.calendar_parser = calendar_parser or CalendarCommandParser()
+        self.calendar_extractor = calendar_extractor or CalendarIntentExtractor()
         self.arithmetic_handler = arithmetic_handler or ArithmeticHandler()
         self.observers = observers or [
             self.scheduler_observer,
@@ -345,10 +345,10 @@ class EntityRuntime:
         return response
 
     def _handle_calendar_command(self, command):
-        if not self.calendar_parser.looks_like_calendar_command(command):
-            return None
-
-        draft = self.calendar_parser.parse(command)
+        draft = self.calendar_extractor.extract(
+            command,
+            awareness_state=self.awareness.snapshot()
+        )
 
         if draft is None:
             return None

@@ -1,9 +1,13 @@
+import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from agent.models.base import ModelUnavailable
+from agent.models.router import ModelRouter
 
 
 WEEKDAYS = {
@@ -206,6 +210,124 @@ class CalendarCommandParser:
         return title.strip(" .") or "Calendar event"
 
 
+class CalendarIntentExtractor:
+    def __init__(self, router=None, fallback_parser=None):
+        self.router = router or ModelRouter()
+        self.fallback_parser = fallback_parser or CalendarCommandParser()
+        self.timezone = self.fallback_parser.timezone
+        self.default_duration = self.fallback_parser.default_duration
+
+    def extract(self, command, awareness_state=None):
+        if not self.fallback_parser.looks_like_calendar_command(command):
+            return None
+
+        try:
+            payload = self.router.generate_json(
+                self._prompt(command, awareness_state),
+                user_input=command
+            )
+            return self._draft_from_payload(payload, command)
+        except (ModelUnavailable, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return self.fallback_parser.parse(command)
+
+    def _prompt(self, command, awareness_state):
+        now = datetime.now(self.timezone).isoformat()
+        state = awareness_state or {}
+
+        return (
+            "You extract Google Calendar event details for Entity. The user "
+            "wants Entity to decide what calendar operation is needed, but "
+            "you do not execute the operation. Return JSON only.\n\n"
+            "If the user is not asking to create or schedule a calendar "
+            "event, return intent=create_event with confidence 0.\n\n"
+            "Rules:\n"
+            "- Infer event title, date, time, recurrence, and location from "
+            "the user text.\n"
+            "- Use ISO dates, 24-hour HH:MM times, and IANA timezone.\n"
+            "- If a weekly class is described, set recurrence.frequency to "
+            "WEEKLY and include BYDAY such as MO.\n"
+            "- If duration is not said, use duration_minutes "
+            f"{self.default_duration}.\n"
+            "- If essential fields are missing, set confidence below 0.7.\n"
+            "- Do not invent a location if none was given.\n\n"
+            "Return exactly this JSON shape:\n"
+            "{\n"
+            '  "intent": "create_event",\n'
+            '  "confidence": 0.0,\n'
+            '  "summary": "",\n'
+            '  "date": "YYYY-MM-DD",\n'
+            '  "time": "HH:MM",\n'
+            f'  "timezone": "{self.timezone.key}",\n'
+            '  "duration_minutes": 60,\n'
+            '  "location": "",\n'
+            '  "recurrence": {\n'
+            '    "frequency": "",\n'
+            '    "byday": ""\n'
+            "  }\n"
+            "}\n\n"
+            f"Current local datetime: {now}\n"
+            f"Awareness state: {json.dumps(state)}\n"
+            f"User text: {command}"
+        )
+
+    def _draft_from_payload(self, payload, command):
+        if payload.get("intent") != "create_event":
+            return None
+
+        confidence = float(payload.get("confidence", 0.0))
+
+        if confidence < 0.7:
+            raise ValueError("Calendar intent confidence too low.")
+
+        summary = str(payload.get("summary", "")).strip()
+        date_text = str(payload.get("date", "")).strip()
+        time_text = str(payload.get("time", "")).strip()
+
+        if not summary or not date_text or not time_text:
+            raise ValueError("Calendar event missing required fields.")
+
+        timezone = ZoneInfo(
+            str(payload.get("timezone") or self.timezone.key)
+        )
+        start_date = datetime.fromisoformat(date_text).date()
+        start_time = time.fromisoformat(time_text)
+        start = datetime.combine(
+            start_date,
+            start_time,
+            tzinfo=timezone
+        )
+        duration = int(
+            payload.get("duration_minutes") or self.default_duration
+        )
+        end = start + timedelta(minutes=duration)
+        recurrence = self._recurrence(payload.get("recurrence") or {})
+
+        return CalendarEventDraft(
+            summary=summary,
+            start=start,
+            end=end,
+            location=str(payload.get("location", "")).strip(),
+            description=f"Created by Entity from: {command}",
+            recurrence=recurrence,
+            source_text=command
+        )
+
+    def _recurrence(self, payload):
+        frequency = str(payload.get("frequency", "")).upper().strip()
+        byday = str(payload.get("byday", "")).upper().strip()
+
+        if not frequency:
+            return []
+
+        if frequency != "WEEKLY":
+            raise ValueError("Unsupported calendar recurrence.")
+
+        if byday not in {value[0] for value in WEEKDAYS.values()}:
+            raise ValueError("Unsupported weekly recurrence day.")
+
+        return [f"RRULE:FREQ=WEEKLY;BYDAY={byday}"]
+
+
 class GoogleCalendarClient:
     scopes = [
         "https://www.googleapis.com/auth/calendar.events"
@@ -265,6 +387,20 @@ class GoogleCalendarClient:
             .insert(
                 calendarId=self.calendar_id,
                 body=draft.to_google_event()
+            )
+            .execute()
+        )
+
+    def get_event(self, event_id):
+        if not self.enabled:
+            raise RuntimeError("Google Calendar is disabled.")
+
+        service = self._service()
+        return (
+            service.events()
+            .get(
+                calendarId=self.calendar_id,
+                eventId=event_id
             )
             .execute()
         )
