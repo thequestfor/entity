@@ -30,6 +30,7 @@ class DiagnosticsActuator:
         lines.extend(self._research_memory_status(runtime))
         lines.extend(self._startup_health_status(runtime))
         lines.extend(self._presence_status(runtime))
+        lines.extend(self._planner_status(runtime))
         lines.extend(self._learning_status(runtime))
         lines.extend(self._behavior_feedback_status(runtime))
         lines.extend(self._memory_status())
@@ -227,6 +228,16 @@ class DiagnosticsActuator:
 
         return [
             runtime.presence.status_text()
+        ]
+
+    def _planner_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "planner"):
+            return [
+                "LLM action planner status unavailable."
+            ]
+
+        return [
+            runtime.planner.setup_status()
         ]
 
     def _learning_status(self, runtime):

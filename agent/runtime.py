@@ -26,6 +26,7 @@ from agent.observers import (
     SchedulerObserver
 )
 from agent.policy import Policy
+from agent.planner import AgentPlanner
 from agent.presence import PresenceState
 from agent.reminders import ReminderIntentExtractor
 from agent.research import ResearchTool
@@ -51,6 +52,7 @@ class EntityRuntime:
         research_tool=None,
         research_memory_ingestor=None,
         behavior_feedback_policy=None,
+        planner=None,
         observers=None,
         actuators=None,
         policy=None
@@ -80,6 +82,7 @@ class EntityRuntime:
         self.behavior_feedback_policy = (
             behavior_feedback_policy or BehaviorFeedbackPolicy()
         )
+        self.planner = planner or AgentPlanner()
         self.last_research_result = None
         self.recent_actions = []
         self.recent_responses = []
@@ -395,15 +398,19 @@ class EntityRuntime:
         return delivered or text
 
     def _handle_runtime_command(self, command, source="voice"):
+        planned_response = self._handle_planned_command(
+            command,
+            source=source
+        )
+
+        if planned_response:
+            return planned_response
+
+        return self._handle_runtime_command_fallback(command, source=source)
+
+    def _handle_runtime_command_fallback(self, command, source="voice"):
         if self._is_diagnostics_command(command):
-            return self.execute(
-                Action(
-                    type="diagnostics",
-                    payload={
-                        "runtime": self
-                    }
-                )
-            )
+            return self._run_diagnostics()
 
         voice_response = self._handle_voice_command(command)
 
@@ -454,6 +461,167 @@ class EntityRuntime:
         if calendar_response:
             return calendar_response
 
+        return self._create_reminder_from_command(command, source=source)
+
+    def _handle_planned_command(self, command, source="voice"):
+        plan = self.planner.plan(
+            command,
+            awareness_state=self.awareness.snapshot(),
+            presence_state=self.presence.snapshot(),
+            recent_actions=self.recent_actions,
+            recent_responses=self.recent_responses,
+            on_escalation=lambda message: self._reply(message, source)
+        )
+
+        if not plan:
+            return None
+
+        responses = []
+
+        for step in plan.steps:
+            if step.requires_confirmation:
+                responses.append(
+                    plan.response
+                    or "I need confirmation before doing that."
+                )
+                continue
+
+            response = self._execute_plan_step(
+                step,
+                command,
+                source=source
+            )
+
+            if response:
+                responses.append(response)
+
+        if responses:
+            return " ".join(responses)
+
+        return plan.response or None
+
+    def _execute_plan_step(self, step, command, source="voice"):
+        tool = step.tool
+        args = step.args or {}
+
+        if tool in {"answer", "ask"}:
+            return args.get("text") or args.get("question") or ""
+
+        if tool == "diagnostics":
+            return self._run_diagnostics()
+
+        if tool == "set_presence":
+            return self._apply_presence_args(args)
+
+        if tool == "set_voice":
+            voice = str(args.get("voice", "")).lower().strip()
+
+            if voice not in {"kokoro", "sam"}:
+                return self._handle_voice_command(command)
+
+            from tts.manager import set_voice
+
+            set_voice(voice)
+            return f"Voice set to {voice}."
+
+        if tool == "arithmetic":
+            return self.arithmetic_handler.answer(command)
+
+        if tool == "briefing":
+            return self.today_briefing.build()
+
+        if tool == "research":
+            query = args.get("query") or self._research_query(command) or command
+            return self._run_research(query)
+
+        if tool == "research_and_remember":
+            query = (
+                args.get("query")
+                or self._research_and_remember_query(command)
+                or self._research_query(command)
+                or command
+            )
+            return self._run_research(query, remember=True, source=source)
+
+        if tool == "remember_last_research":
+            if not self.last_research_result:
+                return "I do not have a recent research result to remember."
+
+            return self._ingest_research_result(
+                self.last_research_result,
+                requested_by=source
+            )
+
+        if tool == "create_calendar_event":
+            return self._handle_calendar_command(command, channel=source)
+
+        if tool == "create_reminder":
+            return self._create_reminder_from_command(command, source=source)
+
+        if tool == "store_memory":
+            return self._store_explicit_memory(command, args, source=source)
+
+        if tool == "behavior_feedback":
+            return self._handle_behavior_feedback_command(
+                command,
+                source=source
+            )
+
+        return None
+
+    def _run_diagnostics(self):
+        return self.execute(
+            Action(
+                type="diagnostics",
+                payload={
+                    "runtime": self
+                }
+            )
+        )
+
+    def _apply_presence_args(self, args):
+        updates = {}
+        location = str(args.get("location", "")).strip()
+        availability = str(args.get("availability", "")).strip()
+
+        if location in {"home", "away", "unknown"}:
+            updates["location"] = location
+
+        if availability in {
+            "available",
+            "busy",
+            "sleeping",
+            "do_not_disturb",
+            "unknown"
+        }:
+            updates["availability"] = availability
+
+        if not updates:
+            return None
+
+        self.presence.update(**updates)
+        return self.presence.status_text()
+
+    def _run_research(self, query, remember=False, source="user"):
+        try:
+            result = self.research_tool.search(query)
+        except Exception as exc:
+            return f"Internet research failed: {exc}"
+
+        self.last_research_result = result
+        response = result.format_response()
+
+        if not remember:
+            return response
+
+        memory_response = self._ingest_research_result(
+            result,
+            requested_by=source
+        )
+
+        return f"{response} {memory_response}"
+
+    def _create_reminder_from_command(self, command, source="voice"):
         reminder = self.reminder_extractor.extract(
             command,
             awareness_state=self.awareness.snapshot(),
@@ -479,9 +647,42 @@ class EntityRuntime:
             task_id=task_id
         )
 
-        response = f"Reminder set: {reminder.message}."
+        return f"Reminder set: {reminder.message}."
 
-        return response
+    def _store_explicit_memory(self, command, args, source="user"):
+        content = str(args.get("content", "")).strip()
+
+        if not content:
+            content = re.sub(
+                r"^\s*remember\s+(that\s+)?",
+                "",
+                command,
+                flags=re.IGNORECASE
+            ).strip()
+
+        if not content:
+            return "I could not find what to remember."
+
+        kind = str(args.get("kind", "fact")).strip() or "fact"
+        importance = args.get("importance", 5)
+
+        try:
+            importance = int(importance)
+        except (TypeError, ValueError):
+            importance = 5
+
+        self.task_store.add_memory(
+            kind=kind,
+            content=content,
+            source=source,
+            importance=min(10, max(1, importance)),
+            metadata={
+                "source_text": command,
+                "stored_by": "planner"
+            }
+        )
+
+        return f"Remembered: {content}"
 
     def _run_startup_health_check(self):
         message = self.startup_health.alert_message()
@@ -519,14 +720,7 @@ class EntityRuntime:
         if not query:
             return None
 
-        try:
-            result = self.research_tool.search(query)
-        except Exception as exc:
-            return f"Internet research failed: {exc}"
-
-        self.last_research_result = result
-
-        return result.format_response()
+        return self._run_research(query)
 
     def _handle_research_memory_command(self, command, source="user"):
         normalized = command.lower().strip()
@@ -550,19 +744,7 @@ class EntityRuntime:
         if not query:
             return None
 
-        try:
-            result = self.research_tool.search(query)
-        except Exception as exc:
-            return f"Internet research failed: {exc}"
-
-        self.last_research_result = result
-        response = result.format_response()
-        memory_response = self._ingest_research_result(
-            result,
-            requested_by=source
-        )
-
-        return f"{response} {memory_response}"
+        return self._run_research(query, remember=True, source=source)
 
     def _ingest_research_result(self, result, requested_by="user"):
         try:

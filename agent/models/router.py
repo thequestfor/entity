@@ -239,6 +239,23 @@ class ModelRouter:
                 reason="The fast local model is unavailable for research summarization."
             )
 
+        if routing == "planner":
+            if self.should_escalate(user_input):
+                return self._available_sequence(
+                    preferred=["local_thinking", "cloud_openai", "local_fast"],
+                    on_escalation=on_escalation,
+                    reason=(
+                        "This request needs planning, calculation, scheduling, "
+                        "or coordination."
+                    )
+                )
+
+            return self._available_sequence(
+                preferred=["local_fast", "local_thinking", "cloud_openai"],
+                on_escalation=on_escalation,
+                reason="The fast local model is unavailable for action planning."
+            )
+
         if self.should_escalate(user_input):
             return self._available_sequence(
                 preferred=["local_thinking", "cloud_openai", "local_fast"],
