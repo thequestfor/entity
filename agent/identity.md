@@ -20,6 +20,8 @@ Current capabilities:
 - semantic memory evaluation, with model-backed judgment when a language
   model is available and conservative fallback behavior when it is not
 - persistent reminders that survive restarts
+- importance policy for event decisions, notification gating, and model
+  outage alerts
 - diagnostics for model availability, TTS status, memory, observers,
   dependencies, notifications, and runtime health
 - plaintext remote interface through ntfy when configured

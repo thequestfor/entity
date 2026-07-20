@@ -3,6 +3,7 @@ import time
 from datetime import datetime, timedelta
 
 from agent.actuators import DiagnosticsActuator, NotifyActuator, SpeechActuator
+from agent.attention import ImportancePolicy
 from agent.awareness import AwarenessLoop
 from agent.event_bus import EventBus
 from agent.events import Action
@@ -17,6 +18,7 @@ class EntityRuntime:
         awareness=None,
         audio_observer=None,
         scheduler_observer=None,
+        importance_policy=None,
         observers=None,
         actuators=None,
         policy=None
@@ -30,6 +32,7 @@ class EntityRuntime:
             scheduler_observer or SchedulerObserver()
         )
         self.task_store = self.scheduler_observer.store
+        self.importance_policy = importance_policy or ImportancePolicy()
         self.observers = observers or [
             self.scheduler_observer,
             NtfyObserver(),
@@ -71,6 +74,7 @@ class EntityRuntime:
                 }
             )
         )
+        self._alert_if_no_language_model()
 
     def stop(self):
         self.awareness.stop()
@@ -82,6 +86,8 @@ class EntityRuntime:
         self.event_bus.publish(event)
 
     def handle_event(self, event):
+        self._record_event(event)
+
         if event.type == "user_speech":
             return self.handle_text_input(event, channel="voice")
 
@@ -92,14 +98,7 @@ class EntityRuntime:
             return self.handle_reminder(event)
 
         if event.message:
-            return self.execute(
-                Action(
-                    type="speak",
-                    payload={
-                        "text": event.message
-                    }
-                )
-            )
+            return self.handle_observed_event(event)
 
         return None
 
@@ -165,6 +164,71 @@ class EntityRuntime:
         if not message:
             return None
 
+        decision = self.importance_policy.evaluate(
+            event,
+            awareness_state=self.awareness.snapshot()
+        )
+
+        self.execute(
+            Action(
+                type="speak",
+                payload={
+                    "text": message
+                }
+            )
+        )
+
+        if decision.should_notify:
+            self.execute(
+                Action(
+                    type="notify",
+                    payload={
+                        "title": "Entity reminder",
+                        "text": message,
+                        "priority": "high"
+                    }
+                )
+            )
+
+        return message
+
+    def handle_observed_event(self, event):
+        decision = self.importance_policy.evaluate(
+            event,
+            awareness_state=self.awareness.snapshot()
+        )
+
+        if decision.should_notify:
+            return self.execute(
+                Action(
+                    type="notify",
+                    payload={
+                        "title": "Entity alert",
+                        "text": event.message,
+                        "priority": "high"
+                    }
+                )
+            )
+
+        if decision.decision in {"act", "ask"}:
+            return self.execute(
+                Action(
+                    type="speak",
+                    payload={
+                        "text": event.message
+                    }
+                )
+            )
+
+        return None
+
+    def _alert_if_no_language_model(self):
+        decision = self.importance_policy.model_health_decision()
+
+        if not decision.should_notify:
+            return None
+
+        message = decision.reason
         self.execute(
             Action(
                 type="speak",
@@ -177,14 +241,20 @@ class EntityRuntime:
             Action(
                 type="notify",
                 payload={
-                    "title": "Entity reminder",
+                    "title": "Entity system alert",
                     "text": message,
-                    "priority": "high"
+                    "priority": "urgent"
                 }
             )
         )
 
         return message
+
+    def _record_event(self, event):
+        try:
+            self.task_store.add_event(event)
+        except Exception as exc:
+            print("Failed to record event:", exc)
 
     def _reply(self, text, channel):
         if not text:

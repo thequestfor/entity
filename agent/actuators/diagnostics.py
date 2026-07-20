@@ -25,6 +25,7 @@ class DiagnosticsActuator:
         lines.extend(self._tts_status())
         lines.extend(self._notification_status())
         lines.extend(self._memory_status())
+        lines.extend(self._importance_status(runtime))
         lines.extend(self._runtime_status(runtime))
         lines.extend(self._dependency_status())
 
@@ -148,6 +149,24 @@ class DiagnosticsActuator:
             return [
                 f"Memory database unavailable: {exc}."
             ]
+
+    def _importance_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "importance_policy"):
+            return [
+                "Importance policy status unavailable."
+            ]
+
+        status = runtime.importance_policy.status()
+        provider = status.get("provider")
+
+        if status.get("mode") == "model" and provider:
+            return [
+                f"Importance policy using model provider: {provider}."
+            ]
+
+        return [
+            "Importance policy using conservative fallback."
+        ]
 
     def _runtime_status(self, runtime):
         if runtime is None:
