@@ -2,7 +2,7 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -225,7 +225,8 @@ class CalendarIntentExtractor:
             payload = self.router.generate_json(
                 self._prompt(command, awareness_state),
                 user_input=command,
-                on_escalation=on_escalation
+                on_escalation=on_escalation,
+                routing="calendar_extract"
             )
             return self._draft_from_payload(payload, command)
         except (ModelUnavailable, ValueError, TypeError, KeyError, json.JSONDecodeError):
@@ -356,6 +357,13 @@ class GoogleCalendarClient:
     def available(self):
         return self.enabled and self.credentials_path.exists()
 
+    def ready_for_background_reads(self):
+        return (
+            self.enabled
+            and self.credentials_path.exists()
+            and self.token_path.exists()
+        )
+
     def setup_status(self):
         if not self.enabled:
             return "Google Calendar disabled."
@@ -405,6 +413,27 @@ class GoogleCalendarClient:
             )
             .execute()
         )
+
+    def upcoming_events(self, hours=24):
+        if not self.enabled:
+            raise RuntimeError("Google Calendar is disabled.")
+
+        service = self._service()
+        now = datetime.now(timezone.utc)
+        end = now + timedelta(hours=hours)
+        result = (
+            service.events()
+            .list(
+                calendarId=self.calendar_id,
+                timeMin=now.isoformat(),
+                timeMax=end.isoformat(),
+                singleEvents=True,
+                orderBy="startTime"
+            )
+            .execute()
+        )
+
+        return result.get("items", [])
 
     def _service(self):
         try:

@@ -14,8 +14,14 @@ from agent.calendar import CalendarIntentExtractor
 from agent.event_bus import EventBus
 from agent.events import Action
 from agent.math_tools import ArithmeticHandler
-from agent.observers import AudioObserver, NtfyObserver, SchedulerObserver
+from agent.observers import (
+    AudioObserver,
+    CalendarObserver,
+    NtfyObserver,
+    SchedulerObserver
+)
 from agent.policy import Policy
+from agent.routes import RoutePlanner
 
 
 class EntityRuntime:
@@ -28,6 +34,7 @@ class EntityRuntime:
         importance_policy=None,
         calendar_extractor=None,
         arithmetic_handler=None,
+        route_planner=None,
         observers=None,
         actuators=None,
         policy=None
@@ -44,8 +51,10 @@ class EntityRuntime:
         self.importance_policy = importance_policy or ImportancePolicy()
         self.calendar_extractor = calendar_extractor or CalendarIntentExtractor()
         self.arithmetic_handler = arithmetic_handler or ArithmeticHandler()
+        self.route_planner = route_planner or RoutePlanner()
         self.observers = observers or [
             self.scheduler_observer,
+            CalendarObserver(),
             NtfyObserver(),
             audio_observer or AudioObserver()
         ]
@@ -108,6 +117,9 @@ class EntityRuntime:
 
         if event.type == "reminder":
             return self.handle_reminder(event)
+
+        if event.type == "calendar_event_upcoming":
+            return self.handle_calendar_event_upcoming(event)
 
         if event.message:
             return self.handle_observed_event(event)
@@ -202,6 +214,42 @@ class EntityRuntime:
                     }
                 )
             )
+
+        return message
+
+    def handle_calendar_event_upcoming(self, event):
+        message = event.message
+
+        try:
+            route_message = self.route_planner.departure_advice(event.payload)
+        except Exception as exc:
+            print("Route planning failed:", exc)
+            route_message = None
+
+        if route_message:
+            message = route_message
+
+        if not message:
+            return None
+
+        self.execute(
+            Action(
+                type="speak",
+                payload={
+                    "text": message
+                }
+            )
+        )
+        self.execute(
+            Action(
+                type="notify",
+                payload={
+                    "title": "Entity departure alert",
+                    "text": message,
+                    "priority": "high"
+                }
+            )
+        )
 
         return message
 

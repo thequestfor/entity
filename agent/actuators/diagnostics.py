@@ -25,6 +25,7 @@ class DiagnosticsActuator:
         lines.extend(self._tts_status())
         lines.extend(self._notification_status())
         lines.extend(self._calendar_status())
+        lines.extend(self._route_status())
         lines.extend(self._memory_status())
         lines.extend(self._importance_status(runtime))
         lines.extend(self._runtime_status(runtime))
@@ -158,6 +159,18 @@ class DiagnosticsActuator:
         except Exception as exc:
             return [
                 f"Google Calendar status unavailable: {exc}."
+            ]
+
+    def _route_status(self):
+        try:
+            from agent.routes import RoutePlanner
+
+            return [
+                RoutePlanner().setup_status()
+            ]
+        except Exception as exc:
+            return [
+                f"Route planning status unavailable: {exc}."
             ]
 
     def _memory_status(self):

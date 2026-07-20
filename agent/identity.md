@@ -30,10 +30,14 @@ Current capabilities:
 - plaintext remote interface through ntfy when configured
 - phone/web notifications through ntfy when configured
 - Google Calendar event creation when OAuth credentials are configured
+- Google Calendar upcoming-event monitoring when OAuth credentials are
+  configured
+- route-duration based departure alerts for upcoming calendar events when
+  openrouteservice is configured
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition
-- calendar traffic monitoring and departure-time alerts
+- live traffic monitoring when a traffic-capable provider is configured
 - computer interaction
 - smart device control
 - presence and availability detection

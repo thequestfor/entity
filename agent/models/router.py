@@ -30,6 +30,23 @@ COMPLEXITY_PATTERNS = [
     r"\d+\s+(times|multiplied by|divided by|plus|minus)\s+\d+"
 ]
 
+CALENDAR_PLANNING_PATTERNS = [
+    r"\bconflict\b",
+    r"\bfree\b",
+    r"\bavailable\b",
+    r"\bmove\b",
+    r"\breschedule\b",
+    r"\bbest time\b",
+    r"\bfind a time\b",
+    r"\btraffic\b",
+    r"\bcommute\b",
+    r"\bleave\b",
+    r"\btravel\b",
+    r"\bplan\b",
+    r"\bcoordinate\b",
+    r"\bif\b.*\bthen\b"
+]
+
 
 class ModelRouter:
     def __init__(self, providers=None):
@@ -65,10 +82,17 @@ class ModelRouter:
 
         return None
 
-    def generate(self, prompt, temperature=0, user_input=None, on_escalation=None):
+    def generate(
+        self,
+        prompt,
+        temperature=0,
+        user_input=None,
+        on_escalation=None,
+        routing="auto"
+    ):
         errors = []
 
-        for provider in self._providers_for(user_input, on_escalation):
+        for provider in self._providers_for(user_input, on_escalation, routing):
             try:
                 return provider.generate(
                     prompt,
@@ -86,10 +110,17 @@ class ModelRouter:
             + " ".join(errors)
         )
 
-    def stream(self, prompt, temperature=0, user_input=None, on_escalation=None):
+    def stream(
+        self,
+        prompt,
+        temperature=0,
+        user_input=None,
+        on_escalation=None,
+        routing="auto"
+    ):
         errors = []
 
-        for provider in self._providers_for(user_input, on_escalation):
+        for provider in self._providers_for(user_input, on_escalation, routing):
             try:
                 yield from provider.stream(
                     prompt,
@@ -121,13 +152,15 @@ class ModelRouter:
         prompt,
         temperature=0,
         user_input=None,
-        on_escalation=None
+        on_escalation=None,
+        routing="auto"
     ):
         text = self.generate(
             prompt,
             temperature=temperature,
             user_input=user_input,
-            on_escalation=on_escalation
+            on_escalation=on_escalation,
+            routing=routing
         )
 
         return self._parse_json(text)
@@ -143,7 +176,24 @@ class ModelRouter:
             for pattern in COMPLEXITY_PATTERNS
         )
 
-    def _providers_for(self, user_input, on_escalation):
+    def _providers_for(self, user_input, on_escalation, routing):
+        if routing == "calendar_extract":
+            if self._needs_calendar_planning(user_input):
+                return self._available_sequence(
+                    preferred=["local_thinking", "cloud_openai", "local_fast"],
+                    on_escalation=on_escalation,
+                    reason=(
+                        "This calendar request needs planning, conflict "
+                        "checking, travel, or coordination."
+                    )
+                )
+
+            return self._available_sequence(
+                preferred=["local_fast", "local_thinking", "cloud_openai"],
+                on_escalation=on_escalation,
+                reason="The fast local model is unavailable for calendar extraction."
+            )
+
         if self.should_escalate(user_input):
             return self._available_sequence(
                 preferred=["local_thinking", "cloud_openai", "local_fast"],
@@ -155,6 +205,17 @@ class ModelRouter:
             preferred=["local_fast", "local_thinking", "cloud_openai"],
             on_escalation=on_escalation,
             reason="The fast local model is unavailable."
+        )
+
+    def _needs_calendar_planning(self, user_input):
+        if not user_input:
+            return False
+
+        normalized = user_input.lower()
+
+        return any(
+            re.search(pattern, normalized)
+            for pattern in CALENDAR_PLANNING_PATTERNS
         )
 
     def _available_sequence(self, preferred, on_escalation, reason):
