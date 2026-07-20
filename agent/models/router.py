@@ -77,6 +77,9 @@ class ModelRouter:
             except ModelUnavailable as exc:
                 errors.append(f"{provider.name}: {exc}")
                 continue
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
 
         raise ModelUnavailable(
             "No configured model provider is available. "
@@ -96,6 +99,9 @@ class ModelRouter:
             except ModelUnavailable as exc:
                 errors.append(f"{provider.name}: {exc}")
                 continue
+            except Exception as exc:
+                errors.append(f"{provider.name}: {exc}")
+                continue
 
         raise ModelUnavailable(
             "No configured model provider is available. "
@@ -110,11 +116,18 @@ class ModelRouter:
 
         return provider.name
 
-    def generate_json(self, prompt, temperature=0, user_input=None):
+    def generate_json(
+        self,
+        prompt,
+        temperature=0,
+        user_input=None,
+        on_escalation=None
+    ):
         text = self.generate(
             prompt,
             temperature=temperature,
-            user_input=user_input
+            user_input=user_input,
+            on_escalation=on_escalation
         )
 
         return self._parse_json(text)

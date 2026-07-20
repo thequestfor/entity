@@ -217,14 +217,15 @@ class CalendarIntentExtractor:
         self.timezone = self.fallback_parser.timezone
         self.default_duration = self.fallback_parser.default_duration
 
-    def extract(self, command, awareness_state=None):
+    def extract(self, command, awareness_state=None, on_escalation=None):
         if not self.fallback_parser.looks_like_calendar_command(command):
             return None
 
         try:
             payload = self.router.generate_json(
                 self._prompt(command, awareness_state),
-                user_input=command
+                user_input=command,
+                on_escalation=on_escalation
             )
             return self._draft_from_payload(payload, command)
         except (ModelUnavailable, ValueError, TypeError, KeyError, json.JSONDecodeError):

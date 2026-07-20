@@ -30,16 +30,21 @@ class CloudOpenAIProvider(ModelProvider):
                 "Cloud OpenAI provider is disabled or missing a key."
             )
 
-        response = self._client().chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=temperature
-        )
+        try:
+            response = self._client().chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=temperature
+            )
+        except Exception as exc:
+            raise ModelUnavailable(
+                f"Cloud OpenAI request failed: {exc}"
+            ) from exc
 
         return response.choices[0].message.content or ""
 
@@ -49,23 +54,28 @@ class CloudOpenAIProvider(ModelProvider):
                 "Cloud OpenAI provider is disabled or missing a key."
             )
 
-        response = self._client().chat.completions.create(
-            model=self.model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            temperature=temperature,
-            stream=True
-        )
+        try:
+            response = self._client().chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=temperature,
+                stream=True
+            )
 
-        for chunk in response:
-            token = chunk.choices[0].delta.content or ""
+            for chunk in response:
+                token = chunk.choices[0].delta.content or ""
 
-            if token:
-                yield token
+                if token:
+                    yield token
+        except Exception as exc:
+            raise ModelUnavailable(
+                f"Cloud OpenAI request failed: {exc}"
+            ) from exc
 
     def _client(self):
         from openai import OpenAI

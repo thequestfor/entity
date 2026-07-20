@@ -314,7 +314,10 @@ class EntityRuntime:
         if math_response:
             return math_response
 
-        calendar_response = self._handle_calendar_command(command)
+        calendar_response = self._handle_calendar_command(
+            command,
+            channel=source
+        )
 
         if calendar_response:
             return calendar_response
@@ -344,10 +347,11 @@ class EntityRuntime:
 
         return response
 
-    def _handle_calendar_command(self, command):
+    def _handle_calendar_command(self, command, channel="voice"):
         draft = self.calendar_extractor.extract(
             command,
-            awareness_state=self.awareness.snapshot()
+            awareness_state=self.awareness.snapshot(),
+            on_escalation=lambda message: self._reply(message, channel)
         )
 
         if draft is None:
