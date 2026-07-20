@@ -19,6 +19,10 @@ class OllamaProvider(ModelProvider):
             os.getenv("ENTITY_LOCAL_LLM_PROVIDER", "").lower()
             == "ollama"
         )
+        self.think = self._env_bool(
+            "ENTITY_LOCAL_LLM_THINK",
+            default=False
+        )
 
     def available(self):
         if not self.enabled or not self.model:
@@ -86,6 +90,7 @@ class OllamaProvider(ModelProvider):
                 "model": self.model,
                 "prompt": prompt,
                 "stream": stream,
+                "think": self.think,
                 "options": {
                     "temperature": temperature
                 }
@@ -100,3 +105,16 @@ class OllamaProvider(ModelProvider):
             },
             method="POST"
         )
+
+    def _env_bool(self, name, default=False):
+        value = os.getenv(name)
+
+        if value is None or value.strip() == "":
+            return default
+
+        return value.lower().strip() in {
+            "1",
+            "true",
+            "yes",
+            "on"
+        }

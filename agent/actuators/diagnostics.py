@@ -38,6 +38,10 @@ class DiagnosticsActuator:
             lines.append(
                 f"Local language model online: {local.model}."
             )
+            if local.think:
+                lines.append("Local model thinking enabled.")
+            else:
+                lines.append("Local model thinking disabled.")
         elif local.enabled:
             lines.append(
                 "Local language model configured but unavailable."
