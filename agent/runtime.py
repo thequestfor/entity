@@ -10,9 +10,11 @@ from agent.actuators import (
 )
 from agent.attention import ImportancePolicy
 from agent.awareness import AwarenessLoop
+from agent.briefing import TodayBriefing
 from agent.calendar import CalendarIntentExtractor
 from agent.event_bus import EventBus
 from agent.events import Action
+from agent.health import StartupHealthCheck
 from agent.math_tools import ArithmeticHandler
 from agent.observers import (
     AudioObserver,
@@ -21,6 +23,7 @@ from agent.observers import (
     SchedulerObserver
 )
 from agent.policy import Policy
+from agent.reminders import ReminderIntentExtractor
 from agent.routes import RoutePlanner
 
 
@@ -33,8 +36,11 @@ class EntityRuntime:
         scheduler_observer=None,
         importance_policy=None,
         calendar_extractor=None,
+        reminder_extractor=None,
         arithmetic_handler=None,
         route_planner=None,
+        startup_health=None,
+        today_briefing=None,
         observers=None,
         actuators=None,
         policy=None
@@ -50,8 +56,11 @@ class EntityRuntime:
         self.task_store = self.scheduler_observer.store
         self.importance_policy = importance_policy or ImportancePolicy()
         self.calendar_extractor = calendar_extractor or CalendarIntentExtractor()
+        self.reminder_extractor = reminder_extractor or ReminderIntentExtractor()
         self.arithmetic_handler = arithmetic_handler or ArithmeticHandler()
         self.route_planner = route_planner or RoutePlanner()
+        self.startup_health = startup_health or StartupHealthCheck()
+        self.today_briefing = today_briefing or TodayBriefing()
         self.observers = observers or [
             self.scheduler_observer,
             CalendarObserver(),
@@ -95,7 +104,7 @@ class EntityRuntime:
                 }
             )
         )
-        self._alert_if_no_language_model()
+        self._run_startup_health_check()
 
     def stop(self):
         self.awareness.stop()
@@ -362,6 +371,11 @@ class EntityRuntime:
         if math_response:
             return math_response
 
+        briefing_response = self._handle_briefing_command(command)
+
+        if briefing_response:
+            return briefing_response
+
         calendar_response = self._handle_calendar_command(
             command,
             channel=source
@@ -370,30 +384,76 @@ class EntityRuntime:
         if calendar_response:
             return calendar_response
 
-        reminder = self._parse_reminder(command)
+        reminder = self.reminder_extractor.extract(
+            command,
+            awareness_state=self.awareness.snapshot(),
+            on_escalation=lambda message: self._reply(message, source)
+        )
 
         if not reminder:
             return None
 
-        due_at, message = reminder
         task_id = self.task_store.add_task(
-            title=message,
-            message=message,
-            due_at=due_at,
+            title=reminder.message,
+            message=reminder.message,
+            due_at=reminder.due_at,
             kind="reminder",
-            priority=7,
+            priority=reminder.priority,
             source=source
         )
 
         self.scheduler_observer.add_reminder_at(
-            due_at,
-            message,
+            reminder.due_at,
+            reminder.message,
+            priority=reminder.priority,
             task_id=task_id
         )
 
-        response = f"Reminder set: {message}."
+        response = f"Reminder set: {reminder.message}."
 
         return response
+
+    def _run_startup_health_check(self):
+        message = self.startup_health.alert_message()
+
+        if not message:
+            return None
+
+        self.execute(
+            Action(
+                type="speak",
+                payload={
+                    "text": message
+                }
+            )
+        )
+        self.execute(
+            Action(
+                type="notify",
+                payload={
+                    "title": "Entity startup diagnostic",
+                    "text": message,
+                    "priority": "urgent"
+                }
+            )
+        )
+
+        return message
+
+    def _handle_briefing_command(self, command):
+        normalized = command.lower().strip()
+
+        if not (
+            "today briefing" in normalized
+            or "daily briefing" in normalized
+            or "morning briefing" in normalized
+            or "brief me" in normalized
+            or "what's my day" in normalized
+            or "what is my day" in normalized
+        ):
+            return None
+
+        return self.today_briefing.build()
 
     def _handle_calendar_command(self, command, channel="voice"):
         draft = self.calendar_extractor.extract(

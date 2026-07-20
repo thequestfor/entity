@@ -45,6 +45,19 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status_due_at
 ON tasks(status, due_at);
 
+CREATE TABLE IF NOT EXISTS geocodes (
+    query TEXT PRIMARY KEY,
+    longitude REAL NOT NULL,
+    latitude REAL NOT NULL,
+    provider TEXT NOT NULL,
+    formatted TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    last_accessed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_geocodes_provider
+ON geocodes(provider);
+
 CREATE TABLE IF NOT EXISTS conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_text TEXT NOT NULL,

@@ -206,6 +206,104 @@ class MemoryStore:
                 )
             )
 
+    def get_geocode(self, query, provider):
+        key = self._geocode_key(query)
+
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM geocodes
+                WHERE query = ?
+                  AND provider = ?
+                """,
+                (
+                    key,
+                    provider
+                )
+            ).fetchone()
+
+            if not row:
+                return None
+
+            conn.execute(
+                """
+                UPDATE geocodes
+                SET last_accessed_at = ?
+                WHERE query = ?
+                  AND provider = ?
+                """,
+                (
+                    utc_now(),
+                    key,
+                    provider
+                )
+            )
+
+        return {
+            "query": row["query"],
+            "longitude": row["longitude"],
+            "latitude": row["latitude"],
+            "provider": row["provider"],
+            "formatted": row["formatted"],
+            "created_at": row["created_at"],
+            "last_accessed_at": row["last_accessed_at"]
+        }
+
+    def set_geocode(
+        self,
+        query,
+        provider,
+        longitude,
+        latitude,
+        formatted=""
+    ):
+        key = self._geocode_key(query)
+        now = utc_now()
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO geocodes (
+                    query,
+                    longitude,
+                    latitude,
+                    provider,
+                    formatted,
+                    created_at,
+                    last_accessed_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(query)
+                DO UPDATE SET
+                    longitude = excluded.longitude,
+                    latitude = excluded.latitude,
+                    provider = excluded.provider,
+                    formatted = excluded.formatted,
+                    last_accessed_at = excluded.last_accessed_at
+                """,
+                (
+                    key,
+                    longitude,
+                    latitude,
+                    provider,
+                    formatted,
+                    now,
+                    now
+                )
+            )
+
+    def count_geocodes(self):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM geocodes"
+            ).fetchone()
+
+        return row["count"]
+
+    def _geocode_key(self, query):
+        return " ".join(query.lower().strip().split())
+
     def list_memories(self, kind=None, limit=20):
         query = """
             SELECT *

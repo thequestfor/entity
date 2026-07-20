@@ -25,7 +25,7 @@ class RouteEstimate:
 
 
 class RoutePlanner:
-    def __init__(self):
+    def __init__(self, store=None):
         self.provider = os.getenv("ENTITY_ROUTES_PROVIDER", "").lower()
         self.api_key = os.getenv("ENTITY_OPENROUTESERVICE_API_KEY", "")
         self.home_address = os.getenv("ENTITY_HOME_ADDRESS", "")
@@ -44,6 +44,7 @@ class RoutePlanner:
             "https://api.openrouteservice.org"
         ).rstrip("/")
         self._geocode_cache = {}
+        self.store = store or self._default_store()
 
     def available(self):
         return (
@@ -123,6 +124,16 @@ class RoutePlanner:
         if key in self._geocode_cache:
             return self._geocode_cache[key]
 
+        cached = self.store.get_geocode(query, self.provider)
+
+        if cached:
+            coords = [
+                cached["longitude"],
+                cached["latitude"]
+            ]
+            self._geocode_cache[key] = coords
+            return coords
+
         params = urllib.parse.urlencode(
             {
                 "text": query,
@@ -136,8 +147,21 @@ class RoutePlanner:
             raise RuntimeError(f"Could not geocode location: {query}")
 
         coords = features[0]["geometry"]["coordinates"]
+        formatted = features[0].get("properties", {}).get("label", "")
+        self.store.set_geocode(
+            query,
+            self.provider,
+            longitude=coords[0],
+            latitude=coords[1],
+            formatted=formatted
+        )
         self._geocode_cache[key] = coords
         return coords
+
+    def _default_store(self):
+        from agent.memory.store import MemoryStore
+
+        return MemoryStore()
 
     def _get_json(self, path):
         request = urllib.request.Request(

@@ -21,7 +21,7 @@ Current capabilities:
   and scheduled tasks
 - semantic memory evaluation, with model-backed judgment when a language
   model is available and conservative fallback behavior when it is not
-- persistent reminders that survive restarts
+- LLM-extracted persistent reminders that survive restarts
 - importance policy for event decisions, notification gating, and model
   outage alerts
 - deterministic arithmetic handling for basic calculations
@@ -34,6 +34,10 @@ Current capabilities:
   configured
 - route-duration based departure alerts for upcoming calendar events when
   openrouteservice is configured
+- cached geocoding for repeated route destinations
+- Today Briefing summaries using calendar, reminders, and departure advice
+- startup diagnostic alerts for configured services that are offline or
+  missing API credentials
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition

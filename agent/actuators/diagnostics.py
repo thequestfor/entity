@@ -26,6 +26,7 @@ class DiagnosticsActuator:
         lines.extend(self._notification_status())
         lines.extend(self._calendar_status())
         lines.extend(self._route_status())
+        lines.extend(self._startup_health_status(runtime))
         lines.extend(self._memory_status())
         lines.extend(self._importance_status(runtime))
         lines.extend(self._runtime_status(runtime))
@@ -173,6 +174,24 @@ class DiagnosticsActuator:
                 f"Route planning status unavailable: {exc}."
             ]
 
+    def _startup_health_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "startup_health"):
+            return [
+                "Startup health status unavailable."
+            ]
+
+        issues = runtime.startup_health.issues()
+
+        if not issues:
+            return [
+                "Startup health check passing."
+            ]
+
+        return [
+            "Startup health issues: "
+            + " ".join(issues)
+        ]
+
     def _memory_status(self):
         try:
             from agent.memory.store import MemoryStore
@@ -183,10 +202,12 @@ class DiagnosticsActuator:
                 conn.execute("SELECT 1").fetchone()
 
             pending = len(store.pending_tasks())
+            geocodes = store.count_geocodes()
 
             return [
                 "Memory database online.",
-                f"Pending tasks: {pending}."
+                f"Pending tasks: {pending}.",
+                f"Geocode cache entries: {geocodes}."
             ]
         except Exception as exc:
             return [

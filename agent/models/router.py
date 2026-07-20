@@ -47,6 +47,20 @@ CALENDAR_PLANNING_PATTERNS = [
     r"\bif\b.*\bthen\b"
 ]
 
+REMINDER_PLANNING_PATTERNS = [
+    r"\bbefore my next\b",
+    r"\bwhen\b",
+    r"\bif\b",
+    r"\bunless\b",
+    r"\bafter\b",
+    r"\bbased on\b",
+    r"\bcalendar\b",
+    r"\bclass\b",
+    r"\bwork\b",
+    r"\barrive\b",
+    r"\bleave\b"
+]
+
 
 class ModelRouter:
     def __init__(self, providers=None):
@@ -194,6 +208,23 @@ class ModelRouter:
                 reason="The fast local model is unavailable for calendar extraction."
             )
 
+        if routing == "reminder_extract":
+            if self._needs_reminder_planning(user_input):
+                return self._available_sequence(
+                    preferred=["local_thinking", "cloud_openai", "local_fast"],
+                    on_escalation=on_escalation,
+                    reason=(
+                        "This reminder request depends on context, timing, "
+                        "or conditional planning."
+                    )
+                )
+
+            return self._available_sequence(
+                preferred=["local_fast", "local_thinking", "cloud_openai"],
+                on_escalation=on_escalation,
+                reason="The fast local model is unavailable for reminder extraction."
+            )
+
         if self.should_escalate(user_input):
             return self._available_sequence(
                 preferred=["local_thinking", "cloud_openai", "local_fast"],
@@ -216,6 +247,17 @@ class ModelRouter:
         return any(
             re.search(pattern, normalized)
             for pattern in CALENDAR_PLANNING_PATTERNS
+        )
+
+    def _needs_reminder_planning(self, user_input):
+        if not user_input:
+            return False
+
+        normalized = user_input.lower()
+
+        return any(
+            re.search(pattern, normalized)
+            for pattern in REMINDER_PLANNING_PATTERNS
         )
 
     def _available_sequence(self, preferred, on_escalation, reason):
