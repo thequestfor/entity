@@ -4,6 +4,7 @@ import time
 
 from agent.confirmations import ConfirmationStore
 from agent.events import Event
+from agent.goals import AutonomousGoalPolicy
 from agent.health import StartupHealthCheck
 from agent.memory.store import MemoryStore
 
@@ -13,12 +14,16 @@ class AutonomyObserver:
         self,
         store=None,
         health_check=None,
-        confirmation_store=None
+        confirmation_store=None,
+        goal_policy=None
     ):
         self.store = store or MemoryStore()
         self.health_check = health_check or StartupHealthCheck()
         self.confirmation_store = (
             confirmation_store or ConfirmationStore(store=self.store)
+        )
+        self.goal_policy = goal_policy or AutonomousGoalPolicy(
+            store=self.store
         )
         self.event_bus = None
         self.running = False
@@ -65,7 +70,8 @@ class AutonomyObserver:
 
         return (
             "Autonomous self-maintenance online. "
-            f"Poll interval: {self.poll_seconds} seconds."
+            f"Poll interval: {self.poll_seconds} seconds. "
+            + self.goal_policy.setup_status()
         )
 
     def _run(self):
@@ -82,27 +88,33 @@ class AutonomyObserver:
     def _poll(self):
         health_issues = self.health_check.issues()
         pending_confirmation = self.confirmation_store.current()
-        messages = []
-        priority = 5
+        goal = self.goal_policy.choose(
+            health_issues=health_issues,
+            pending_confirmation=pending_confirmation,
+            presence_state=self.store.get_state("presence", default={}) or {},
+            pending_tasks=self.store.pending_tasks(),
+            recent_decisions=self.store.recent_planner_decisions(limit=5)
+        )
 
-        if health_issues:
-            messages.append(
-                "Autonomous maintenance found service issues. "
-                + " ".join(health_issues)
-            )
-            priority = 8
+        self.store.add_autonomous_goal(
+            name=goal.name,
+            priority=goal.priority,
+            message=goal.message,
+            reason=goal.reason,
+            confidence=goal.confidence,
+            outcome="selected",
+            metadata={
+                "notify": goal.notify,
+                "speak": goal.speak,
+                "store_reflection": goal.store_reflection
+            }
+        )
 
-        if pending_confirmation:
-            messages.append(
-                "A pending action is still waiting for confirmation."
-            )
-            priority = max(priority, 6)
-
-        if not messages:
+        if goal.name == "stay_idle":
             self._set_last_signature("")
             return
 
-        signature = self._signature(health_issues, pending_confirmation)
+        signature = self._signature(goal, pending_confirmation)
 
         if not self._should_publish(signature):
             return
@@ -113,13 +125,14 @@ class AutonomyObserver:
         self.event_bus.publish(
             Event(
                 source="autonomy",
-                type="autonomy_check",
+                type="autonomous_goal",
                 payload={
-                    "message": " ".join(messages),
+                    "message": goal.message,
+                    "goal": goal.to_dict(),
                     "health_issues": health_issues,
                     "pending_confirmation": bool(pending_confirmation)
                 },
-                priority=priority
+                priority=goal.priority
             )
         )
 
@@ -134,7 +147,7 @@ class AutonomyObserver:
 
         return time.time() - last_published_at >= self.alert_repeat_seconds
 
-    def _signature(self, health_issues, pending_confirmation):
+    def _signature(self, goal, pending_confirmation):
         pending_id = ""
 
         if pending_confirmation:
@@ -142,7 +155,8 @@ class AutonomyObserver:
 
         return "|".join(
             [
-                *health_issues,
+                goal.name,
+                goal.message,
                 f"pending_confirmation:{pending_id}"
             ]
         )

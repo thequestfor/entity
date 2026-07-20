@@ -32,6 +32,7 @@ class DiagnosticsActuator:
         lines.extend(self._presence_status(runtime))
         lines.extend(self._planner_status(runtime))
         lines.extend(self._confirmation_status(runtime))
+        lines.extend(self._autonomous_goal_status(runtime))
         lines.extend(self._learning_status(runtime))
         lines.extend(self._behavior_feedback_status(runtime))
         lines.extend(self._memory_status())
@@ -251,6 +252,19 @@ class DiagnosticsActuator:
             runtime.confirmation_store.setup_status()
         ]
 
+    def _autonomous_goal_status(self, runtime):
+        observers = getattr(runtime, "observers", []) if runtime else []
+
+        for observer in observers:
+            if observer.__class__.__name__ == "AutonomyObserver":
+                return [
+                    observer.setup_status()
+                ]
+
+        return [
+            "Autonomous goal selection status unavailable."
+        ]
+
     def _learning_status(self, runtime):
         if runtime is None or not hasattr(runtime, "learning_policy"):
             return [
@@ -285,6 +299,7 @@ class DiagnosticsActuator:
             research_memories = store.count_memories(source="research")
             behavior_rules = store.count_memories(kind="behavior_rule")
             planner_decisions = store.count_planner_decisions()
+            autonomous_goals = store.count_autonomous_goals()
 
             return [
                 "Memory database online.",
@@ -292,7 +307,8 @@ class DiagnosticsActuator:
                 f"Geocode cache entries: {geocodes}.",
                 f"Sourced research memories: {research_memories}.",
                 f"Behavior rules: {behavior_rules}.",
-                f"Planner decisions recorded: {planner_decisions}."
+                f"Planner decisions recorded: {planner_decisions}.",
+                f"Autonomous goals recorded: {autonomous_goals}."
             ]
         except Exception as exc:
             return [

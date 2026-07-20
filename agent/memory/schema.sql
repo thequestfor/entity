@@ -94,6 +94,25 @@ ON planner_decisions(created_at);
 CREATE INDEX IF NOT EXISTS idx_planner_decisions_outcome
 ON planner_decisions(outcome);
 
+CREATE TABLE IF NOT EXISTS autonomous_goals (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 1,
+    message TEXT NOT NULL DEFAULT '',
+    reason TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL DEFAULT 0,
+    outcome TEXT NOT NULL DEFAULT 'selected',
+    metadata TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_autonomous_goals_created_at
+ON autonomous_goals(created_at);
+
+CREATE INDEX IF NOT EXISTS idx_autonomous_goals_name
+ON autonomous_goals(name);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
 USING fts5(
     content,

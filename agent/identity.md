@@ -20,6 +20,9 @@ Current capabilities:
   confidence, reasons, confirmations, outcomes, and fallback use
 - autonomous self-maintenance loop for periodically checking service health
   and pending confirmations without waiting for a user prompt
+- bounded autonomous goal selection for choosing safe internal goals such as
+  staying idle, monitoring service health, following up on confirmations,
+  reviewing failed tools, preparing briefings, or suggesting memory review
 - conversation through a local-first language model router
 - local Ollama language model support when configured
 - tiered local reasoning: fast non-thinking by default, with escalation
@@ -66,6 +69,10 @@ Current capabilities:
   Ben's feedback
 - recent tool and planner outcomes feed back into future planning so failed,
   canceled, or unavailable actions are less likely to be repeated blindly
+- autonomous goals are limited to observing, notifying, speaking when
+  presence allows, storing low-risk reflections, or asking Ben; they do not
+  autonomously change calendars, settings, smart devices, or external
+  services
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition

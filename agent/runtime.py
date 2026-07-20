@@ -176,8 +176,8 @@ class EntityRuntime:
         if event.type == "calendar_event_upcoming":
             return self.handle_calendar_event_upcoming(event)
 
-        if event.type == "autonomy_check":
-            return self.handle_autonomy_check(event)
+        if event.type in {"autonomy_check", "autonomous_goal"}:
+            return self.handle_autonomous_goal(event)
 
         if event.message:
             return self.handle_observed_event(event)
@@ -291,17 +291,32 @@ class EntityRuntime:
 
         return message
 
-    def handle_autonomy_check(self, event):
+    def handle_autonomous_goal(self, event):
         message = event.message
 
         if not message:
             return None
 
+        goal = event.payload.get("goal") or {}
+        should_store = bool(goal.get("store_reflection"))
+
+        if should_store:
+            self.task_store.add_memory(
+                kind="reflection",
+                content=message,
+                source="autonomy",
+                importance=min(10, max(1, event.priority)),
+                metadata={
+                    "goal": goal.get("name", "unknown"),
+                    "reason": goal.get("reason", "")
+                }
+            )
+
         return self._deliver_alert(
             message,
-            title="Entity autonomous maintenance",
+            title="Entity autonomous goal",
             priority="urgent" if event.priority >= 8 else "high",
-            force_notify=event.priority >= 8
+            force_notify=event.priority >= 8 or bool(goal.get("notify"))
         )
 
     def handle_observed_event(self, event):

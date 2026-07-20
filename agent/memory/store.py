@@ -254,6 +254,75 @@ class MemoryStore:
 
         return row["count"]
 
+    def add_autonomous_goal(
+        self,
+        name,
+        priority=1,
+        message="",
+        reason="",
+        confidence=0,
+        outcome="selected",
+        metadata=None,
+        goal_id=None
+    ):
+        goal_id = goal_id or str(uuid4())
+        now = utc_now()
+
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO autonomous_goals (
+                    id,
+                    name,
+                    priority,
+                    message,
+                    reason,
+                    confidence,
+                    outcome,
+                    metadata,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    goal_id,
+                    name,
+                    priority,
+                    message,
+                    reason,
+                    float(confidence or 0),
+                    outcome,
+                    self._json(metadata or {}),
+                    now,
+                    now
+                )
+            )
+
+        return goal_id
+
+    def recent_autonomous_goals(self, limit=10):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM autonomous_goals
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+
+        return [self._autonomous_goal_from_row(row) for row in rows]
+
+    def count_autonomous_goals(self):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM autonomous_goals"
+            ).fetchone()
+
+        return row["count"]
+
     def add_task(
         self,
         title,
@@ -588,6 +657,11 @@ class MemoryStore:
         item["confirmation_required"] = bool(
             item.get("confirmation_required")
         )
+        return item
+
+    def _autonomous_goal_from_row(self, row):
+        item = dict(row)
+        item["metadata"] = json.loads(item.get("metadata") or "{}")
         return item
 
     def _task_from_row(self, row):
