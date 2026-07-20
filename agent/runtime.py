@@ -31,6 +31,7 @@ from agent.observers import (
 from agent.policy import Policy
 from agent.planner import AgentPlanner
 from agent.presence import PresenceState
+from agent.reflection import PeriodicReflection
 from agent.reminders import ReminderIntentExtractor
 from agent.research import ResearchTool
 from agent.routes import RoutePlanner
@@ -57,6 +58,7 @@ class EntityRuntime:
         behavior_feedback_policy=None,
         planner=None,
         confirmation_store=None,
+        reflection=None,
         observers=None,
         actuators=None,
         policy=None
@@ -92,6 +94,9 @@ class EntityRuntime:
                 ttl_seconds=self._confirmation_ttl_seconds()
             )
         )
+        self.reflection = reflection or PeriodicReflection(
+            store=self.task_store
+        )
         self.last_research_result = None
         self.recent_actions = []
         self.recent_responses = []
@@ -101,7 +106,8 @@ class EntityRuntime:
                 AutonomyObserver(
                     store=self.task_store,
                     health_check=self.startup_health,
-                    confirmation_store=self.confirmation_store
+                    confirmation_store=self.confirmation_store,
+                    reflection=self.reflection
                 ),
                 CalendarObserver(),
                 NtfyObserver(),
@@ -294,30 +300,115 @@ class EntityRuntime:
     def handle_autonomous_goal(self, event):
         message = event.message
 
-        if not message:
+        goal = event.payload.get("goal") or {}
+        goal_name = goal.get("name", "unknown")
+
+        if goal_name == "prepare_today_briefing":
+            message = self.today_briefing.build()
+        elif goal_name == "review_failed_tool":
+            message = self._autonomous_failed_tool_review(message)
+        elif goal_name == "suggest_memory_review":
+            message = self._autonomous_memory_review_suggestion(message)
+        elif goal_name == "periodic_reflection":
+            return self._run_periodic_reflection()
+        elif not message:
             return None
 
-        goal = event.payload.get("goal") or {}
-        should_store = bool(goal.get("store_reflection"))
-
-        if should_store:
+        if bool(goal.get("store_reflection")) and message:
             self.task_store.add_memory(
                 kind="reflection",
                 content=message,
                 source="autonomy",
                 importance=min(10, max(1, event.priority)),
                 metadata={
-                    "goal": goal.get("name", "unknown"),
+                    "goal": goal_name,
                     "reason": goal.get("reason", "")
                 }
             )
 
-        return self._deliver_alert(
+        return self._deliver_autonomous_goal_message(
             message,
             title="Entity autonomous goal",
             priority="urgent" if event.priority >= 8 else "high",
-            force_notify=event.priority >= 8 or bool(goal.get("notify"))
+            notify=event.priority >= 8 or bool(goal.get("notify")),
+            speak=bool(goal.get("speak"))
         )
+
+    def _run_periodic_reflection(self):
+        result = self.reflection.reflect()
+
+        if not result:
+            return "Periodic reflection completed without storing a new memory."
+
+        return f"Periodic reflection stored: {result['content']}"
+
+    def _autonomous_failed_tool_review(self, fallback_message):
+        decisions = self.task_store.recent_planner_decisions(limit=10)
+        failed = [
+            item
+            for item in decisions
+            if item.get("outcome") in {"fallback_used", "canceled", "failed"}
+        ]
+
+        if not failed:
+            return fallback_message or "No recent failed tool decision found."
+
+        decision = failed[0]
+        response = decision.get("response") or "No response recorded."
+
+        return (
+            "Recent tool review: "
+            f"intent {decision.get('intent', 'unknown')} ended as "
+            f"{decision.get('outcome', 'unknown')}. "
+            f"Last response: {response}"
+        )
+
+    def _autonomous_memory_review_suggestion(self, fallback_message):
+        memories = self.task_store.list_memories(limit=5)
+
+        if not memories:
+            return fallback_message or "No memories are ready for review."
+
+        top = memories[0]
+
+        return (
+            "Memory review suggestion: "
+            f"{top['kind']} from {top['source']} says {top['content']}"
+        )
+
+    def _deliver_autonomous_goal_message(
+        self,
+        text,
+        title="Entity autonomous goal",
+        priority="high",
+        notify=False,
+        speak=False
+    ):
+        delivered = None
+
+        if speak and self.presence.should_speak():
+            delivered = self.execute(
+                Action(
+                    type="speak",
+                    payload={
+                        "text": text
+                    }
+                )
+            )
+
+        if notify:
+            delivered = self.execute(
+                Action(
+                    type="notify",
+                    payload={
+                        "title": title,
+                        "text": text,
+                        "priority": priority
+                    }
+                )
+            )
+
+        return delivered or text
 
     def handle_observed_event(self, event):
         decision = self.importance_policy.evaluate(

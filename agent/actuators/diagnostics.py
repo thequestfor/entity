@@ -298,6 +298,7 @@ class DiagnosticsActuator:
             geocodes = store.count_geocodes()
             research_memories = store.count_memories(source="research")
             behavior_rules = store.count_memories(kind="behavior_rule")
+            reflections = store.count_memories(kind="reflection")
             planner_decisions = store.count_planner_decisions()
             autonomous_goals = store.count_autonomous_goals()
 
@@ -307,6 +308,7 @@ class DiagnosticsActuator:
                 f"Geocode cache entries: {geocodes}.",
                 f"Sourced research memories: {research_memories}.",
                 f"Behavior rules: {behavior_rules}.",
+                f"Reflection memories: {reflections}.",
                 f"Planner decisions recorded: {planner_decisions}.",
                 f"Autonomous goals recorded: {autonomous_goals}."
             ]

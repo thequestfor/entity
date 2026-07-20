@@ -7,6 +7,7 @@ from agent.events import Event
 from agent.goals import AutonomousGoalPolicy
 from agent.health import StartupHealthCheck
 from agent.memory.store import MemoryStore
+from agent.reflection import PeriodicReflection
 
 
 class AutonomyObserver:
@@ -15,7 +16,8 @@ class AutonomyObserver:
         store=None,
         health_check=None,
         confirmation_store=None,
-        goal_policy=None
+        goal_policy=None,
+        reflection=None
     ):
         self.store = store or MemoryStore()
         self.health_check = health_check or StartupHealthCheck()
@@ -25,6 +27,7 @@ class AutonomyObserver:
         self.goal_policy = goal_policy or AutonomousGoalPolicy(
             store=self.store
         )
+        self.reflection = reflection or PeriodicReflection(store=self.store)
         self.event_bus = None
         self.running = False
         self.thread = None
@@ -72,6 +75,8 @@ class AutonomyObserver:
             "Autonomous self-maintenance online. "
             f"Poll interval: {self.poll_seconds} seconds. "
             + self.goal_policy.setup_status()
+            + " "
+            + self.reflection.setup_status()
         )
 
     def _run(self):
@@ -93,7 +98,9 @@ class AutonomyObserver:
             pending_confirmation=pending_confirmation,
             presence_state=self.store.get_state("presence", default={}) or {},
             pending_tasks=self.store.pending_tasks(),
-            recent_decisions=self.store.recent_planner_decisions(limit=5)
+            recent_decisions=self.store.recent_planner_decisions(limit=5),
+            recent_goals=self.store.recent_autonomous_goals(limit=10),
+            reflection_due=self.reflection.due()
         )
 
         self.store.add_autonomous_goal(

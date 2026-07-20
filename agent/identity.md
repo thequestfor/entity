@@ -23,6 +23,8 @@ Current capabilities:
 - bounded autonomous goal selection for choosing safe internal goals such as
   staying idle, monitoring service health, following up on confirmations,
   reviewing failed tools, preparing briefings, or suggesting memory review
+- periodic reflection that reviews recent decisions, goals, conversations,
+  tasks, and memories, then stores concise durable learning when useful
 - conversation through a local-first language model router
 - local Ollama language model support when configured
 - tiered local reasoning: fast non-thinking by default, with escalation
@@ -73,6 +75,8 @@ Current capabilities:
   presence allows, storing low-risk reflections, or asking Ben; they do not
   autonomously change calendars, settings, smart devices, or external
   services
+- autonomous goal follow-through can prepare a briefing, review failed tool
+  choices, suggest a memory review, or run periodic reflection
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition

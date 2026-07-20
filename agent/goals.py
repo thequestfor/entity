@@ -15,7 +15,8 @@ ALLOWED_GOALS = {
     "follow_up_pending_confirmation",
     "prepare_today_briefing",
     "review_failed_tool",
-    "suggest_memory_review"
+    "suggest_memory_review",
+    "periodic_reflection"
 }
 
 
@@ -55,7 +56,9 @@ class AutonomousGoalPolicy:
         pending_confirmation=None,
         presence_state=None,
         pending_tasks=None,
-        recent_decisions=None
+        recent_decisions=None,
+        recent_goals=None,
+        reflection_due=False
     ):
         if not self.enabled:
             return idle_goal("Autonomous goal selection disabled.")
@@ -66,7 +69,9 @@ class AutonomousGoalPolicy:
             "pending_confirmation": bool(pending_confirmation),
             "presence": presence_state or {},
             "pending_tasks": (pending_tasks or [])[:5],
-            "recent_decisions": (recent_decisions or [])[:5]
+            "recent_decisions": (recent_decisions or [])[:5],
+            "recent_goals": (recent_goals or [])[:10],
+            "reflection_due": bool(reflection_due)
         }
 
         goal = self._model_goal(context)
@@ -103,7 +108,8 @@ class AutonomousGoalPolicy:
             "browse the web autonomously in this version. Return JSON only.\n\n"
             "Allowed goals: stay_idle, monitor_service_health, "
             "follow_up_pending_confirmation, prepare_today_briefing, "
-            "review_failed_tool, suggest_memory_review.\n\n"
+            "review_failed_tool, suggest_memory_review, "
+            "periodic_reflection.\n\n"
             "Rules:\n"
             "- Choose stay_idle when there is nothing useful to do.\n"
             "- Choose monitor_service_health for missing critical services.\n"
@@ -112,6 +118,8 @@ class AutonomousGoalPolicy:
             "failed, fallback, canceled, or unavailable tool outcomes.\n"
             "- Choose prepare_today_briefing only when timing and presence make "
             "a briefing useful.\n"
+            "- Choose periodic_reflection when reflection_due is true and no "
+            "higher-priority health or confirmation issue exists.\n"
             "- Keep messages short and concrete.\n\n"
             "Return exactly this JSON shape:\n"
             "{\n"
@@ -196,6 +204,29 @@ class AutonomousGoalPolicy:
                 store_reflection=True
             )
 
+        if context["reflection_due"]:
+            return AutonomousGoal(
+                name="periodic_reflection",
+                priority=4,
+                message="Periodic reflection is due.",
+                reason="The reflection interval elapsed.",
+                confidence=0.75,
+                notify=False,
+                speak=False,
+                store_reflection=False
+            )
+
+        if self._briefing_makes_sense(context):
+            return AutonomousGoal(
+                name="prepare_today_briefing",
+                priority=4,
+                message="Preparing today's briefing.",
+                reason="Morning briefing window is active.",
+                confidence=0.65,
+                notify=False,
+                speak=True
+            )
+
         return idle_goal("No useful autonomous goal right now.")
 
     def _recent_failed_decision(self, decisions):
@@ -210,6 +241,25 @@ class AutonomousGoalPolicy:
                 return decision
 
         return None
+
+    def _briefing_makes_sense(self, context):
+        presence = context.get("presence") or {}
+
+        if presence.get("availability") in {"sleeping", "do_not_disturb"}:
+            return False
+
+        hour = datetime.fromisoformat(
+            context["current_local_datetime"]
+        ).hour
+
+        if hour < 6 or hour > 10:
+            return False
+
+        for goal in context.get("recent_goals", []):
+            if goal.get("name") == "prepare_today_briefing":
+                return False
+
+        return True
 
     def _now(self):
         timezone = ZoneInfo(
