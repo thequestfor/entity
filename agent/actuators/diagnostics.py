@@ -26,6 +26,7 @@ class DiagnosticsActuator:
         lines.extend(self._notification_status())
         lines.extend(self._calendar_status())
         lines.extend(self._route_status())
+        lines.extend(self._weather_status())
         lines.extend(self._research_status())
         lines.extend(self._research_memory_status(runtime))
         lines.extend(self._startup_health_status(runtime))
@@ -180,6 +181,18 @@ class DiagnosticsActuator:
         except Exception as exc:
             return [
                 f"Route planning status unavailable: {exc}."
+            ]
+
+    def _weather_status(self):
+        try:
+            from agent.weather import WeatherTool
+
+            return [
+                WeatherTool().setup_status()
+            ]
+        except Exception as exc:
+            return [
+                f"Weather lookup status unavailable: {exc}."
             ]
 
     def _research_status(self):

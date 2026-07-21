@@ -16,6 +16,7 @@ ALLOWED_TOOLS = {
     "set_voice",
     "arithmetic",
     "briefing",
+    "weather",
     "notify",
     "research",
     "research_and_remember",
@@ -152,9 +153,10 @@ class AgentPlanner:
             "- Read the user's actual intent, then choose the smallest useful "
             "set of tools from the capability context.\n"
             "- Compose tools when the user asks for a workflow. For example, "
-            "research with args.notify true when the user wants the result "
-            "sent after completion, or create a calendar event when the user "
-            "wants something scheduled.\n"
+            "weather when the user asks about conditions, research with "
+            "args.notify true when the user wants the result sent after "
+            "completion, or create a calendar event when the user wants "
+            "something scheduled.\n"
             "- Use observers listed in capability context as available input "
             "channels and actuators listed there as available output channels.\n"
             "- Use answer only when no tool is needed.\n"

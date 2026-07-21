@@ -35,6 +35,7 @@ from agent.reflection import PeriodicReflection
 from agent.reminders import ReminderIntentExtractor
 from agent.research import ResearchTool
 from agent.routes import RoutePlanner
+from agent.weather import WeatherTool
 
 
 class EntityRuntime:
@@ -49,6 +50,7 @@ class EntityRuntime:
         reminder_extractor=None,
         arithmetic_handler=None,
         route_planner=None,
+        weather_tool=None,
         startup_health=None,
         today_briefing=None,
         presence=None,
@@ -77,6 +79,7 @@ class EntityRuntime:
         self.reminder_extractor = reminder_extractor or ReminderIntentExtractor()
         self.arithmetic_handler = arithmetic_handler or ArithmeticHandler()
         self.route_planner = route_planner or RoutePlanner()
+        self.weather_tool = weather_tool or WeatherTool()
         self.startup_health = startup_health or StartupHealthCheck()
         self.today_briefing = today_briefing or TodayBriefing()
         self.presence = presence or PresenceState()
@@ -606,6 +609,11 @@ class EntityRuntime:
         if briefing_response:
             return briefing_response
 
+        weather_response = self._handle_weather_command(command)
+
+        if weather_response:
+            return weather_response
+
         research_memory_response = self._handle_research_memory_command(
             command,
             source=source
@@ -755,6 +763,15 @@ class EntityRuntime:
             {
                 "name": "briefing",
                 "description": "Build today's schedule and status briefing."
+            },
+            {
+                "name": "weather",
+                "description": (
+                    "Look up current weather and today's forecast. "
+                    "args.location is optional when a default location is "
+                    "configured. args.question should preserve what the user "
+                    "wants to know, such as whether to bring a jacket."
+                )
             },
             {
                 "name": "notify",
@@ -1086,6 +1103,13 @@ class EntityRuntime:
             if tool == "briefing":
                 return self.today_briefing.build()
 
+            if tool == "weather":
+                return self._run_weather(
+                    location=str(args.get("location", "")).strip(),
+                    question=str(args.get("question", command)).strip()
+                    or command
+                )
+
             if tool == "notify":
                 text = str(args.get("text", "")).strip()
 
@@ -1290,6 +1314,12 @@ class EntityRuntime:
             if owns_active_work:
                 self._finish_active_work()
 
+    def _run_weather(self, location="", question=""):
+        return self.weather_tool.lookup(
+            location=location,
+            question=question
+        )
+
     def _create_reminder_from_command(self, command, source="voice"):
         reminder = self.reminder_extractor.extract(
             command,
@@ -1391,6 +1421,59 @@ class EntityRuntime:
             return None
 
         return self.today_briefing.build()
+
+    def _handle_weather_command(self, command):
+        location = self._weather_location(command)
+
+        if location is None:
+            return None
+
+        return self._run_weather(
+            location=location,
+            question=command
+        )
+
+    def _weather_location(self, command):
+        normalized = command.lower().strip()
+
+        if not any(
+            phrase in normalized
+            for phrase in (
+                "weather",
+                "forecast",
+                "temperature",
+                "rain",
+                "umbrella",
+                "jacket outside",
+                "cold outside",
+                "hot outside"
+            )
+        ):
+            return None
+
+        patterns = [
+            r"\bweather\s+(?:in|at|for)\s+(.+)$",
+            r"\bforecast\s+(?:in|at|for)\s+(.+)$",
+            r"\btemperature\s+(?:in|at|for)\s+(.+)$"
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, command, re.IGNORECASE)
+
+            if match:
+                return self._clean_weather_location(match.group(1))
+
+        return ""
+
+    def _clean_weather_location(self, location):
+        cleaned = location.strip()
+        cleaned = re.sub(
+            r"\s+(?:today|right now|currently|this morning|this afternoon|tonight)\s*$",
+            "",
+            cleaned,
+            flags=re.IGNORECASE
+        ).strip()
+        return cleaned
 
     def _handle_research_command(self, command):
         query = self._research_query(command)
