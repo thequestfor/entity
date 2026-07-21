@@ -8,6 +8,8 @@ __pycache__/
 *.wav
 *_test.py
 test_*.py
+!tests/
+!tests/test_*.py
 brain.py
 hearing.py
 phrases.py

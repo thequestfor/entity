@@ -1,5 +1,6 @@
 import json
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -198,7 +199,6 @@ class RoutePlanner:
                 "departAt": "now",
                 "routeType": "fastest",
                 "travelMode": self._tomtom_travel_mode(),
-                "instructionsType": "none",
                 "computeTravelTimeFor": "all"
             }
         )
@@ -373,5 +373,25 @@ class RoutePlanner:
         try:
             with urllib.request.urlopen(request, timeout=15) as response:
                 return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            detail = self._http_error_detail(exc)
+            raise RuntimeError(
+                f"Route provider request failed ({exc.code}): {detail}"
+            ) from exc
         except Exception as exc:
             raise RuntimeError(f"Route provider request failed: {exc}") from exc
+
+    def _http_error_detail(self, error):
+        try:
+            payload = json.loads(error.read().decode("utf-8"))
+        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
+            return error.reason or "HTTP request failed"
+
+        detailed = payload.get("detailedError") or {}
+        return (
+            detailed.get("message")
+            or payload.get("errorText")
+            or payload.get("message")
+            or error.reason
+            or "HTTP request failed"
+        )

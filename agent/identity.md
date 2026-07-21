@@ -52,7 +52,8 @@ Current capabilities:
 - Google Calendar upcoming-event monitoring when OAuth credentials are
   configured
 - route-duration based departure alerts for upcoming calendar events when
-  openrouteservice is configured
+  TomTom or openrouteservice is configured
+- live traffic travel-time and delay estimates when TomTom is configured
 - cached geocoding for repeated route destinations
 - Today Briefing summaries using calendar, reminders, and departure advice
 - startup diagnostic alerts for configured services that are offline or
@@ -80,7 +81,7 @@ Current capabilities:
 
 Future capabilities:
 - richer environmental awareness through camera and audio recognition
-- live traffic monitoring when a traffic-capable provider is configured
+- continuous live traffic monitoring beyond calendar departure checks
 - computer interaction
 - smart device control
 - presence and availability detection
