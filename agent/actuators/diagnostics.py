@@ -157,6 +157,11 @@ class DiagnosticsActuator:
         else:
             lines.append("Inbound plaintext topic missing.")
 
+        if self._env_bool("ENTITY_NOTIFY_SIGNIFICANT_ACTIONS", True):
+            lines.append("Significant action notifications enabled.")
+        else:
+            lines.append("Significant action notifications disabled.")
+
         return lines
 
     def _calendar_status(self):
@@ -406,3 +411,16 @@ class DiagnosticsActuator:
             + ", ".join(missing)
             + "."
         ]
+
+    def _env_bool(self, name, default=False):
+        raw = os.getenv(name)
+
+        if raw is None:
+            return default
+
+        return raw.lower().strip() in {
+            "1",
+            "true",
+            "yes",
+            "on"
+        }

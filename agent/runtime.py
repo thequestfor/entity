@@ -268,14 +268,12 @@ class EntityRuntime:
             awareness_state=self.awareness.snapshot()
         )
 
-        self._deliver_alert(
+        return self._deliver_alert(
             message,
             title="Entity reminder",
             priority="high",
-            force_notify=decision.should_notify
+            force_notify=True
         )
-
-        return message
 
     def handle_calendar_event_upcoming(self, event):
         message = event.message
@@ -697,6 +695,12 @@ class EntityRuntime:
 
             if response:
                 responses.append(response)
+                self._notify_significant_plan_step(
+                    step,
+                    command,
+                    response,
+                    source=source
+                )
 
         if responses:
             final_response = " ".join(responses)
@@ -826,6 +830,77 @@ class EntityRuntime:
         except Exception:
             return False
 
+    def _notify_significant_plan_step(
+        self,
+        step,
+        command,
+        response,
+        source="voice"
+    ):
+        if not self._should_notify_significant_actions(source, response):
+            return None
+
+        significant_tools = {
+            "set_presence": "presence updated",
+            "set_voice": "voice changed",
+            "research_and_remember": "research memory stored",
+            "remember_last_research": "research memory stored",
+            "store_memory": "memory stored",
+            "behavior_feedback": "behavior feedback learned"
+        }
+        label = significant_tools.get(step.tool)
+
+        if not label:
+            return None
+
+        return self._send_notification(
+            f"Entity {label}. Request: {command}. Result: {response}",
+            title="Entity action completed",
+            priority="default"
+        )
+
+    def _notify_significant_action(
+        self,
+        label,
+        command,
+        response,
+        source="voice",
+        priority="default"
+    ):
+        if not self._should_notify_significant_actions(source, response):
+            return None
+
+        return self._send_notification(
+            f"Entity {label}. Request: {command}. Result: {response}",
+            title="Entity action completed",
+            priority=priority
+        )
+
+    def _should_notify_significant_actions(self, source, response):
+        if source == "remote":
+            return False
+
+        if not response:
+            return False
+
+        return self._env_bool(
+            "ENTITY_NOTIFY_SIGNIFICANT_ACTIONS",
+            default=True
+        )
+
+    def _env_bool(self, name, default=False):
+        raw = os.getenv(name)
+
+        if raw is None:
+            return default
+
+        return raw.lower().strip() in {
+            "1",
+            "true",
+            "yes",
+            "on"
+        }
+
     def _handle_confirmation_command(self, command, source="voice"):
         normalized = command.lower().strip()
         pending = self.confirmation_store.current()
@@ -912,6 +987,12 @@ class EntityRuntime:
 
             if response:
                 responses.append(response)
+                self._notify_significant_plan_step(
+                    step,
+                    original_text,
+                    response,
+                    source=source
+                )
 
         if responses:
             final_response = " ".join(responses)
@@ -1346,7 +1427,14 @@ class EntityRuntime:
             task_id=task_id
         )
 
-        return f"Reminder set: {reminder.message}."
+        response = f"Reminder set: {reminder.message}."
+        self._notify_significant_action(
+            "set a reminder",
+            command,
+            response,
+            source=source
+        )
+        return response
 
     def _store_explicit_memory(self, command, args, source="user"):
         content = str(args.get("content", "")).strip()
@@ -1723,7 +1811,7 @@ class EntityRuntime:
         if draft is None:
             return None
 
-        return self.execute(
+        response = self.execute(
             Action(
                 type="calendar",
                 payload={
@@ -1732,6 +1820,13 @@ class EntityRuntime:
                 }
             )
         )
+        self._notify_significant_action(
+            "created a calendar event",
+            command,
+            response,
+            source=channel
+        )
+        return response
 
     def _parse_reminder(self, command):
         relative = self._parse_relative_reminder(command)

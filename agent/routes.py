@@ -41,7 +41,11 @@ class RoutePlanner:
         )
         self.base_url = os.getenv(
             "ENTITY_OPENROUTESERVICE_URL",
-            "https://api.openrouteservice.org"
+            "https://api.heigit.org/openrouteservice"
+        ).rstrip("/")
+        self.geocode_url = os.getenv(
+            "ENTITY_OPENROUTESERVICE_GEOCODE_URL",
+            "https://api.heigit.org/pelias/v1"
         ).rstrip("/")
         self._geocode_cache = {}
         self.store = store or self._default_store()
@@ -63,7 +67,11 @@ class RoutePlanner:
         if not self.home_address:
             return "Route planning enabled but home address is missing."
 
-        return f"Route planning configured through openrouteservice using {self.profile}."
+        return (
+            "Route planning configured through openrouteservice "
+            f"using {self.profile}. Provides route travel-time estimates, "
+            "not guaranteed live traffic."
+        )
 
     def departure_advice(self, event_payload):
         location = event_payload.get("location", "")
@@ -140,7 +148,7 @@ class RoutePlanner:
                 "size": 1
             }
         )
-        result = self._get_json(f"/geocode/search?{params}")
+        result = self._get_geocode_json(f"/search?{params}")
         features = result.get("features", [])
 
         if not features:
@@ -166,6 +174,16 @@ class RoutePlanner:
     def _get_json(self, path):
         request = urllib.request.Request(
             self.base_url + path,
+            headers={
+                "Authorization": self.api_key
+            }
+        )
+
+        return self._open_json(request)
+
+    def _get_geocode_json(self, path):
+        request = urllib.request.Request(
+            self.geocode_url + path,
             headers={
                 "Authorization": self.api_key
             }

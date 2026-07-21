@@ -18,6 +18,7 @@ class NotifyActuator:
 
     def execute(self, action):
         if not self.available():
+            print("Notification unavailable:", self.setup_status())
             return None
 
         text = action.payload.get("text", "")
@@ -42,7 +43,12 @@ class NotifyActuator:
             with urllib.request.urlopen(request, timeout=10) as response:
                 response.read()
             return text
+        except urllib.error.HTTPError as exc:
+            message = self._http_error_message(exc)
+            print(message)
+            return None
         except (OSError, urllib.error.URLError):
+            print("Notification failed: ntfy request could not be completed.")
             return None
 
     def available(self):
@@ -51,6 +57,18 @@ class NotifyActuator:
             and bool(self.base_url)
             and bool(self.topic)
         )
+
+    def setup_status(self):
+        if self.provider != "ntfy":
+            return "Plaintext notifications disabled."
+
+        if not self.base_url:
+            return "Plaintext notifications enabled but ntfy URL is missing."
+
+        if not self.topic:
+            return "Plaintext notifications enabled but outbound ntfy topic is missing."
+
+        return f"Plaintext notifications configured for {self._topic_url()}."
 
     def _topic_url(self):
         return urllib.parse.urljoin(
@@ -61,3 +79,14 @@ class NotifyActuator:
     def _add_auth(self, request):
         if self.token:
             request.add_header("Authorization", f"Bearer {self.token}")
+
+    def _http_error_message(self, exc):
+        try:
+            detail = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            detail = ""
+
+        if detail:
+            return f"Notification failed: ntfy returned HTTP {exc.code}: {detail}"
+
+        return f"Notification failed: ntfy returned HTTP {exc.code}."
