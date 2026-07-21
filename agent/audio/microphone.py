@@ -79,7 +79,7 @@ class Microphone:
         status
     ):
 
-        if is_speaking() or time.time() < self.wake_cooldown_until:
+        if is_speaking():
             return
 
         audio = np.squeeze(indata.copy())
@@ -88,6 +88,9 @@ class Microphone:
         self.live_audio.put(audio)
 
         if self.state != "wake":
+            return
+
+        if time.time() < self.wake_cooldown_until:
             return
 
         pcm = (
@@ -103,7 +106,7 @@ class Microphone:
                 print("Wake:", name)
 
                 self.state = "command"
-                self.wake_cooldown_until = time.time() + 1.5
+                self.wake_cooldown_until = time.time() + 0.35
 
                 self.wake_event.set()
 
@@ -132,9 +135,6 @@ class Microphone:
         reset_vad()
 
         self.preroll.clear()
-
-        self._clear_audio()
-        time.sleep(0.2)
 
 
     def listen(self):

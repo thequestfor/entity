@@ -534,6 +534,11 @@ class EntityRuntime:
         return delivered or text
 
     def _handle_runtime_command(self, command, source="voice"):
+        active_work_response = self._handle_active_work_command(command)
+
+        if active_work_response:
+            return active_work_response
+
         audit_response = self._handle_decision_audit_command(command)
 
         if audit_response:
@@ -629,6 +634,7 @@ class EntityRuntime:
             command,
             awareness_state=self.awareness.snapshot(),
             presence_state=self.presence.snapshot(),
+            capability_context=self._planner_capability_context(),
             recent_actions=self.recent_actions,
             recent_responses=self.recent_responses,
             recent_decisions=self.task_store.recent_planner_decisions(
@@ -699,6 +705,109 @@ class EntityRuntime:
         )
 
         return final_response
+
+    def _planner_capability_context(self):
+        return {
+            "tools": self._planner_tools(),
+            "actuators": [
+                {
+                    "name": actuator.__class__.__name__,
+                    "action_type": getattr(actuator, "action_type", None),
+                    "available": self._component_available(actuator)
+                }
+                for actuator in self.actuators
+            ],
+            "observers": [
+                {
+                    "name": observer.__class__.__name__,
+                    "available": self._component_available(observer)
+                }
+                for observer in self.observers
+            ]
+        }
+
+    def _planner_tools(self):
+        return [
+            {
+                "name": "answer",
+                "description": "Reply with text only when no tool is needed."
+            },
+            {
+                "name": "ask",
+                "description": "Ask a follow-up question when required details are missing."
+            },
+            {
+                "name": "diagnostics",
+                "description": "Run health checks for configured Entity services."
+            },
+            {
+                "name": "set_presence",
+                "description": "Update Ben's location or availability."
+            },
+            {
+                "name": "set_voice",
+                "description": "Switch TTS voice; args.voice must be kokoro or sam."
+            },
+            {
+                "name": "arithmetic",
+                "description": "Calculate a simple arithmetic expression exactly."
+            },
+            {
+                "name": "briefing",
+                "description": "Build today's schedule and status briefing."
+            },
+            {
+                "name": "notify",
+                "description": "Send args.text through the notification channel."
+            },
+            {
+                "name": "research",
+                "description": (
+                    "Search the internet. args.query is the query. Set "
+                    "args.notify true when the user wants the result sent "
+                    "after completion."
+                )
+            },
+            {
+                "name": "research_and_remember",
+                "description": (
+                    "Search the internet and store sourced useful facts. Set "
+                    "args.notify true when the user wants the result sent "
+                    "after completion."
+                )
+            },
+            {
+                "name": "remember_last_research",
+                "description": "Store the most recent research result."
+            },
+            {
+                "name": "create_calendar_event",
+                "description": "Schedule a Google Calendar event from the user's text."
+            },
+            {
+                "name": "create_reminder",
+                "description": "Create a reminder from the user's text."
+            },
+            {
+                "name": "store_memory",
+                "description": "Store explicit memory with args.kind and args.content."
+            },
+            {
+                "name": "behavior_feedback",
+                "description": "Learn explicit feedback about Entity's behavior."
+            }
+        ]
+
+    def _component_available(self, component):
+        available = getattr(component, "available", None)
+
+        if not callable(available):
+            return None
+
+        try:
+            return bool(available())
+        except Exception:
+            return False
 
     def _handle_confirmation_command(self, command, source="voice"):
         normalized = command.lower().strip()
@@ -865,6 +974,7 @@ class EntityRuntime:
             "set_voice",
             "research_and_remember",
             "remember_last_research",
+            "notify",
             "create_calendar_event",
             "create_reminder",
             "store_memory",
@@ -950,67 +1060,160 @@ class EntityRuntime:
         if tool in {"answer", "ask"}:
             return args.get("text") or args.get("question") or ""
 
-        if tool == "diagnostics":
-            return self._run_diagnostics()
+        self._set_active_work(tool, command, source=source)
 
-        if tool == "set_presence":
-            return self._apply_presence_args(args)
+        try:
+            if tool == "diagnostics":
+                return self._run_diagnostics()
 
-        if tool == "set_voice":
-            voice = str(args.get("voice", "")).lower().strip()
+            if tool == "set_presence":
+                return self._apply_presence_args(args)
 
-            if voice not in {"kokoro", "sam"}:
-                return self._handle_voice_command(command)
+            if tool == "set_voice":
+                voice = str(args.get("voice", "")).lower().strip()
 
-            from tts.manager import set_voice
+                if voice not in {"kokoro", "sam"}:
+                    return self._handle_voice_command(command)
 
-            set_voice(voice)
-            return f"Voice set to {voice}."
+                from tts.manager import set_voice
 
-        if tool == "arithmetic":
-            return self.arithmetic_handler.answer(command)
+                set_voice(voice)
+                return f"Voice set to {voice}."
 
-        if tool == "briefing":
-            return self.today_briefing.build()
+            if tool == "arithmetic":
+                return self.arithmetic_handler.answer(command)
 
-        if tool == "research":
-            query = args.get("query") or self._research_query(command) or command
-            return self._run_research(query)
+            if tool == "briefing":
+                return self.today_briefing.build()
 
-        if tool == "research_and_remember":
-            query = (
-                args.get("query")
-                or self._research_and_remember_query(command)
-                or self._research_query(command)
-                or command
-            )
-            return self._run_research(query, remember=True, source=source)
+            if tool == "notify":
+                text = str(args.get("text", "")).strip()
 
-        if tool == "remember_last_research":
-            if not self.last_research_result:
-                return "I do not have a recent research result to remember."
+                if not text:
+                    return "I need text to send as a notification."
 
-            return self._ingest_research_result(
-                self.last_research_result,
-                requested_by=source
-            )
+                return self._send_notification(
+                    text,
+                    title=str(args.get("title", "Entity")).strip() or "Entity",
+                    priority=str(args.get("priority", "default")).strip()
+                    or "default"
+                )
 
-        if tool == "create_calendar_event":
-            return self._handle_calendar_command(command, channel=source)
+            if tool == "research":
+                query = args.get("query") or self._research_query(command) or command
+                return self._run_research(
+                    query,
+                    source=source,
+                    notify_completion=bool(args.get("notify"))
+                )
 
-        if tool == "create_reminder":
-            return self._create_reminder_from_command(command, source=source)
+            if tool == "research_and_remember":
+                query = (
+                    args.get("query")
+                    or self._research_and_remember_query(command)
+                    or self._research_query(command)
+                    or command
+                )
+                return self._run_research(
+                    query,
+                    remember=True,
+                    source=source,
+                    notify_completion=bool(args.get("notify"))
+                )
 
-        if tool == "store_memory":
-            return self._store_explicit_memory(command, args, source=source)
+            if tool == "remember_last_research":
+                if not self.last_research_result:
+                    return "I do not have a recent research result to remember."
 
-        if tool == "behavior_feedback":
-            return self._handle_behavior_feedback_command(
-                command,
-                source=source
-            )
+                return self._ingest_research_result(
+                    self.last_research_result,
+                    requested_by=source
+                )
 
-        return None
+            if tool == "create_calendar_event":
+                return self._handle_calendar_command(command, channel=source)
+
+            if tool == "create_reminder":
+                return self._create_reminder_from_command(command, source=source)
+
+            if tool == "store_memory":
+                return self._store_explicit_memory(command, args, source=source)
+
+            if tool == "behavior_feedback":
+                return self._handle_behavior_feedback_command(
+                    command,
+                    source=source
+                )
+
+            return None
+        finally:
+            self._finish_active_work()
+
+    def _handle_active_work_command(self, command):
+        normalized = command.lower().strip()
+
+        status_phrases = {
+            "what are you doing",
+            "what are you working on",
+            "what are you currently doing",
+            "what are you doing right now",
+            "are you doing anything",
+            "current task",
+            "current work",
+            "status of current task",
+            "what is your current task"
+        }
+
+        if (
+            normalized not in status_phrases
+            and "what are you working on" not in normalized
+            and "what are you doing" not in normalized
+            and "current task" not in normalized
+        ):
+            return None
+
+        pending = self.confirmation_store.current()
+
+        if pending:
+            plan = pending.get("plan") or {}
+            response = plan.get("response") or "I have an action waiting for confirmation."
+            return f"I am waiting for your confirmation. {response}"
+
+        active = self.task_store.get_state("active_work")
+
+        if active:
+            tool = str(active.get("tool", "work")).replace("_", " ")
+            text = active.get("input_text", "")
+            return f"I am currently using {tool} for: {text}"
+
+        last = self.task_store.get_state("last_completed_work")
+
+        if last:
+            tool = str(last.get("tool", "work")).replace("_", " ")
+            text = last.get("input_text", "")
+            return f"I am not actively working on anything. I most recently used {tool} for: {text}"
+
+        return "I am not actively working on anything right now."
+
+    def _set_active_work(self, tool, command, source="voice"):
+        self.task_store.set_state(
+            "active_work",
+            {
+                "tool": tool,
+                "input_text": command,
+                "source": source,
+                "started_at": datetime.now().isoformat()
+            }
+        )
+
+    def _finish_active_work(self):
+        active = self.task_store.get_state("active_work")
+
+        if active:
+            active["finished_at"] = datetime.now().isoformat()
+            self.task_store.set_state("last_completed_work", active)
+
+        self.task_store.set_state("active_work", None)
 
     def _run_diagnostics(self):
         return self.execute(
@@ -1045,24 +1248,47 @@ class EntityRuntime:
         self.presence.update(**updates)
         return self.presence.status_text()
 
-    def _run_research(self, query, remember=False, source="user"):
+    def _run_research(
+        self,
+        query,
+        remember=False,
+        source="user",
+        notify_completion=False
+    ):
+        owns_active_work = not self.task_store.get_state("active_work")
+
+        if owns_active_work:
+            tool = "research_and_remember" if remember else "research"
+            self._set_active_work(tool, query, source=source)
+
         try:
-            result = self.research_tool.search(query)
-        except Exception as exc:
-            return f"Internet research failed: {exc}"
+            try:
+                result = self.research_tool.search(query)
+            except Exception as exc:
+                return f"Internet research failed: {exc}"
 
-        self.last_research_result = result
-        response = result.format_response()
+            self.last_research_result = result
+            response = result.format_response()
 
-        if not remember:
-            return response
+            if not remember:
+                if notify_completion:
+                    return self._notify_research_complete(query, response)
 
-        memory_response = self._ingest_research_result(
-            result,
-            requested_by=source
-        )
+                return response
 
-        return f"{response} {memory_response}"
+            memory_response = self._ingest_research_result(
+                result,
+                requested_by=source
+            )
+            final_response = f"{response} {memory_response}"
+
+            if notify_completion:
+                return self._notify_research_complete(query, final_response)
+
+            return final_response
+        finally:
+            if owns_active_work:
+                self._finish_active_work()
 
     def _create_reminder_from_command(self, command, source="voice"):
         reminder = self.reminder_extractor.extract(
@@ -1172,7 +1398,10 @@ class EntityRuntime:
         if not query:
             return None
 
-        return self._run_research(query)
+        return self._run_research(
+            query,
+            notify_completion=self._should_notify_completion(command)
+        )
 
     def _handle_research_memory_command(self, command, source="user"):
         normalized = command.lower().strip()
@@ -1196,7 +1425,68 @@ class EntityRuntime:
         if not query:
             return None
 
-        return self._run_research(query, remember=True, source=source)
+        return self._run_research(
+            query,
+            remember=True,
+            source=source,
+            notify_completion=self._should_notify_completion(command)
+        )
+
+    def _notify_research_complete(self, query, text):
+        delivered = self._send_notification(
+            text,
+            title=f"Entity research: {query}",
+            priority="default"
+        )
+
+        if delivered:
+            return f"I researched {query} and sent what I learned to ntfy."
+
+        return (
+            f"I researched {query}, but I could not send the ntfy "
+            f"notification. {text}"
+        )
+
+    def _send_notification(self, text, title="Entity", priority="default"):
+        delivered = self.execute(
+            Action(
+                type="notify",
+                payload={
+                    "title": title,
+                    "text": text,
+                    "priority": priority
+                }
+            )
+        )
+
+        if delivered:
+            return delivered
+
+        return None
+
+    def _should_notify_completion(self, command):
+        normalized = command.lower()
+
+        notification_phrases = (
+            "notify me",
+            "send me",
+            "text me",
+            "ntfy",
+            "push",
+            "alert me",
+            "let me know",
+            "inform me",
+            "tell me when",
+            "when you're done",
+            "when you are done",
+            "once you're done",
+            "once you are done"
+        )
+
+        return any(
+            phrase in normalized
+            for phrase in notification_phrases
+        )
 
     def _ingest_research_result(self, result, requested_by="user"):
         try:
@@ -1221,16 +1511,20 @@ class EntityRuntime:
             r"^\s*look up and remember\s+(.+)$",
             r"^\s*search and remember\s+(.+)$",
             r"^\s*find and remember\s+(.+)$",
+            r"^\s*learn about and remember\s+(.+)$",
+            r"^\s*study and remember\s+(.+)$",
             r"^\s*research\s+(.+?)\s+and remember(?: it| this)?\s*$",
             r"^\s*look up\s+(.+?)\s+and remember(?: it| this)?\s*$",
-            r"^\s*search(?: the internet| online| web)? for\s+(.+?)\s+and remember(?: it| this)?\s*$"
+            r"^\s*search(?: the internet| online| web)? for\s+(.+?)\s+and remember(?: it| this)?\s*$",
+            r"^\s*learn about\s+(.+?)\s+and remember(?: it| this)?\s*$",
+            r"^\s*study\s+(.+?)\s+and remember(?: it| this)?\s*$"
         ]
 
         for pattern in patterns:
             match = re.search(pattern, command, re.IGNORECASE)
 
             if match:
-                return match.group(1).strip()
+                return self._clean_research_query(match.group(1))
 
         return ""
 
@@ -1239,16 +1533,39 @@ class EntityRuntime:
             r"^\s*research\s+(.+)$",
             r"^\s*look up\s+(.+)$",
             r"^\s*search(?: the internet| online| web)? for\s+(.+)$",
-            r"^\s*find(?: online)?\s+(.+)$"
+            r"^\s*find(?: online)?\s+(.+)$",
+            r"^\s*learn about\s+(.+)$",
+            r"^\s*study\s+(.+)$"
         ]
 
         for pattern in patterns:
             match = re.search(pattern, command, re.IGNORECASE)
 
             if match:
-                return match.group(1).strip()
+                return self._clean_research_query(match.group(1))
 
         return ""
+
+    def _clean_research_query(self, query):
+        cleaned = query.strip()
+        cleanup_patterns = [
+            r"\s+and\s+(?:then\s+)?(?:notify|inform|tell|text|send|alert)\s+me\b.*$",
+            r"\s+and\s+(?:then\s+)?(?:let me know)\b.*$",
+            r"\s+(?:when|once)\s+you(?:'re| are)\s+done\b.*$",
+            r"\s+on\s+ntfy\b.*$",
+            r"\s+through\s+ntfy\b.*$",
+            r"\s+via\s+ntfy\b.*$"
+        ]
+
+        for pattern in cleanup_patterns:
+            cleaned = re.sub(
+                pattern,
+                "",
+                cleaned,
+                flags=re.IGNORECASE
+            ).strip()
+
+        return cleaned
 
     def _handle_presence_command(self, command):
         normalized = command.lower().strip()

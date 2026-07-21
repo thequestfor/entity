@@ -16,6 +16,7 @@ ALLOWED_TOOLS = {
     "set_voice",
     "arithmetic",
     "briefing",
+    "notify",
     "research",
     "research_and_remember",
     "remember_last_research",
@@ -72,6 +73,7 @@ class AgentPlanner:
         text,
         awareness_state=None,
         presence_state=None,
+        capability_context=None,
         recent_actions=None,
         recent_responses=None,
         recent_decisions=None,
@@ -83,6 +85,7 @@ class AgentPlanner:
                     text,
                     awareness_state=awareness_state,
                     presence_state=presence_state,
+                    capability_context=capability_context,
                     recent_actions=recent_actions or [],
                     recent_responses=recent_responses or [],
                     recent_decisions=recent_decisions or []
@@ -104,6 +107,7 @@ class AgentPlanner:
         text,
         awareness_state=None,
         presence_state=None,
+        capability_context=None,
         recent_actions=None,
         recent_responses=None,
         recent_decisions=None
@@ -128,6 +132,7 @@ class AgentPlanner:
             "current_local_datetime": now,
             "awareness": awareness_state or {},
             "presence": presence,
+            "capabilities": capability_context or {},
             "behavior_rules": behavior_rules,
             "relevant_memories": context.get("relevant_memories", []),
             "recent_actions": recent_actions[-5:],
@@ -143,39 +148,23 @@ class AgentPlanner:
             "Use behavior rules when relevant. Use recent decisions and "
             "tool outcomes to avoid repeating failed choices, stale claims, "
             "or canceled actions. Return JSON only.\n\n"
-            "Allowed tools:\n"
-            "- answer: reply with text only.\n"
-            "- ask: ask a follow-up question because required details are missing.\n"
-            "- diagnostics: run system diagnostics.\n"
-            "- set_presence: args may include location and availability.\n"
-            "- set_voice: args.voice must be kokoro or sam.\n"
-            "- arithmetic: calculate a simple arithmetic expression from the input.\n"
-            "- briefing: build today's briefing.\n"
-            "- research: args.query is the web search query.\n"
-            "- research_and_remember: search and store sourced useful facts.\n"
-            "- remember_last_research: store the most recent research result.\n"
-            "- create_calendar_event: schedule a calendar event from the user's text.\n"
-            "- create_reminder: create a reminder from the user's text.\n"
-            "- store_memory: args.kind and args.content store an explicit memory.\n"
-            "- behavior_feedback: learn explicit feedback about Entity's behavior.\n\n"
-            "Rules:\n"
-            "- If the user asks for diagnostics/status, choose diagnostics.\n"
-            "- If the user asks to calculate arithmetic, choose arithmetic.\n"
-            "- If the user asks to schedule or put something on a calendar, "
-            "choose create_calendar_event.\n"
-            "- If the user asks to be reminded, choose create_reminder.\n"
-            "- If the user says research/look up/search/find online, choose "
-            "research unless they also say remember, then choose "
-            "research_and_remember.\n"
-            "- If the user says remember what you found, choose "
-            "remember_last_research.\n"
-            "- If the user gives explicit feedback like too late, ask me next "
-            "time, don't do that, or that was helpful, choose behavior_feedback.\n"
-            "- If the user explicitly says remember that, choose store_memory.\n"
+            "Planning model:\n"
+            "- Read the user's actual intent, then choose the smallest useful "
+            "set of tools from the capability context.\n"
+            "- Compose tools when the user asks for a workflow. For example, "
+            "research with args.notify true when the user wants the result "
+            "sent after completion, or create a calendar event when the user "
+            "wants something scheduled.\n"
+            "- Use observers listed in capability context as available input "
+            "channels and actuators listed there as available output channels.\n"
+            "- Use answer only when no tool is needed.\n"
             "- Use ask when essential details are missing.\n"
-            "- Set requires_confirmation true for destructive, external, or "
-            "uncertain actions. Creating normal reminders and calendar events "
-            "can be false when confidence is high.\n\n"
+            "- Use behavior rules, memory, recent decisions, and recent "
+            "tool outcomes to adapt. Avoid repeating failed or unwanted "
+            "behavior.\n"
+            "- Set requires_confirmation true for destructive, high-risk, "
+            "external, or uncertain actions. Low-risk normal reminders and "
+            "calendar events can be false when confidence is high.\n\n"
             "Return exactly this JSON shape:\n"
             "{\n"
             '  "intent": "short_intent_name",\n'
