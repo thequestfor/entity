@@ -13,17 +13,21 @@ from faster_whisper import WhisperModel
 from openwakeword.model import Model
 
 from agent.audio.activity import is_speaking
+from agent.audio.frames import WakeFrameBuffer
 from vad import speech_event, reset_vad
 
 
 class Microphone:
 
-    def __init__(self):
+    def __init__(self, on_state=None):
 
         self.samplerate = 16000
         self.blocksize = 512
 
         self.running = False
+        self.thread = None
+        self.error = None
+        self.on_state = on_state
 
         # Last ~1.5 seconds of audio
         self.preroll = deque(maxlen=50)
@@ -32,6 +36,7 @@ class Microphone:
         self.live_audio = Queue()
 
         self.wake_event = threading.Event()
+        self.wake_frames = WakeFrameBuffer()
 
         self.state = "idle"
         self.wake_cooldown_until = 0
@@ -47,28 +52,36 @@ class Microphone:
         if self.running:
             return
 
+        self.error = None
+        self.wake_event.clear()
         self.running = True
 
-        threading.Thread(
+        self.thread = threading.Thread(
             target=self._listen,
             daemon=True
-        ).start()
+        )
+        self.thread.start()
 
         print("Microphone started")
 
 
     def _listen(self):
 
-        with sd.InputStream(
-            samplerate=self.samplerate,
-            channels=1,
-            dtype="float32",
-            blocksize=self.blocksize,
-            callback=self._callback
-        ):
-
-            while self.running:
-                sd.sleep(100)
+        try:
+            with sd.InputStream(
+                samplerate=self.samplerate,
+                channels=1,
+                dtype="float32",
+                blocksize=self.blocksize,
+                callback=self._callback
+            ):
+                while self.running:
+                    sd.sleep(100)
+        except Exception as exc:
+            self.error = exc
+            self.running = False
+            self.wake_event.set()
+            self._emit_state("error", component="microphone", message=str(exc))
 
 
     def _callback(
@@ -98,6 +111,11 @@ class Microphone:
             audio * 32767
         ).astype(np.int16)
 
+        for wake_frame in self.wake_frames.add(pcm):
+            if self._detect_wake(wake_frame):
+                break
+
+    def _detect_wake(self, pcm):
         prediction = self.wake_model.predict(pcm)
 
         for name, score in prediction.items():
@@ -107,28 +125,40 @@ class Microphone:
                 print("Wake:", name)
 
                 self._clear_audio()
+                self.wake_frames.clear()
                 self.state = "command"
                 self.wake_cooldown_until = time.time() + 0.35
 
                 self.wake_event.set()
 
-                break
+                return True
+
+        return False
 
 
     def wait_for_wake(self):
 
         print("Waiting for wake word...")
 
-        while is_speaking():
+        while self.running and is_speaking():
             time.sleep(0.05)
+
+        if not self.running:
+            return False
 
         self.wake_event.clear()
         self.preroll.clear()
         self._clear_audio()
+        self.wake_frames.clear()
 
         self.state = "wake"
 
-        self.wake_event.wait()
+        while self.running and not self.wake_event.wait(timeout=0.25):
+            pass
+
+        if not self.running:
+            self.state = "idle"
+            return False
 
         self.wake_event.clear()
         self.state = "command"
@@ -137,6 +167,7 @@ class Microphone:
         reset_vad()
 
         self.preroll.clear()
+        return True
 
 
     def listen(self):
@@ -155,6 +186,10 @@ class Microphone:
         max_command_seconds = 30
 
         while True:
+
+            if not self.running:
+                self.state = "idle"
+                return ""
 
             try:
                 chunk = self.live_audio.get(timeout=0.5)
@@ -205,6 +240,7 @@ class Microphone:
 
         audio = np.concatenate(audio_chunks)
 
+        self._emit_state("transcribing")
         return self.transcribe(audio)
 
 
@@ -250,8 +286,12 @@ class Microphone:
 
 
     def stop(self):
-
         self.running = False
+        self.state = "idle"
+        self.wake_event.set()
+
+        if self.thread and self.thread is not threading.current_thread():
+            self.thread.join(timeout=2)
 
     def _clear_audio(self):
         while True:
@@ -264,10 +304,8 @@ class Microphone:
         return Model()
 
     def _reset_wake_model(self):
-        reset = getattr(self.wake_model, "reset", None)
-
-        if callable(reset):
-            reset()
-            return
-
         self.wake_model = self._new_wake_model()
+
+    def _emit_state(self, state, **details):
+        if self.on_state:
+            self.on_state(state, **details)

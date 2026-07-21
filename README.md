@@ -15,6 +15,10 @@ research, traffic-aware departure advice, and optional ntfy messaging.
 5. Conversations, decisions, tasks, goals, and selected memories persist in
    `agent/entity_memory.db`.
 
+`agent.lifecycle.Lifecycle` publishes renderer-neutral state events for visual
+clients. Current states include booting, wake detection, listening, transcribing,
+thinking, tool activity, speaking, errors, idle, and shutdown.
+
 The language model selects intent; it does not directly call external services.
 
 ## Setup
@@ -45,6 +49,11 @@ ENTITY_HOME_ADDRESS=
 
 Keep `.env`, OAuth credentials, tokens, and `agent/entity_memory.db` private. They
 are ignored by Git.
+
+For a Blender interface, keep Entity in its own process. A small localhost bridge
+can serialize lifecycle events to Blender, where a `bpy.app.timers` callback applies
+queued visual changes on Blender's main thread. This keeps model, network, audio,
+and database work from blocking Blender's viewport.
 
 ## Run
 

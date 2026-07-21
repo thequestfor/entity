@@ -32,6 +32,8 @@ Current capabilities:
 - optional cloud OpenAI fallback when explicitly enabled
 - voice interaction through microphone input, wake word detection,
   speech transcription, and text-to-speech
+- structured lifecycle states for reactive interfaces, including listening,
+  transcribing, thinking, tool use, speaking, errors, and idle state
 - selectable TTS voices: Kokoro or SAM, depending on what is installed
 - short-term awareness of recent inputs, responses, and current local time
 - persistent SQLite memory for conversations, semantic memories, events,

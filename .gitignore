@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 .venv311/
 *.wav
+*.swp
 *_test.py
 test_*.py
 !tests/

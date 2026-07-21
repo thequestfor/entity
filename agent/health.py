@@ -53,6 +53,15 @@ class StartupHealthCheck:
         if not os.getenv("ENTITY_NTFY_IN_TOPIC"):
             issues.append("Ntfy inbound topic is missing.")
 
+        base_url = os.getenv("ENTITY_NTFY_URL", "https://ntfy.sh")
+        token = os.getenv("ENTITY_NTFY_TOKEN", "")
+
+        if base_url.rstrip("/") == "https://ntfy.sh" and not token:
+            issues.append(
+                "Ntfy inbound commands use the public server without an "
+                "authentication token and rely only on topic secrecy."
+            )
+
         return issues
 
     def _calendar_issues(self):
@@ -77,12 +86,23 @@ class StartupHealthCheck:
     def _route_issues(self):
         planner = RoutePlanner()
 
+        if planner.provider == "tomtom":
+            issues = []
+
+            if not planner.tomtom_api_key:
+                issues.append("TomTom API key is missing.")
+
+            if not planner.home_address:
+                issues.append("Home address is missing for route planning.")
+
+            return issues
+
         if planner.provider != "openrouteservice":
             return []
 
         issues = []
 
-        if not planner.api_key:
+        if not planner.openrouteservice_api_key:
             issues.append("Openrouteservice API key is missing.")
 
         if not planner.home_address:

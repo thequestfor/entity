@@ -157,6 +157,14 @@ class DiagnosticsActuator:
         else:
             lines.append("Inbound plaintext topic missing.")
 
+        if os.getenv("ENTITY_NTFY_TOKEN"):
+            lines.append("Ntfy authentication token configured.")
+        elif base_url.rstrip("/") == "https://ntfy.sh":
+            lines.append(
+                "Ntfy authentication token missing on the public server; "
+                "inbound commands rely only on topic secrecy."
+            )
+
         if self._env_bool("ENTITY_NOTIFY_SIGNIFICANT_ACTIONS", True):
             lines.append("Significant action notifications enabled.")
         else:

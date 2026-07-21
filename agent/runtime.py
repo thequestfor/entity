@@ -1,7 +1,9 @@
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
+from queue import Empty
 
 from agent.actuators import (
     CalendarActuator,
@@ -19,6 +21,7 @@ from agent.event_bus import EventBus
 from agent.events import Action
 from agent.health import StartupHealthCheck
 from agent.learning import LearningPolicy
+from agent.lifecycle import Lifecycle
 from agent.memory.research import ResearchMemoryIngestor
 from agent.math_tools import ArithmeticHandler
 from agent.observers import (
@@ -61,10 +64,14 @@ class EntityRuntime:
         planner=None,
         confirmation_store=None,
         reflection=None,
+        lifecycle=None,
         observers=None,
         actuators=None,
         policy=None
     ):
+        self.lifecycle = lifecycle or Lifecycle()
+        self._stop_event = threading.Event()
+        self._started = False
         self.brain = brain or self._default_brain()
         self.awareness = awareness or AwarenessLoop(
             on_interrupt=self.publish_event
@@ -112,9 +119,11 @@ class EntityRuntime:
                     confirmation_store=self.confirmation_store,
                     reflection=self.reflection
                 ),
-                CalendarObserver(),
+                CalendarObserver(route_planner=self.route_planner),
                 NtfyObserver(),
-                audio_observer or AudioObserver()
+                audio_observer or AudioObserver(
+                    on_state=self._emit_lifecycle
+                )
             ]
 
         if actuators is None:
@@ -130,25 +139,37 @@ class EntityRuntime:
         self.policy = policy or Policy()
 
     def run(self):
-        self.start()
-
         try:
-            while True:
-                event = self.event_bus.next_event()
+            self.start()
 
-                if event:
-                    self.handle_event(event)
-
-                self.event_bus.task_done()
+            while not self._stop_event.is_set():
+                self.process_next_event(timeout=0.5)
 
         finally:
             self.stop()
 
     def start(self):
+        if self._started:
+            return
+
+        self._started = True
+        self._stop_event.clear()
+        self._emit_lifecycle("booting")
         self.awareness.start()
 
         for observer in self.observers:
-            observer.start(self.event_bus)
+            try:
+                observer.start(self.event_bus)
+            except Exception as exc:
+                self._emit_lifecycle(
+                    "error",
+                    component=observer.__class__.__name__,
+                    message=str(exc)
+                )
+                print(
+                    f"Observer failed to start: "
+                    f"{observer.__class__.__name__}: {exc}"
+                )
 
         self.execute(
             Action(
@@ -159,12 +180,42 @@ class EntityRuntime:
             )
         )
         self._run_startup_health_check()
+        self._emit_lifecycle("idle")
 
     def stop(self):
+        self._stop_event.set()
+
+        if not self._started:
+            return
+
+        self._emit_lifecycle("stopping")
         self.awareness.stop()
 
         for observer in self.observers:
-            observer.stop()
+            try:
+                observer.stop()
+            except Exception as exc:
+                print(
+                    f"Observer failed to stop: "
+                    f"{observer.__class__.__name__}: {exc}"
+                )
+
+        self._started = False
+        self._emit_lifecycle("stopped")
+
+    def process_next_event(self, timeout=None):
+        try:
+            event = self.event_bus.next_event(timeout=timeout)
+        except Empty:
+            return None
+
+        try:
+            return self.handle_event(event)
+        except Exception as exc:
+            self._handle_event_error(event, exc)
+            return None
+        finally:
+            self.event_bus.task_done()
 
     def publish_event(self, event):
         self.event_bus.publish(event)
@@ -180,7 +231,17 @@ class EntityRuntime:
             return self.handle_text_input(event, channel="remote")
 
         if event.type == "reminder":
-            return self.handle_reminder(event)
+            result = self.handle_reminder(event)
+
+            if result:
+                task_id = event.payload.get("task_id")
+
+                if task_id:
+                    self.task_store.complete_task(task_id)
+            else:
+                self._retry_reminder(event)
+
+            return result
 
         if event.type == "calendar_event_upcoming":
             return self.handle_calendar_event_upcoming(event)
@@ -218,6 +279,7 @@ class EntityRuntime:
         )
 
         self.awareness.record_input(command)
+        self._emit_lifecycle("thinking", channel=channel)
 
         runtime_response = self._handle_runtime_command(
             command,
@@ -229,6 +291,7 @@ class EntityRuntime:
             self._record_response(runtime_response, source=channel)
             self._reply(runtime_response, channel)
             print(runtime_response)
+            self._emit_lifecycle("idle")
             return runtime_response
 
         response_stream = self.brain.respond_stream(
@@ -254,6 +317,7 @@ class EntityRuntime:
         self._record_response(response, source=channel)
 
         print(response)
+        self._emit_lifecycle("idle")
 
         return response
 
@@ -272,7 +336,34 @@ class EntityRuntime:
             message,
             title="Entity reminder",
             priority="high",
-            force_notify=True
+            force_notify=True,
+            require_delivery=True
+        )
+
+    def _handle_event_error(self, event, error):
+        event_type = getattr(event, "type", "unknown")
+        print(f"Event handling failed for {event_type}: {error}")
+        self._emit_lifecycle(
+            "error",
+            component="runtime",
+            event_type=event_type,
+            message=str(error)
+        )
+
+        if event_type == "reminder":
+            self._retry_reminder(event)
+
+    def _retry_reminder(self, event, delay_seconds=60):
+        task_id = event.payload.get("task_id")
+
+        if not task_id:
+            return None
+
+        return self.scheduler_observer.add_reminder(
+            delay_seconds,
+            event.message,
+            priority=event.priority,
+            task_id=task_id
         )
 
     def handle_calendar_event_upcoming(self, event):
@@ -497,12 +588,14 @@ class EntityRuntime:
         text,
         title="Entity alert",
         priority="high",
-        force_notify=False
+        force_notify=False,
+        require_delivery=False
     ):
         if not text:
             return None
 
         delivered = None
+        delivery_succeeded = False
         should_speak = self.presence.should_speak()
         should_notify = (
             force_notify
@@ -519,9 +612,10 @@ class EntityRuntime:
                     }
                 )
             )
+            delivery_succeeded = delivery_succeeded or bool(delivered)
 
         if should_notify:
-            delivered = self.execute(
+            notification = self.execute(
                 Action(
                     type="notify",
                     payload={
@@ -531,6 +625,13 @@ class EntityRuntime:
                     }
                 )
             )
+            delivery_succeeded = delivery_succeeded or bool(notification)
+
+            if notification:
+                delivered = notification
+
+        if require_delivery:
+            return text if delivery_succeeded else None
 
         return delivered or text
 
@@ -553,6 +654,14 @@ class EntityRuntime:
         if confirmation_response:
             return confirmation_response
 
+        fast_response = self._handle_read_only_fast_path(
+            command,
+            source=source
+        )
+
+        if fast_response:
+            return fast_response
+
         planned_response = self._handle_planned_command(
             command,
             source=source
@@ -574,6 +683,106 @@ class EntityRuntime:
             )
 
         return fallback_response
+
+    def _handle_read_only_fast_path(self, command, source="voice"):
+        if self._is_diagnostics_command(command):
+            return self._execute_read_only_fast_path(
+                command,
+                source,
+                "diagnostics",
+                self._run_diagnostics
+            )
+
+        math_response = self.arithmetic_handler.answer(command)
+
+        if math_response:
+            return self._record_read_only_fast_path(
+                command,
+                source,
+                "arithmetic",
+                math_response
+            )
+
+        if self._is_briefing_command(command):
+            return self._execute_read_only_fast_path(
+                command,
+                source,
+                "briefing",
+                self.today_briefing.build
+            )
+
+        weather_location = self._weather_location(command)
+
+        if weather_location is not None:
+            return self._execute_read_only_fast_path(
+                command,
+                source,
+                "weather",
+                lambda: self._run_weather(
+                    location=weather_location,
+                    question=command
+                )
+            )
+
+        return None
+
+    def _execute_read_only_fast_path(
+        self,
+        command,
+        source,
+        tool,
+        callback
+    ):
+        self._emit_lifecycle("tool_started", tool=tool)
+
+        try:
+            response = callback()
+        finally:
+            self._emit_lifecycle("tool_finished", tool=tool)
+
+        if not response:
+            return None
+
+        return self._record_read_only_fast_path(
+            command,
+            source,
+            tool,
+            response
+        )
+
+    def _record_read_only_fast_path(
+        self,
+        command,
+        source,
+        tool,
+        response
+    ):
+        self._record_deterministic_decision(
+            command,
+            source=source,
+            tool=tool,
+            response=response
+        )
+        return response
+
+    def _record_deterministic_decision(
+        self,
+        command,
+        source,
+        tool,
+        response
+    ):
+        return self.task_store.add_planner_decision(
+            input_text=command,
+            channel=source,
+            intent=f"deterministic_{tool}",
+            confidence=1,
+            tools=[{"tool": tool, "args": {}}],
+            reason="Handled by a deterministic read-only fast path.",
+            confirmation_required=False,
+            outcome="executed",
+            response=response
+        )
 
     def _handle_runtime_command_fallback(self, command, source="voice"):
         if self._is_diagnostics_command(command):
@@ -1159,6 +1368,7 @@ class EntityRuntime:
             return args.get("text") or args.get("question") or ""
 
         self._set_active_work(tool, command, source=source)
+        self._emit_lifecycle("tool_started", tool=tool)
 
         try:
             if tool == "diagnostics":
@@ -1253,6 +1463,7 @@ class EntityRuntime:
             return None
         finally:
             self._finish_active_work()
+            self._emit_lifecycle("tool_finished", tool=tool)
 
     def _handle_active_work_command(self, command):
         normalized = command.lower().strip()
@@ -1496,19 +1707,22 @@ class EntityRuntime:
         return message
 
     def _handle_briefing_command(self, command):
+        if not self._is_briefing_command(command):
+            return None
+
+        return self.today_briefing.build()
+
+    def _is_briefing_command(self, command):
         normalized = command.lower().strip()
 
-        if not (
+        return (
             "today briefing" in normalized
             or "daily briefing" in normalized
             or "morning briefing" in normalized
             or "brief me" in normalized
             or "what's my day" in normalized
             or "what is my day" in normalized
-        ):
-            return None
-
-        return self.today_briefing.build()
+        )
 
     def _handle_weather_command(self, command):
         location = self._weather_location(command)
@@ -2060,10 +2274,24 @@ class EntityRuntime:
 
         for actuator in self.actuators:
             if actuator.can_handle(action):
-                result = actuator.execute(action)
-                self._record_action(action, result)
-                self._learn_from_action(action)
-                return result
+                if action.type == "speak":
+                    self._emit_lifecycle("speaking")
+
+                try:
+                    result = actuator.execute(action)
+                    self._record_action(action, result)
+                    self._learn_from_action(action)
+                    return result
+                except Exception as exc:
+                    self._emit_lifecycle(
+                        "error",
+                        component=actuator.__class__.__name__,
+                        message=str(exc)
+                    )
+                    raise
+                finally:
+                    if action.type == "speak":
+                        self._emit_lifecycle("idle")
 
         print(
             "No actuator for action:",
@@ -2071,6 +2299,9 @@ class EntityRuntime:
         )
 
         return None
+
+    def _emit_lifecycle(self, state, **details):
+        return self.lifecycle.emit(state, **details)
 
     def _record_action(self, action, result):
         self.recent_actions.append(

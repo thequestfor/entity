@@ -102,7 +102,8 @@ class ModelRouter:
         temperature=0,
         user_input=None,
         on_escalation=None,
-        routing="auto"
+        routing="auto",
+        response_format=None
     ):
         errors = []
 
@@ -110,7 +111,8 @@ class ModelRouter:
             try:
                 return provider.generate(
                     prompt,
-                    temperature=temperature
+                    temperature=temperature,
+                    response_format=response_format
                 )
             except ModelUnavailable as exc:
                 errors.append(f"{provider.name}: {exc}")
@@ -135,16 +137,31 @@ class ModelRouter:
         errors = []
 
         for provider in self._providers_for(user_input, on_escalation, routing):
+            yielded = False
+
             try:
-                yield from provider.stream(
+                for token in provider.stream(
                     prompt,
                     temperature=temperature
-                )
+                ):
+                    yielded = True
+                    yield token
+
                 return
             except ModelUnavailable as exc:
+                if yielded:
+                    raise ModelUnavailable(
+                        f"{provider.name} failed after streaming began: {exc}"
+                    ) from exc
+
                 errors.append(f"{provider.name}: {exc}")
                 continue
             except Exception as exc:
+                if yielded:
+                    raise ModelUnavailable(
+                        f"{provider.name} failed after streaming began: {exc}"
+                    ) from exc
+
                 errors.append(f"{provider.name}: {exc}")
                 continue
 
@@ -174,7 +191,8 @@ class ModelRouter:
             temperature=temperature,
             user_input=user_input,
             on_escalation=on_escalation,
-            routing=routing
+            routing=routing,
+            response_format="json"
         )
 
         return self._parse_json(text)
