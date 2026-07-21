@@ -84,8 +84,9 @@ class Microphone:
 
         audio = np.squeeze(indata.copy())
 
-
-        self.live_audio.put(audio)
+        if self.state == "command":
+            self.live_audio.put(audio)
+            return
 
         if self.state != "wake":
             return
@@ -105,6 +106,7 @@ class Microphone:
 
                 print("Wake:", name)
 
+                self._clear_audio()
                 self.state = "command"
                 self.wake_cooldown_until = time.time() + 0.35
 
@@ -142,15 +144,32 @@ class Microphone:
         print("Listening...")
 
         if is_speaking():
+            self.state = "idle"
             return ""
 
         speaking = False
 
         audio_chunks = []
+        started_at = time.time()
+        no_speech_timeout = 5
+        max_command_seconds = 30
 
         while True:
 
-            chunk = self.live_audio.get()
+            try:
+                chunk = self.live_audio.get(timeout=0.5)
+            except Empty:
+                elapsed = time.time() - started_at
+
+                if not speaking and elapsed >= no_speech_timeout:
+                    self.state = "idle"
+                    return ""
+
+                if elapsed >= max_command_seconds:
+                    break
+
+                continue
+
             self.preroll.append(chunk)
             event = speech_event(
                 torch.from_numpy(chunk)
