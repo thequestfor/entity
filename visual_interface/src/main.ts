@@ -164,16 +164,16 @@ const orbMaterial = new THREE.MeshPhysicalMaterial({
   emissiveIntensity: 0.18,
   roughness: 0.035,
   metalness: 0,
-  transmission: 0.76,
-  thickness: 3.2,
+  transmission: 0.52,
+  thickness: 2.8,
   ior: 1.42,
   transparent: true,
-  opacity: 0.42,
+  opacity: 0.64,
   clearcoat: 1,
   clearcoatRoughness: 0.025,
   attenuationColor: "#9eefff",
-  attenuationDistance: 2.2,
-  envMapIntensity: 1.8
+  attenuationDistance: 0.95,
+  envMapIntensity: 1.4
 });
 
 const stemMaterial = new THREE.MeshPhysicalMaterial({
@@ -331,13 +331,13 @@ bodyHalo.renderOrder = 8;
 entity.add(bodyHalo);
 
 const colorShell = new THREE.Mesh(
-  new THREE.SphereGeometry(1.18, 64, 32),
+  new THREE.SphereGeometry(1.3, 64, 32),
   new THREE.MeshBasicMaterial({
     color: "#63f6ff",
     transparent: true,
-    opacity: 0.24,
-    blending: THREE.AdditiveBlending,
-    depthTest: false,
+    opacity: 0.3,
+    blending: THREE.NormalBlending,
+    depthTest: true,
     depthWrite: false
   })
 );
@@ -1328,11 +1328,11 @@ function animate() {
   (scene.fog as THREE.FogExp2).color.copy(state.displayRoom).multiplyScalar(0.66);
   (scene.fog as THREE.FogExp2).density = 0.0038 + (1 - offline) * 0.01;
 
-  orbMaterial.color.copy(state.displaySecondary).lerp(state.displayPrimary, 0.14);
+  orbMaterial.color.copy(state.displaySecondary).lerp(state.displayPrimary, 0.04);
   orbMaterial.emissive.copy(state.displaySecondary);
-  orbMaterial.emissiveIntensity = (0.16 + activity * 0.55) * offline;
+  orbMaterial.emissiveIntensity = (0.06 + activity * 0.24) * offline;
   orbMaterial.attenuationColor.copy(state.displaySecondary);
-  orbMaterial.opacity = 0.38 + activity * 0.18;
+  orbMaterial.opacity = 0.58 + activity * 0.1;
   orbMaterial.roughness = 0.055 - Math.min(activity * 0.02, 0.03);
 
   stemMaterial.color.copy(state.displaySecondary).lerp(state.displayPrimary, 0.28);
@@ -1340,7 +1340,7 @@ function animate() {
 
   const coreMaterial = core.material as THREE.MeshBasicMaterial;
   coreMaterial.color.copy(state.displayAccent);
-  coreMaterial.opacity = (0.24 + activity * 0.3) * offline;
+  coreMaterial.opacity = (0.2 + activity * 0.22) * offline;
 
   const shellMaterial = innerShell.material as THREE.MeshBasicMaterial;
   shellMaterial.color.copy(state.displaySecondary);
@@ -1352,11 +1352,11 @@ function animate() {
 
   const colorShellMaterial = colorShell.material as THREE.MeshBasicMaterial;
   colorShellMaterial.color.copy(state.displaySecondary);
-  colorShellMaterial.opacity = (0.12 + activity * 0.22) * offline;
+  colorShellMaterial.opacity = (0.24 + activity * 0.16) * offline;
 
   const lowerColorMaterial = lowerColorWell.material as THREE.MeshBasicMaterial;
   lowerColorMaterial.color.copy(state.displayAccent).lerp(state.displaySecondary, 0.5);
-  lowerColorMaterial.opacity = (0.14 + activity * 0.25) * offline;
+  lowerColorMaterial.opacity = (0.1 + activity * 0.18) * offline;
 
   const outerAuraMaterial = outerModeAura.material as THREE.MeshBasicMaterial;
   outerAuraMaterial.color.copy(state.displaySecondary);
