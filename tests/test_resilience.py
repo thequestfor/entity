@@ -1,9 +1,11 @@
 import os
 import io
+import json
 import tempfile
 import threading
 import time
 import unittest
+import urllib.error
 from contextlib import redirect_stdout
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,12 +24,527 @@ from agent.models.router import ModelRouter
 from agent.observers.audio import AudioObserver
 from agent.observers.calendar import CalendarObserver
 from agent.observers.scheduler import SchedulerObserver
+from agent.planner import AgentPlan, PlanStep
+from agent.research import DuckDuckGoParser
 from agent.events import Event
 from agent.runtime import EntityRuntime
 from agent.speech.queue import SpeechQueue
+from agent.visual.unreal import STATE_PROFILES, UnrealRemoteControlSink
 
 
 class ResilienceTests(unittest.TestCase):
+    def test_ordinary_conversation_bypasses_action_planner(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        self.assertFalse(runtime._should_use_action_planner("How are you?"))
+        self.assertFalse(
+            runtime._should_use_action_planner(
+                "Help me think through tomorrow's visual design session."
+            )
+        )
+
+    def test_external_action_requests_use_planner(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        self.assertTrue(
+            runtime._should_use_action_planner(
+                "Set a reminder and add it to my Calendar."
+            )
+        )
+        self.assertTrue(
+            runtime._should_use_action_planner("Send this through ntfy.")
+        )
+
+    def test_unsupported_external_actions_are_truthful(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        calendar = runtime._handle_unsupported_external_action(
+            "Delete every event from my Google Calendar."
+        )
+        email = runtime._handle_unsupported_external_action(
+            "Email my professor."
+        )
+        booking = runtime._handle_unsupported_external_action(
+            "Book me a flight."
+        )
+
+        self.assertIn("cannot delete", calendar)
+        self.assertIn("did not change", calendar)
+        self.assertIn("cannot send", email)
+        self.assertIn("cannot make purchases", booking)
+
+    def test_recurring_reminder_is_not_silently_reduced_to_one_time(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        response = runtime._create_reminder_from_args(
+            {
+                "text": "Take medicine",
+                "time": "2099-07-22T08:00:00-04:00",
+                "recurrence": "FREQ=DAILY"
+            },
+            "Every day remind me to take medicine."
+        )
+
+        self.assertIn("recurring reminders are not supported", response)
+
+    def test_answer_plan_delegates_to_conversation_without_tool_failure(self):
+        class Planner:
+            def plan(self, *args, **kwargs):
+                return AgentPlan(
+                    intent="answer",
+                    confidence=1,
+                    steps=[PlanStep(tool="answer")]
+                )
+
+        class Snapshot:
+            def snapshot(self):
+                return {}
+
+        class Store:
+            update = None
+
+            def recent_planner_decisions(self, limit=5):
+                return []
+
+            def add_planner_decision(self, **kwargs):
+                return "decision"
+
+            def update_planner_decision(self, decision_id, **kwargs):
+                self.update = kwargs
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.planner = Planner()
+        runtime.awareness = Snapshot()
+        runtime.presence = Snapshot()
+        runtime.task_store = Store()
+        runtime.recent_actions = []
+        runtime.recent_responses = []
+        runtime.actuators = []
+        runtime.observers = []
+
+        response = runtime._handle_planned_command("Explain this.")
+
+        self.assertIsNone(response)
+        self.assertEqual(
+            "delegated_to_conversation",
+            runtime.task_store.update["outcome"]
+        )
+
+    def test_research_parser_supports_duckduckgo_lite_results(self):
+        parser = DuckDuckGoParser(max_results=1)
+        parser.feed(
+            "<a class='result-link' "
+            "href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fnasa.gov%2Fx'>"
+            "NASA mission</a>"
+            "<td class='result-snippet'>Official mission details.</td>"
+        )
+
+        self.assertEqual(1, len(parser.sources))
+        self.assertEqual("NASA mission", parser.sources[0].title)
+        self.assertEqual("https://nasa.gov/x", parser.sources[0].url)
+        self.assertEqual(
+            "Official mission details.",
+            parser.sources[0].snippet
+        )
+
+    def test_structured_calendar_args_bypass_composite_command_reparsing(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        actions = []
+        runtime.execute = lambda action: (
+            actions.append(action) or "Calendar event created."
+        )
+        runtime._notify_significant_action = lambda *args, **kwargs: None
+
+        result = runtime._create_calendar_event_from_args(
+            {
+                "text": "Wake up",
+                "start_time": "2026-07-22T10:00:00-04:00",
+                "end_time": "2026-07-22T10:15:00-04:00"
+            },
+            "Create a reminder, Calendar event, and ntfy alert."
+        )
+
+        draft = actions[0].payload["draft"]
+        self.assertEqual("Calendar event created.", result)
+        self.assertEqual("Wake up", draft.summary)
+        self.assertEqual("2026-07-22T10:00:00-04:00", draft.start.isoformat())
+        self.assertEqual("2026-07-22T10:15:00-04:00", draft.end.isoformat())
+
+    def test_structured_reminder_args_schedule_exact_time(self):
+        class Store:
+            task = None
+
+            def add_task(self, **kwargs):
+                self.task = kwargs
+                return "task-id"
+
+        class Scheduler:
+            reminder = None
+
+            def add_reminder_at(self, *args, **kwargs):
+                self.reminder = (args, kwargs)
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.task_store = Store()
+        runtime.scheduler_observer = Scheduler()
+        runtime._notify_significant_action = lambda *args, **kwargs: None
+
+        result = runtime._create_reminder_from_args(
+            {
+                "text": "Wake up",
+                "time": "2099-07-22T10:00:00-04:00",
+                "priority": 9
+            },
+            "Wake me up",
+            source="voice"
+        )
+
+        expected = datetime.fromisoformat(
+            "2099-07-22T10:00:00-04:00"
+        ).timestamp()
+        self.assertEqual("Reminder set: Wake up.", result)
+        self.assertEqual(expected, runtime.task_store.task["due_at"])
+        self.assertEqual(9, runtime.task_store.task["priority"])
+        self.assertEqual(expected, runtime.scheduler_observer.reminder[0][0])
+
+    def test_same_time_reminder_covers_scheduled_ntfy(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        reminder = PlanStep(
+            tool="create_reminder",
+            args={"time": "2026-07-22T10:00:00-04:00"}
+        )
+        notify = PlanStep(
+            tool="notify",
+            args={"time": "2026-07-22T10:00:00-04:00"}
+        )
+
+        self.assertTrue(
+            runtime._notify_is_covered_by_reminder(
+                notify,
+                [reminder, notify]
+            )
+        )
+
+    def test_partial_plan_failure_is_reported_and_recorded(self):
+        class Planner:
+            def plan(self, *args, **kwargs):
+                return AgentPlan(
+                    intent="workflow",
+                    confidence=1,
+                    steps=[
+                        PlanStep(tool="create_reminder"),
+                        PlanStep(tool="create_calendar_event")
+                    ]
+                )
+
+        class Snapshot:
+            def snapshot(self):
+                return {}
+
+        class Store:
+            update = None
+
+            def recent_planner_decisions(self, limit=5):
+                return []
+
+            def add_planner_decision(self, **kwargs):
+                return "decision-id"
+
+            def update_planner_decision(self, decision_id, **kwargs):
+                self.update = kwargs
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.planner = Planner()
+        runtime.awareness = Snapshot()
+        runtime.presence = Snapshot()
+        runtime.task_store = Store()
+        runtime.recent_actions = []
+        runtime.recent_responses = []
+        runtime.actuators = []
+        runtime.observers = []
+        runtime._plan_needs_confirmation = lambda plan: False
+        runtime._notify_significant_plan_step = lambda *args, **kwargs: None
+        runtime._execute_plan_step = lambda step, *args, **kwargs: (
+            "Reminder set: Wake up."
+            if step.tool == "create_reminder"
+            else None
+        )
+
+        response = runtime._handle_planned_command("workflow")
+
+        self.assertIn("I could not complete: create calendar event.", response)
+        self.assertEqual("partially_failed", runtime.task_store.update["outcome"])
+        self.assertFalse(
+            runtime.task_store.update["metadata"]["step_results"][1]["succeeded"]
+        )
+
+    def test_compliance_question_uses_latest_verifiable_workflow(self):
+        class Store:
+            def recent_planner_decisions(self, limit=20):
+                return [
+                    {"metadata": {}},
+                    {
+                        "metadata": {
+                            "step_results": [
+                                {
+                                    "tool": "create_reminder",
+                                    "result": "Reminder set.",
+                                    "succeeded": True
+                                },
+                                {
+                                    "tool": "create_calendar_event",
+                                    "result": None,
+                                    "succeeded": False
+                                }
+                            ]
+                        }
+                    }
+                ]
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.task_store = Store()
+
+        response = runtime._handle_decision_audit_command(
+            "Did you comply with everything I requested?"
+        )
+
+        self.assertIn("Completed: create reminder", response)
+        self.assertIn("Failed or unverified: create calendar event", response)
+
+    def test_every_entity_visual_state_has_a_distinct_color(self):
+        expected_states = {
+            "created", "booting", "wake_detected", "listening",
+            "transcribing", "thinking", "tool_started", "tool_finished",
+            "speaking", "autonomous", "recovering", "service_error",
+            "error", "idle", "stopping", "stopped"
+        }
+
+        self.assertEqual(expected_states, set(STATE_PROFILES))
+        colors = [STATE_PROFILES[state]["ShellColor"] for state in expected_states]
+        self.assertEqual(len(colors), len(set(colors)))
+
+    def test_unreal_visual_sink_sends_remote_control_function_call(self):
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def open_request(request, timeout):
+            requests.append((request, timeout))
+            return Response()
+
+        sink = UnrealRemoteControlSink(
+            enabled=True,
+            base_url="http://127.0.0.1:30010",
+            preset="Entity Orb",
+            target="function",
+            function="Set Entity State",
+            parameter="NewState",
+            timeout=0.25,
+            opener=open_request
+        )
+
+        delivered = sink.deliver({"state": "thinking"})
+
+        self.assertTrue(delivered)
+        self.assertEqual(1, len(requests))
+        request, timeout = requests[0]
+        self.assertEqual(
+            "http://127.0.0.1:30010/remote/preset/Entity%20Orb/"
+            "function/Set%20Entity%20State",
+            request.full_url
+        )
+        self.assertEqual("PUT", request.method)
+        self.assertEqual(0.25, timeout)
+        self.assertEqual(
+            {
+                "Parameters": {"NewState": "thinking"},
+                "GenerateTransaction": False
+            },
+            json.loads(request.data)
+        )
+
+    def test_unreal_visual_sink_updates_exposed_state_property(self):
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def open_request(request, timeout):
+            requests.append(request)
+            return Response()
+
+        sink = UnrealRemoteControlSink(
+            enabled=True,
+            preset="EntityOrb",
+            target="property",
+            property_name="EntityState",
+            opener=open_request
+        )
+
+        self.assertTrue(sink.deliver({"state": "listening"}))
+        self.assertEqual(
+            "http://127.0.0.1:30010/remote/preset/EntityOrb/"
+            "property/EntityState",
+            requests[0].full_url
+        )
+        self.assertEqual(
+            {
+                "PropertyValue": "listening",
+                "GenerateTransaction": False
+            },
+            json.loads(requests[0].data)
+        )
+
+    def test_unreal_visual_sink_maps_state_to_shell_parameters(self):
+        requests = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return b"{}"
+
+        def open_request(request, timeout):
+            requests.append(request)
+            return Response()
+
+        sink = UnrealRemoteControlSink(
+            enabled=True,
+            target="component_scalar",
+            component_path="/Game/Test.Orb:PersistentLevel.Orb.Shell",
+            opener=open_request
+        )
+
+        self.assertTrue(sink.deliver({"state": "thinking"}))
+        self.assertEqual(4, len(requests))
+        payloads = [json.loads(request.data) for request in requests]
+        self.assertEqual(
+            [
+                "ShellStrength",
+                "BreathSpeed",
+                "BreathExpansion",
+                "ShellColor"
+            ],
+            [item["Parameters"]["ParameterName"] for item in payloads]
+        )
+        self.assertEqual(
+            [28.0, 0.55, 1.05],
+            [
+                item["Parameters"]["ParameterValue"]
+                for item in payloads[:3]
+            ]
+        )
+        self.assertEqual(
+            {"X": 0.72, "Y": 0.08, "Z": 1.0},
+            payloads[3]["Parameters"]["ParameterValue"]
+        )
+        self.assertTrue(
+            all(
+                request.full_url.endswith("/remote/object/call")
+                for request in requests
+            )
+        )
+
+    def test_unreal_visual_sink_does_not_raise_when_unavailable(self):
+        def unavailable(request, timeout):
+            raise urllib.error.URLError("offline")
+
+        sink = UnrealRemoteControlSink(
+            enabled=True,
+            opener=unavailable
+        )
+
+        with redirect_stdout(io.StringIO()):
+            delivered = sink.deliver({"state": "idle"})
+
+        self.assertFalse(delivered)
+
+    def test_runtime_marks_autonomous_work_for_visual_clients(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.lifecycle = Lifecycle()
+        runtime._record_event = lambda event: None
+        runtime._learn_from_event = lambda event: None
+        runtime.handle_autonomous_goal = lambda event: "done"
+        states = []
+        runtime.lifecycle.subscribe(lambda event: states.append(event["state"]))
+        event = Event(
+            source="autonomy",
+            type="autonomous_goal",
+            payload={"goal": {"name": "periodic_reflection"}}
+        )
+
+        self.assertEqual("done", runtime.handle_event(event))
+        self.assertEqual(["autonomous", "idle"], states)
+
+    def test_startup_service_issues_emit_visual_error_state(self):
+        class Health:
+            def alert_message(self):
+                return "Service unavailable."
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.lifecycle = Lifecycle()
+        runtime.startup_health = Health()
+        runtime._deliver_alert = lambda *args, **kwargs: None
+        states = []
+        runtime.lifecycle.subscribe(lambda event: states.append(event["state"]))
+
+        runtime._run_startup_health_check()
+
+        self.assertEqual(["service_error"], states)
+
+    def test_runtime_connects_and_disconnects_visual_sink(self):
+        class Sink:
+            enabled = True
+
+            def __init__(self):
+                self.events = []
+                self.started = False
+                self.closed = False
+
+            def start(self):
+                self.started = True
+
+            def publish(self, event):
+                self.events.append(event)
+
+            def close(self):
+                self.closed = True
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.lifecycle = Lifecycle()
+        runtime.visual_sink = Sink()
+
+        runtime._start_visual_sink()
+        runtime.lifecycle.emit("speaking")
+        runtime._stop_visual_sink()
+        runtime.lifecycle.emit("idle")
+
+        self.assertTrue(runtime.visual_sink.started)
+        self.assertTrue(runtime.visual_sink.closed)
+        self.assertEqual(
+            ["speaking"],
+            [event["state"] for event in runtime.visual_sink.events]
+        )
+
     def test_speech_worker_survives_playback_failure(self):
         calls = []
 
@@ -283,6 +800,15 @@ class ResilienceTests(unittest.TestCase):
             "deterministic_weather",
             runtime.task_store.decisions[0]["intent"]
         )
+
+    def test_explicit_read_about_online_request_uses_research(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        query = runtime._research_query(
+            "Read about Shakespeare online and report back to me."
+        )
+
+        self.assertEqual("Shakespeare", query)
 
     def test_runtime_acknowledges_reminder_only_after_delivery(self):
         class Store:

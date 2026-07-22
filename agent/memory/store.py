@@ -44,6 +44,21 @@ class MemoryStore:
         now = utc_now()
 
         with self._connect() as conn:
+            if kind == "reflection":
+                existing = conn.execute(
+                    """
+                    SELECT id
+                    FROM memories
+                    WHERE kind = ? AND content = ? AND source = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (kind, content, source)
+                ).fetchone()
+
+                if existing:
+                    return existing["id"]
+
             cursor = conn.execute(
                 """
                 INSERT INTO memories (

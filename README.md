@@ -50,10 +50,43 @@ ENTITY_HOME_ADDRESS=
 Keep `.env`, OAuth credentials, tokens, and `agent/entity_memory.db` private. They
 are ignored by Git.
 
-For a Blender interface, keep Entity in its own process. A small localhost bridge
-can serialize lifecycle events to Blender, where a `bpy.app.timers` callback applies
-queued visual changes on Blender's main thread. This keeps model, network, audio,
-and database work from blocking Blender's viewport.
+For a visual interface, keep Entity in its own process. The optional Unreal proof
+of concept sends lifecycle states to an Unreal Remote Control Preset without
+blocking Entity's runtime. Enable it with:
+
+```dotenv
+ENTITY_UNREAL_ENABLED=true
+ENTITY_PREFER_CLOUD_WHEN_UNREAL=true
+ENTITY_UNREAL_REMOTE_URL=http://127.0.0.1:30010
+ENTITY_UNREAL_PRESET=EntityOrb
+ENTITY_UNREAL_TARGET=component_scalar
+ENTITY_UNREAL_COMPONENT_PATH=/Game/Maps/UEDPIE_0_EntityRoomTest.EntityRoomTest:PersistentLevel.BP_EntityOrb_C_0.Shell
+```
+
+The proof-of-concept bridge calls the running orb shell's native material
+functions. It maps each lifecycle state to emission strength, breathing speed,
+breathing expansion, and a distinct color. The main visual language is cyan idle,
+blue listening, indigo transcription, purple thinking, green speaking, orange
+tool use, gold autonomous activity, orange-red service trouble, and crimson
+runtime errors. It sends only the newest state and discards stale visual updates
+if Unreal is unavailable. Test the connection without starting Entity's audio and
+model stack using:
+
+```bash
+.venv/bin/python -m agent.visual.unreal thinking
+```
+
+The `UEDPIE_0` component path exists only while the first Play In Editor session
+is running. Restart Entity after entering Play, and update the path if Unreal uses
+a different PIE instance number. Unreal Remote Control is intended only for the
+editor proof of concept. A packaged interface should use a dedicated runtime
+transport and a stable actor lookup instead of an editor object path.
+
+When `ENTITY_PREFER_CLOUD_WHEN_UNREAL=true`, a reachable Unreal Remote Control
+server also makes the configured cloud model Entity's first choice. This avoids
+competing with Unreal for GPU memory. Closing Unreal automatically restores the
+normal local-first order, and local Ollama remains the fallback if cloud inference
+fails.
 
 ## Run
 
@@ -74,6 +107,14 @@ contact live services:
 .venv/bin/python -m compileall -q main.py vad.py speech.py agent tts tests
 .venv/bin/python -m pip check
 ```
+
+Behavioral integration experiments use `tests/entity_sandbox.py`. The sandbox
+keeps tasks, conversations, decisions, and learned memories in a temporary
+SQLite database. Its recording actuator replaces Calendar, ntfy, speech, and
+diagnostic side effects with in-memory records, while still allowing the real
+planner, conversation model, and read-only internet research path to be tested.
+Do not replace the recording actuator with production actuators in automated
+scenario runs.
 
 Ask Entity for a `system status` to inspect configured runtime services. Live
 integration checks can consume API quota or produce external effects, so test

@@ -1,5 +1,7 @@
 import json
+import re
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 
 from agent.events import utc_now
 from agent.memory.semantic import clean_memory_text
@@ -142,7 +144,7 @@ class ResearchMemoryIngestor:
         if not candidate.should_remember:
             return None
 
-        if self._has_exact_memory(candidate.content):
+        if self._has_duplicate_memory(candidate.content, candidate.kind):
             return None
 
         return self.store.add_memory(
@@ -168,14 +170,26 @@ class ResearchMemoryIngestor:
             }
         )
 
-    def _has_exact_memory(self, content):
-        normalized = content.lower().strip()
+    def _has_duplicate_memory(self, content, kind):
+        normalized = self._normalized_content(content)
 
-        for memory in self.store.search(content, limit=5):
-            if memory["content"].lower().strip() == normalized:
+        for memory in self.store.list_memories(kind=kind, limit=100):
+            existing = self._normalized_content(memory["content"])
+
+            if existing == normalized:
+                return True
+
+            if SequenceMatcher(None, existing, normalized).ratio() >= 0.82:
                 return True
 
         return False
+
+    def _normalized_content(self, content):
+        return re.sub(
+            r"[^a-z0-9]+",
+            " ",
+            str(content).lower()
+        ).strip()
 
     def _importance(self, value):
         try:

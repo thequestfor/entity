@@ -104,28 +104,47 @@ class ResearchTool:
                 "q": query
             }
         )
-        request = urllib.request.Request(
-            f"https://html.duckduckgo.com/html/?{params}",
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 EntityResearch/1.0 "
-                    "(local personal assistant)"
-                )
-            }
-        )
+        last_error = None
 
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=self.timeout
-            ) as response:
-                body = response.read().decode("utf-8", errors="replace")
-        except Exception as exc:
-            raise RuntimeError(f"Research search failed: {exc}") from exc
+        for base_url in (
+            "https://html.duckduckgo.com/html/",
+            "https://lite.duckduckgo.com/lite/"
+        ):
+            request = urllib.request.Request(
+                f"{base_url}?{params}",
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 EntityResearch/1.0 "
+                        "(local personal assistant)"
+                    )
+                }
+            )
 
-        parser = DuckDuckGoParser(max_results=self.max_results)
-        parser.feed(body)
-        return parser.sources
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=self.timeout
+                ) as response:
+                    body = response.read().decode(
+                        "utf-8",
+                        errors="replace"
+                    )
+            except Exception as exc:
+                last_error = exc
+                continue
+
+            parser = DuckDuckGoParser(max_results=self.max_results)
+            parser.feed(body)
+
+            if parser.sources:
+                return parser.sources
+
+        if last_error:
+            raise RuntimeError(
+                f"Research search failed: {last_error}"
+            ) from last_error
+
+        return []
 
     def _wikipedia_search(self, query):
         params = urllib.parse.urlencode(
@@ -270,12 +289,16 @@ class DuckDuckGoParser(HTMLParser):
         attrs = dict(attrs)
         classes = attrs.get("class", "")
 
-        if tag == "a" and "result__a" in classes:
+        if tag == "a" and (
+            "result__a" in classes or "result-link" in classes
+        ):
             self._in_result_link = True
             self._current_link = self._clean_url(attrs.get("href", ""))
             self._text = []
 
-        if tag in {"a", "div"} and "result__snippet" in classes:
+        if tag in {"a", "div", "td"} and (
+            "result__snippet" in classes or "result-snippet" in classes
+        ):
             self._in_snippet = True
             self._text = []
 
@@ -295,7 +318,7 @@ class DuckDuckGoParser(HTMLParser):
             self._current_link = None
             self._text = []
 
-        if self._in_snippet and tag in {"a", "div"}:
+        if self._in_snippet and tag in {"a", "div", "td"}:
             snippet = self._clean_text("".join(self._text))
 
             if snippet and self.sources:

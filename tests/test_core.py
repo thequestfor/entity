@@ -1,12 +1,18 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agent.confirmations import ConfirmationStore
+from agent.brain.brain import Brain
+from agent.brain.prompts import entity_prompt
 from agent.math_tools import ArithmeticHandler
 from agent.memory.store import MemoryStore
+from agent.memory.research import ResearchMemoryIngestor
 from agent.models.router import ModelRouter
-from agent.planner import AgentPlanner
+from agent.models.base import ModelUnavailable
+from agent.planner import AgentPlan, AgentPlanner, PlanStep
+from agent.goals import AutonomousGoalPolicy
 from agent.weather import WeatherReport
 
 
@@ -31,6 +37,61 @@ class CoreBehaviorTests(unittest.TestCase):
         self.assertEqual(1, len(results))
         self.assertEqual("preference", results[0]["kind"])
 
+    def test_memory_store_deduplicates_identical_reflections(self):
+        first = self.store.add_memory(
+            "reflection",
+            "Review this failure once.",
+            source="autonomy"
+        )
+        second = self.store.add_memory(
+            "reflection",
+            "Review this failure once.",
+            source="autonomy"
+        )
+
+        self.assertEqual(first, second)
+        self.assertEqual(1, self.store.count_memories(kind="reflection"))
+
+    def test_research_memory_deduplicates_close_paraphrases(self):
+        self.store.add_memory(
+            "web_fact",
+            (
+                "The Unreal Remote Control API is disabled by default in "
+                "packaged projects or when running with the game flag."
+            ),
+            source="research"
+        )
+        ingestor = ResearchMemoryIngestor.__new__(ResearchMemoryIngestor)
+        ingestor.store = self.store
+
+        duplicate = ingestor._has_duplicate_memory(
+            (
+                "The Unreal Remote Control API is disabled by default in "
+                "packaged projects and when running with the game flag."
+            ),
+            "web_fact"
+        )
+
+        self.assertTrue(duplicate)
+
+    def test_autonomy_does_not_review_same_failed_decision_repeatedly(self):
+        policy = AutonomousGoalPolicy.__new__(AutonomousGoalPolicy)
+        decisions = [
+            {
+                "id": "decision",
+                "outcome": "failed",
+                "updated_at": "2026-07-21T10:00:00Z"
+            }
+        ]
+        goals = [
+            {
+                "name": "review_failed_tool",
+                "created_at": "2026-07-21T10:01:00Z"
+            }
+        ]
+
+        self.assertIsNone(policy._recent_failed_decision(decisions, goals))
+
     def test_confirmation_store_expires_pending_plan(self):
         class Plan:
             intent = "test"
@@ -51,6 +112,60 @@ class CoreBehaviorTests(unittest.TestCase):
 
         self.assertEqual("answer", payload["intent"])
 
+    def test_router_prefers_cloud_while_unreal_is_reachable(self):
+        class Provider:
+            def __init__(self, name):
+                self.name = name
+
+            def available(self):
+                return True
+
+        router = ModelRouter(
+            providers=[Provider("local_fast"), Provider("cloud_openai")],
+            unreal_probe=lambda: True
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ENTITY_PREFER_CLOUD_WHEN_UNREAL": "true",
+                "ENTITY_UNREAL_ENABLED": "true"
+            }
+        ):
+            providers = list(router._providers_for("hello", None, "auto"))
+
+        self.assertEqual(
+            ["cloud_openai", "local_fast"],
+            [provider.name for provider in providers]
+        )
+
+    def test_router_keeps_local_first_when_unreal_is_unavailable(self):
+        class Provider:
+            def __init__(self, name):
+                self.name = name
+
+            def available(self):
+                return True
+
+        router = ModelRouter(
+            providers=[Provider("local_fast"), Provider("cloud_openai")],
+            unreal_probe=lambda: False
+        )
+
+        with patch.dict(
+            "os.environ",
+            {
+                "ENTITY_PREFER_CLOUD_WHEN_UNREAL": "true",
+                "ENTITY_UNREAL_ENABLED": "true"
+            }
+        ):
+            providers = list(router._providers_for("hello", None, "auto"))
+
+        self.assertEqual(
+            ["local_fast", "cloud_openai"],
+            [provider.name for provider in providers]
+        )
+
     def test_planner_rejects_unknown_tools(self):
         planner = AgentPlanner.__new__(AgentPlanner)
 
@@ -63,6 +178,199 @@ class CoreBehaviorTests(unittest.TestCase):
         )
 
         self.assertIsNone(plan)
+
+    def test_planner_never_requires_confirmation_to_ask_a_question(self):
+        planner = AgentPlanner.__new__(AgentPlanner)
+
+        plan = planner._validated(
+            {
+                "intent": "clarify",
+                "confidence": 1,
+                "steps": [
+                    {
+                        "tool": "ask",
+                        "args": {"question": "What time?"},
+                        "requires_confirmation": True
+                    }
+                ]
+            }
+        )
+
+        self.assertFalse(plan.steps[0].requires_confirmation)
+
+    def test_planner_does_not_expose_its_draft_as_the_answer(self):
+        planner = AgentPlanner.__new__(AgentPlanner)
+
+        plan = planner._validated(
+            {
+                "intent": "factual_answer",
+                "confidence": 1,
+                "response": "SYSTEM OPERATIONAL. PROCESSING.",
+                "steps": [
+                    {
+                        "tool": "answer",
+                        "args": {"text": "SYSTEM OPERATIONAL. PROCESSING."}
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual({}, plan.steps[0].args)
+        self.assertEqual("", plan.response)
+
+    def test_planner_preserves_explicit_calendar_reminder_and_ntfy(self):
+        planner = AgentPlanner.__new__(AgentPlanner)
+        plan = AgentPlan(
+            intent="create_reminder",
+            confidence=1,
+            steps=[
+                PlanStep(
+                    tool="create_reminder",
+                    args={
+                        "text": "Wake up",
+                        "time": "2026-07-22T10:00:00-04:00"
+                    }
+                )
+            ]
+        )
+
+        result = planner._ensure_explicit_tools(
+            plan,
+            "Set a reminder, add it to Google Calendar, and use ntfy."
+        )
+
+        self.assertEqual(
+            ["create_reminder", "create_calendar_event", "notify"],
+            [step.tool for step in result.steps]
+        )
+        self.assertEqual(
+            "2026-07-22T10:00:00-04:00",
+            result.steps[1].args["start_time"]
+        )
+
+    def test_planner_enriches_explicit_calendar_step_with_shared_time(self):
+        planner = AgentPlanner.__new__(AgentPlanner)
+        plan = AgentPlan(
+            intent="wake_workflow",
+            confidence=1,
+            steps=[
+                PlanStep(
+                    tool="create_reminder",
+                    args={
+                        "text": "Wake up",
+                        "time": "2026-07-22T10:00:00-04:00"
+                    }
+                ),
+                PlanStep(
+                    tool="create_calendar_event",
+                    args={"text": "Wake up"}
+                )
+            ]
+        )
+
+        result = planner._ensure_explicit_tools(
+            plan,
+            "Add a reminder to my Calendar."
+        )
+
+        self.assertEqual(
+            "2026-07-22T10:00:00-04:00",
+            result.steps[1].args["start_time"]
+        )
+
+    def test_planner_combines_separate_calendar_date_and_time(self):
+        planner = AgentPlanner.__new__(AgentPlanner)
+        steps = [
+            PlanStep(
+                tool="create_calendar_event",
+                args={"date": "2026-07-23", "time": "09:30:00"}
+            )
+        ]
+
+        self.assertEqual(
+            "2026-07-23T09:30:00",
+            planner._planned_time(steps)
+        )
+
+    def test_brain_rewrites_internal_status_report_before_speaking(self):
+        class Memory:
+            remembered = None
+
+            def context_for(self, command):
+                return {}
+
+            def remember(self, category, item):
+                self.remembered = item
+
+        drafts = iter(
+            [
+                "AFFIRMATIVE, BEN. SYSTEM OPERATIONAL. PROCESSING.",
+                "Shakespeare was born in Stratford-upon-Avon, England."
+            ]
+        )
+        memory = Memory()
+        brain = Brain(
+            memory=memory,
+            generator=lambda *args, **kwargs: next(drafts)
+        )
+
+        response = "".join(
+            brain.respond_stream(
+                "Where was Shakespeare born?",
+                state={}
+            )
+        )
+
+        self.assertEqual(
+            "Shakespeare was born in Stratford-upon-Avon, England.",
+            response
+        )
+        self.assertEqual(response, memory.remembered["entity"])
+
+    def test_brain_reports_model_outage_without_crashing(self):
+        class Memory:
+            def context_for(self, command):
+                return {}
+
+            def remember(self, category, item):
+                pass
+
+        def unavailable(*args, **kwargs):
+            raise ModelUnavailable("offline")
+
+        response = "".join(
+            Brain(memory=Memory(), generator=unavailable).respond_stream(
+                "Hello?",
+                state={}
+            )
+        )
+
+        self.assertIn("I do not have an available language model", response)
+
+    def test_entity_prompt_rejects_fake_operations_narration(self):
+        prompt = entity_prompt("identity", {}, {}, "Where was Shakespeare born?")
+
+        self.assertIn("Answer the user's question directly", prompt)
+        self.assertIn("Never output internal workflow narration", prompt)
+
+    def test_entity_prompt_omits_contaminated_prior_response(self):
+        prompt = entity_prompt(
+            "identity",
+            {
+                "relevant_memories": [],
+                "recent_conversations": [
+                    {
+                        "user_text": "Where?",
+                        "entity_text": "SYSTEM OPERATIONAL. MEMORY INTEGRITY VERIFIED."
+                    }
+                ]
+            },
+            {},
+            "Where was Shakespeare born?"
+        )
+
+        self.assertNotIn("MEMORY INTEGRITY VERIFIED", prompt)
+        self.assertIn("omitted because it exposed internal narration", prompt)
 
     def test_arithmetic_handler_uses_safe_expression_subset(self):
         handler = ArithmeticHandler()

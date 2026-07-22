@@ -98,7 +98,10 @@ class AgentPlanner:
         except (ModelUnavailable, ValueError, TypeError, Exception):
             return None
 
-        return self._validated(payload)
+        return self._ensure_explicit_tools(
+            self._validated(payload),
+            text
+        )
 
     def setup_status(self):
         return "LLM-directed action planner online."
@@ -160,6 +163,9 @@ class AgentPlanner:
             "- Use observers listed in capability context as available input "
             "channels and actuators listed there as available output channels.\n"
             "- Use answer only when no tool is needed.\n"
+            "- The planner does not write ordinary conversational answers. "
+            "For answer, use empty args and leave response empty so the "
+            "conversation model can answer.\n"
             "- Use ask when essential details are missing.\n"
             "- Use behavior rules, memory, recent decisions, and recent "
             "tool outcomes to adapt. Avoid repeating failed or unwanted "
@@ -211,8 +217,9 @@ class AgentPlanner:
                 PlanStep(
                     tool=tool,
                     args=args,
-                    requires_confirmation=bool(
-                        item.get("requires_confirmation", False)
+                    requires_confirmation=(
+                        tool not in {"answer", "ask"}
+                        and bool(item.get("requires_confirmation", False))
                     )
                 )
             )
@@ -223,22 +230,116 @@ class AgentPlanner:
             steps.append(
                 PlanStep(
                     tool="answer",
-                    args={
-                        "text": response
-                    }
+                    args={}
                 )
             )
 
         if not steps:
             return None
 
+        for step in steps:
+            if step.tool == "answer":
+                step.args = {}
+            elif step.tool == "ask" and not (
+                step.args.get("question") or step.args.get("text")
+            ):
+                step.args = {"question": response}
+
         return AgentPlan(
             intent=str(payload.get("intent", "unknown")),
             confidence=confidence,
             steps=steps,
-            response=response,
+            response="",
             reason=str(payload.get("reason", "")).strip()
         )
+
+    def _ensure_explicit_tools(self, plan, text):
+        if plan is None:
+            return None
+
+        normalized = text.lower()
+        tools = {step.tool for step in plan.steps}
+        scheduled_time = self._planned_time(plan.steps)
+
+        if not scheduled_time:
+            return plan
+
+        message = self._planned_message(plan.steps) or "Reminder"
+        additions = []
+
+        for step in plan.steps:
+            if step.tool == "create_reminder":
+                step.args.setdefault("text", message)
+                step.args.setdefault("time", scheduled_time)
+            elif step.tool == "create_calendar_event":
+                step.args.setdefault("text", message)
+
+                if not any(
+                    step.args.get(name)
+                    for name in ("start_time", "start", "date")
+                ):
+                    step.args["start_time"] = scheduled_time
+            elif step.tool == "notify" and "ntfy" in normalized:
+                step.args.setdefault("text", message)
+                step.args.setdefault("time", scheduled_time)
+
+        if (
+            any(phrase in normalized for phrase in (
+                "reminder", "remind me", "wake me"
+            ))
+            and "create_reminder" not in tools
+        ):
+            additions.append(
+                PlanStep(
+                    tool="create_reminder",
+                    args={"text": message, "time": scheduled_time}
+                )
+            )
+
+        if "calendar" in normalized and "create_calendar_event" not in tools:
+            additions.append(
+                PlanStep(
+                    tool="create_calendar_event",
+                    args={"text": message, "start_time": scheduled_time}
+                )
+            )
+
+        if "ntfy" in normalized and "notify" not in tools:
+            additions.append(
+                PlanStep(
+                    tool="notify",
+                    args={"text": message, "time": scheduled_time}
+                )
+            )
+
+        plan.steps.extend(additions)
+        return plan
+
+    def _planned_time(self, steps):
+        for step in steps:
+            date = step.args.get("date")
+            clock = step.args.get("time")
+
+            if date and clock and "T" not in str(clock):
+                return f"{date}T{clock}"
+
+            for name in ("time", "due_at", "start_time", "start"):
+                value = step.args.get(name)
+
+                if value:
+                    return str(value)
+
+        return ""
+
+    def _planned_message(self, steps):
+        for step in steps:
+            for name in ("text", "message", "summary", "title"):
+                value = step.args.get(name)
+
+                if value:
+                    return str(value)
+
+        return ""
 
     def _timezone(self):
         import os

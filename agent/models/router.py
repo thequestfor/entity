@@ -1,5 +1,8 @@
 import json
+import os
 import re
+import urllib.error
+import urllib.request
 
 from agent.models.base import ModelUnavailable
 from agent.models.cloud_openai import CloudOpenAIProvider
@@ -63,7 +66,9 @@ REMINDER_PLANNING_PATTERNS = [
 
 
 class ModelRouter:
-    def __init__(self, providers=None):
+    def __init__(self, providers=None, unreal_probe=None):
+        self._unreal_probe = unreal_probe
+
         if providers is not None:
             self.providers = providers
             return
@@ -310,6 +315,14 @@ class ModelRouter:
         )
 
     def _available_sequence(self, preferred, on_escalation, reason):
+        cloud_preferred = self._cloud_preferred_for_unreal()
+
+        if cloud_preferred:
+            preferred = [
+                "cloud_openai",
+                *[name for name in preferred if name != "cloud_openai"]
+            ]
+
         providers = {
             provider.name: provider
             for provider in self.providers
@@ -321,10 +334,43 @@ class ModelRouter:
             if provider is None or not provider.available():
                 continue
 
-            if index > 0 or name in {"local_thinking", "cloud_openai"}:
+            if (
+                index > 0
+                or name == "local_thinking"
+                or (name == "cloud_openai" and not cloud_preferred)
+            ):
                 self._notify_escalation(provider, on_escalation, reason)
 
             yield provider
+
+    def _cloud_preferred_for_unreal(self):
+        if not self._env_bool("ENTITY_PREFER_CLOUD_WHEN_UNREAL"):
+            return False
+
+        if not self._env_bool("ENTITY_UNREAL_ENABLED"):
+            return False
+
+        if self._unreal_probe is not None:
+            return bool(self._unreal_probe())
+
+        base_url = os.getenv(
+            "ENTITY_UNREAL_REMOTE_URL",
+            "http://127.0.0.1:30010"
+        ).rstrip("/")
+
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/remote/info",
+                timeout=0.25
+            ) as response:
+                return response.status == 200
+        except (OSError, urllib.error.URLError):
+            return False
+
+    def _env_bool(self, name):
+        return os.getenv(name, "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
 
     def _notify_escalation(self, provider, on_escalation, reason):
         if on_escalation is None:
