@@ -16,6 +16,7 @@ from unittest.mock import patch
 import numpy as np
 
 from agent.audio.frames import WakeFrameBuffer
+from agent.audio.activity import emit_speech_output_activity
 from agent.event_bus import EventBus
 from agent.health import StartupHealthCheck
 from agent.lifecycle import Lifecycle
@@ -33,9 +34,40 @@ from agent.actuators.speech import SpeechActuator
 from agent.runtime import EntityRuntime
 from agent.speech.queue import SpeechQueue
 from agent.visual.unreal import STATE_PROFILES, UnrealRemoteControlSink
+from tts.playback import _speech_levels
 
 
 class ResilienceTests(unittest.TestCase):
+    def test_playback_meter_tracks_speech_envelope(self):
+        samplerate = 1000
+        silence = np.zeros(200, dtype=np.float32)
+        time_axis = np.arange(400, dtype=np.float32) / samplerate
+        speech = np.sin(2 * np.pi * 80 * time_axis).astype(np.float32) * 0.4
+
+        levels = _speech_levels(
+            np.concatenate([silence, speech]),
+            samplerate,
+            updates_per_second=20
+        )
+
+        self.assertTrue(all(level == 0 for level in levels[:4]))
+        self.assertGreater(max(levels[4:]), 0.8)
+
+    def test_speech_activity_listener_is_scoped_to_actuator(self):
+        levels = []
+
+        def say(_text):
+            emit_speech_output_activity(0.72)
+
+        fake_speech = types.SimpleNamespace(say=say)
+        action = Action(type="speak", payload={"text": "Hello"})
+
+        with patch.dict(sys.modules, {"speech": fake_speech}):
+            SpeechActuator(on_activity=levels.append).execute(action)
+
+        emit_speech_output_activity(0.25)
+        self.assertEqual([0.72], levels)
+
     def test_speech_actuator_queues_phrase_before_stream_finishes(self):
         calls = []
         waited = []
@@ -605,6 +637,13 @@ class ResilienceTests(unittest.TestCase):
             delivered = sink.deliver({"state": "idle"})
 
         self.assertFalse(delivered)
+
+    def test_unreal_sink_ignores_high_frequency_speech_activity(self):
+        sink = UnrealRemoteControlSink(enabled=True)
+
+        sink.publish({"state": "speech_activity", "details": {"activity": 0.8}})
+
+        self.assertTrue(sink._queue.empty())
 
     def test_runtime_marks_autonomous_work_for_visual_clients(self):
         runtime = EntityRuntime.__new__(EntityRuntime)

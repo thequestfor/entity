@@ -202,6 +202,9 @@ class UnrealRemoteControlSink:
         if not self.enabled:
             return
 
+        if event.get("state") == "speech_activity":
+            return
+
         payload = dict(event)
 
         try:

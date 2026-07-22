@@ -100,7 +100,11 @@ const state = {
   bloom: 0.74,
   targetEnergy: 0.62,
   targetBloom: 0.74,
-  message: "Soft standby"
+  message: "Soft standby",
+  speechActivity: 0,
+  targetSpeechActivity: 0,
+  hasLiveSpeechActivity: false,
+  lastSpeechActivityAt: 0
 };
 
 let start = performance.now();
@@ -119,6 +123,11 @@ function setMode(mode) {
     return;
   }
 
+  if (mode !== "speaking") {
+    state.speechActivity = 0;
+    state.targetSpeechActivity = 0;
+    state.hasLiveSpeechActivity = false;
+  }
   state.mode = mode;
   const palette = palettes[mode];
   state.message = palette.message;
@@ -159,6 +168,10 @@ function rgba(hex, alpha) {
 function voiceIntensity(time, energy) {
   if (state.mode !== "speaking") {
     return 0;
+  }
+
+  if (state.hasLiveSpeechActivity) {
+    return state.speechActivity * (0.55 + energy * 0.45);
   }
 
   const fast = Math.abs(Math.sin(time * 7.6));
@@ -1877,6 +1890,20 @@ function drawFrame(now) {
 
   state.energy = lerp(state.energy, state.targetEnergy, 0.035);
   state.bloom = lerp(state.bloom, state.targetBloom, 0.035);
+  if (
+    state.hasLiveSpeechActivity
+    && performance.now() - state.lastSpeechActivityAt > 160
+  ) {
+    state.targetSpeechActivity = 0;
+  }
+  const speechSmoothing = state.targetSpeechActivity > state.speechActivity
+    ? 0.32
+    : 0.18;
+  state.speechActivity = lerp(
+    state.speechActivity,
+    state.targetSpeechActivity,
+    speechSmoothing
+  );
 
   ctx.clearRect(0, 0, width, height);
   drawBackground(width, height, palette, time);
@@ -1965,6 +1992,19 @@ const lifecycleEnergy = {
 
 function applyLifecycleEvent(event) {
   const lifecycleState = String(event?.state || "idle");
+  if (lifecycleState === "speech_activity") {
+    const activity = Number(event?.details?.activity);
+    if (Number.isFinite(activity)) {
+      if (state.mode !== "speaking") {
+        setMode("speaking");
+      }
+      state.targetSpeechActivity = Math.max(0, Math.min(1, activity));
+      state.hasLiveSpeechActivity = true;
+      state.lastSpeechActivityAt = performance.now();
+    }
+    return;
+  }
+
   const mode = lifecycleModes[lifecycleState] || "idle";
   setMode(mode);
   state.targetEnergy = lifecycleEnergy[lifecycleState] ?? 0.55;

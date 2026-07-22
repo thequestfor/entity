@@ -110,7 +110,11 @@ const state = {
   displayPrimary: palettes.idle.primary.clone(),
   displaySecondary: palettes.idle.secondary.clone(),
   displayAccent: palettes.idle.accent.clone(),
-  displayRoom: palettes.idle.room.clone()
+  displayRoom: palettes.idle.room.clone(),
+  speechActivity: 0,
+  targetSpeechActivity: 0,
+  hasLiveSpeechActivity: false,
+  lastSpeechActivityAt: 0
 };
 
 const renderer = new THREE.WebGLRenderer({
@@ -1315,6 +1319,11 @@ function createParticleField() {
 
 function setMode(mode: Mode, message = modeMessages[mode]) {
   if (!hasPalette(mode)) return;
+  if (mode !== "speaking") {
+    state.speechActivity = 0;
+    state.targetSpeechActivity = 0;
+    state.hasLiveSpeechActivity = false;
+  }
   state.mode = mode;
   state.palette = palettes[mode];
   modeLabelEl.textContent = state.palette.label;
@@ -1325,6 +1334,19 @@ function setMode(mode: Mode, message = modeMessages[mode]) {
 
 function applyLifecycleEvent(event: { state?: string; details?: Record<string, unknown> }) {
   const lifecycleState = event.state ?? "idle";
+  if (lifecycleState === "speech_activity") {
+    const activity = Number(event.details?.activity);
+    if (Number.isFinite(activity)) {
+      if (state.mode !== "speaking") {
+        setMode("speaking");
+      }
+      state.targetSpeechActivity = THREE.MathUtils.clamp(activity, 0, 1);
+      state.hasLiveSpeechActivity = true;
+      state.lastSpeechActivityAt = performance.now();
+    }
+    return;
+  }
+
   const mode = lifecycleModes[lifecycleState] ?? "idle";
   const detailMessage = typeof event.details?.message === "string" ? event.details.message : undefined;
   const tool = typeof event.details?.tool === "string" ? event.details.tool : undefined;
@@ -1372,8 +1394,27 @@ function animate() {
   state.displayAccent.lerp(palette.accent, 1 - Math.exp(-delta * 2.8));
   state.displayRoom.lerp(palette.room, 1 - Math.exp(-delta * 1.8));
 
+  if (
+    state.hasLiveSpeechActivity
+    && performance.now() - state.lastSpeechActivityAt > 160
+  ) {
+    state.targetSpeechActivity = 0;
+  }
+  const speechSmoothing = state.targetSpeechActivity > state.speechActivity
+    ? 18
+    : 9;
+  state.speechActivity = THREE.MathUtils.lerp(
+    state.speechActivity,
+    state.targetSpeechActivity,
+    1 - Math.exp(-delta * speechSmoothing)
+  );
+  const previewVoice = (
+    0.32
+    + Math.abs(Math.sin(elapsed * 9.4)) * 0.46
+    + Math.abs(Math.sin(elapsed * 15.2)) * 0.22
+  ) * state.energy;
   const voice = state.mode === "speaking"
-    ? (0.32 + Math.abs(Math.sin(elapsed * 9.4)) * 0.46 + Math.abs(Math.sin(elapsed * 15.2)) * 0.22) * state.energy
+    ? (state.hasLiveSpeechActivity ? state.speechActivity : previewVoice)
     : 0;
   const activity = Math.max(voice, palette.pulse * 0.55 + state.energy * 0.18);
   const offline = state.mode === "offline" ? 0.22 : 1;

@@ -19,7 +19,9 @@ research, traffic-aware departure advice, and optional ntfy messaging.
 
 `agent.lifecycle.Lifecycle` publishes renderer-neutral state events for visual
 clients. Current states include booting, wake detection, listening, transcribing,
-thinking, tool activity, speaking, errors, idle, and shutdown.
+thinking, tool activity, speaking, errors, idle, and shutdown. During speech,
+the audio player also publishes a normalized output envelope so the 2D and 3D
+orbs react to the voice actually reaching the speakers.
 
 The language model selects intent; it does not directly call external services.
 

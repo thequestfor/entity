@@ -135,7 +135,7 @@ class EntityRuntime:
                 CalendarActuator(),
                 DiagnosticsActuator(),
                 NotifyActuator(),
-                SpeechActuator()
+                SpeechActuator(on_activity=self._emit_speech_activity)
             ]
 
         self.observers = observers
@@ -2908,6 +2908,12 @@ class EntityRuntime:
 
     def _emit_lifecycle(self, state, **details):
         return self.lifecycle.emit(state, **details)
+
+    def _emit_speech_activity(self, level):
+        self._emit_lifecycle(
+            "speech_activity",
+            activity=round(float(level), 4)
+        )
 
     def _start_visual_sink(self):
         if not self.visual_sink or not self.visual_sink.enabled:
