@@ -16,13 +16,21 @@ class MemoryStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
+        try:
+            self.path.chmod(0o600)
+        except OSError:
+            pass
+
     def _connect(self):
-        conn = sqlite3.connect(self.path)
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 30000")
         return conn
 
     def _init_db(self):
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
+            conn.execute("PRAGMA synchronous = NORMAL")
             conn.executescript(SCHEMA.read_text())
 
     def add_memory(
@@ -36,6 +44,21 @@ class MemoryStore:
         now = utc_now()
 
         with self._connect() as conn:
+            if kind == "reflection":
+                existing = conn.execute(
+                    """
+                    SELECT id
+                    FROM memories
+                    WHERE kind = ? AND content = ? AND source = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (kind, content, source)
+                ).fetchone()
+
+                if existing:
+                    return existing["id"]
+
             cursor = conn.execute(
                 """
                 INSERT INTO memories (

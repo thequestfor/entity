@@ -1,11 +1,12 @@
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import uuid4
 
 
 def utc_now():
-    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    timestamp = datetime.now(UTC).isoformat(timespec="seconds")
+    return timestamp.replace("+00:00", "Z")
 
 
 @dataclass

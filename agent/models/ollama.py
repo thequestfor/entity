@@ -39,7 +39,7 @@ class OllamaProvider(ModelProvider):
         except (OSError, URLError):
             return False
 
-    def generate(self, prompt, temperature=0):
+    def generate(self, prompt, temperature=0, response_format=None):
         if not self.available():
             raise ModelUnavailable(
                 "Ollama is not configured or reachable."
@@ -47,7 +47,12 @@ class OllamaProvider(ModelProvider):
 
         try:
             with urlopen(
-                self._request(prompt, temperature, stream=False),
+                self._request(
+                    prompt,
+                    temperature,
+                    stream=False,
+                    response_format=response_format
+                ),
                 timeout=30
             ) as response:
                 payload = json.loads(
@@ -86,18 +91,27 @@ class OllamaProvider(ModelProvider):
         except (OSError, URLError, json.JSONDecodeError) as exc:
             raise ModelUnavailable(str(exc)) from exc
 
-    def _request(self, prompt, temperature, stream):
-        body = json.dumps(
-            {
-                "model": self.model,
-                "prompt": prompt,
-                "stream": stream,
-                "think": self.think,
-                "options": {
-                    "temperature": temperature
-                }
+    def _request(
+        self,
+        prompt,
+        temperature,
+        stream,
+        response_format=None
+    ):
+        payload = {
+            "model": self.model,
+            "prompt": prompt,
+            "stream": stream,
+            "think": self.think,
+            "options": {
+                "temperature": temperature
             }
-        ).encode("utf-8")
+        }
+
+        if response_format == "json":
+            payload["format"] = "json"
+
+        body = json.dumps(payload).encode("utf-8")
 
         return Request(
             f"{self.url}/api/generate",

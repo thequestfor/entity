@@ -1,7 +1,10 @@
 import os
 import re
+import threading
 import time
 from datetime import datetime, timedelta
+from queue import Empty
+from zoneinfo import ZoneInfo
 
 from agent.actuators import (
     CalendarActuator,
@@ -13,12 +16,13 @@ from agent.attention import ImportancePolicy
 from agent.awareness import AwarenessLoop
 from agent.behavior import BehaviorFeedbackPolicy
 from agent.briefing import TodayBriefing
-from agent.calendar import CalendarIntentExtractor
+from agent.calendar import CalendarEventDraft, CalendarIntentExtractor
 from agent.confirmations import ConfirmationStore
 from agent.event_bus import EventBus
 from agent.events import Action
 from agent.health import StartupHealthCheck
 from agent.learning import LearningPolicy
+from agent.lifecycle import Lifecycle
 from agent.memory.research import ResearchMemoryIngestor
 from agent.math_tools import ArithmeticHandler
 from agent.observers import (
@@ -36,6 +40,7 @@ from agent.reminders import ReminderIntentExtractor
 from agent.research import ResearchTool
 from agent.routes import RoutePlanner
 from agent.weather import WeatherTool
+from agent.visual.unreal import UnrealRemoteControlSink
 
 
 class EntityRuntime:
@@ -61,10 +66,16 @@ class EntityRuntime:
         planner=None,
         confirmation_store=None,
         reflection=None,
+        lifecycle=None,
+        visual_sink=None,
         observers=None,
         actuators=None,
         policy=None
     ):
+        self.lifecycle = lifecycle or Lifecycle()
+        self.visual_sink = visual_sink or UnrealRemoteControlSink()
+        self._stop_event = threading.Event()
+        self._started = False
         self.brain = brain or self._default_brain()
         self.awareness = awareness or AwarenessLoop(
             on_interrupt=self.publish_event
@@ -112,9 +123,11 @@ class EntityRuntime:
                     confirmation_store=self.confirmation_store,
                     reflection=self.reflection
                 ),
-                CalendarObserver(),
+                CalendarObserver(route_planner=self.route_planner),
                 NtfyObserver(),
-                audio_observer or AudioObserver()
+                audio_observer or AudioObserver(
+                    on_state=self._emit_lifecycle
+                )
             ]
 
         if actuators is None:
@@ -130,25 +143,38 @@ class EntityRuntime:
         self.policy = policy or Policy()
 
     def run(self):
-        self.start()
-
         try:
-            while True:
-                event = self.event_bus.next_event()
+            self.start()
 
-                if event:
-                    self.handle_event(event)
-
-                self.event_bus.task_done()
+            while not self._stop_event.is_set():
+                self.process_next_event(timeout=0.5)
 
         finally:
             self.stop()
 
     def start(self):
+        if self._started:
+            return
+
+        self._started = True
+        self._stop_event.clear()
+        self._start_visual_sink()
+        self._emit_lifecycle("booting")
         self.awareness.start()
 
         for observer in self.observers:
-            observer.start(self.event_bus)
+            try:
+                observer.start(self.event_bus)
+            except Exception as exc:
+                self._emit_lifecycle(
+                    "error",
+                    component=observer.__class__.__name__,
+                    message=str(exc)
+                )
+                print(
+                    f"Observer failed to start: "
+                    f"{observer.__class__.__name__}: {exc}"
+                )
 
         self.execute(
             Action(
@@ -159,12 +185,43 @@ class EntityRuntime:
             )
         )
         self._run_startup_health_check()
+        self._emit_lifecycle("idle")
 
     def stop(self):
+        self._stop_event.set()
+
+        if not self._started:
+            return
+
+        self._emit_lifecycle("stopping")
         self.awareness.stop()
 
         for observer in self.observers:
-            observer.stop()
+            try:
+                observer.stop()
+            except Exception as exc:
+                print(
+                    f"Observer failed to stop: "
+                    f"{observer.__class__.__name__}: {exc}"
+                )
+
+        self._started = False
+        self._emit_lifecycle("stopped")
+        self._stop_visual_sink()
+
+    def process_next_event(self, timeout=None):
+        try:
+            event = self.event_bus.next_event(timeout=timeout)
+        except Empty:
+            return None
+
+        try:
+            return self.handle_event(event)
+        except Exception as exc:
+            self._handle_event_error(event, exc)
+            return None
+        finally:
+            self.event_bus.task_done()
 
     def publish_event(self, event):
         self.event_bus.publish(event)
@@ -180,13 +237,32 @@ class EntityRuntime:
             return self.handle_text_input(event, channel="remote")
 
         if event.type == "reminder":
-            return self.handle_reminder(event)
+            result = self.handle_reminder(event)
+
+            if result:
+                task_id = event.payload.get("task_id")
+
+                if task_id:
+                    self.task_store.complete_task(task_id)
+            else:
+                self._retry_reminder(event)
+
+            return result
 
         if event.type == "calendar_event_upcoming":
             return self.handle_calendar_event_upcoming(event)
 
         if event.type in {"autonomy_check", "autonomous_goal"}:
-            return self.handle_autonomous_goal(event)
+            goal = event.payload.get("goal") or {}
+            self._emit_lifecycle(
+                "autonomous",
+                goal=goal.get("name", event.type)
+            )
+
+            try:
+                return self.handle_autonomous_goal(event)
+            finally:
+                self._emit_lifecycle("idle")
 
         if event.message:
             return self.handle_observed_event(event)
@@ -218,6 +294,7 @@ class EntityRuntime:
         )
 
         self.awareness.record_input(command)
+        self._emit_lifecycle("thinking", channel=channel)
 
         runtime_response = self._handle_runtime_command(
             command,
@@ -229,6 +306,7 @@ class EntityRuntime:
             self._record_response(runtime_response, source=channel)
             self._reply(runtime_response, channel)
             print(runtime_response)
+            self._emit_lifecycle("idle")
             return runtime_response
 
         response_stream = self.brain.respond_stream(
@@ -254,6 +332,7 @@ class EntityRuntime:
         self._record_response(response, source=channel)
 
         print(response)
+        self._emit_lifecycle("idle")
 
         return response
 
@@ -272,7 +351,34 @@ class EntityRuntime:
             message,
             title="Entity reminder",
             priority="high",
-            force_notify=True
+            force_notify=True,
+            require_delivery=True
+        )
+
+    def _handle_event_error(self, event, error):
+        event_type = getattr(event, "type", "unknown")
+        print(f"Event handling failed for {event_type}: {error}")
+        self._emit_lifecycle(
+            "error",
+            component="runtime",
+            event_type=event_type,
+            message=str(error)
+        )
+
+        if event_type == "reminder":
+            self._retry_reminder(event)
+
+    def _retry_reminder(self, event, delay_seconds=60):
+        task_id = event.payload.get("task_id")
+
+        if not task_id:
+            return None
+
+        return self.scheduler_observer.add_reminder(
+            delay_seconds,
+            event.message,
+            priority=event.priority,
+            task_id=task_id
         )
 
     def handle_calendar_event_upcoming(self, event):
@@ -497,12 +603,14 @@ class EntityRuntime:
         text,
         title="Entity alert",
         priority="high",
-        force_notify=False
+        force_notify=False,
+        require_delivery=False
     ):
         if not text:
             return None
 
         delivered = None
+        delivery_succeeded = False
         should_speak = self.presence.should_speak()
         should_notify = (
             force_notify
@@ -519,9 +627,10 @@ class EntityRuntime:
                     }
                 )
             )
+            delivery_succeeded = delivery_succeeded or bool(delivered)
 
         if should_notify:
-            delivered = self.execute(
+            notification = self.execute(
                 Action(
                     type="notify",
                     payload={
@@ -531,6 +640,13 @@ class EntityRuntime:
                     }
                 )
             )
+            delivery_succeeded = delivery_succeeded or bool(notification)
+
+            if notification:
+                delivered = notification
+
+        if require_delivery:
+            return text if delivery_succeeded else None
 
         return delivered or text
 
@@ -553,10 +669,26 @@ class EntityRuntime:
         if confirmation_response:
             return confirmation_response
 
-        planned_response = self._handle_planned_command(
+        unsupported_response = self._handle_unsupported_external_action(command)
+
+        if unsupported_response:
+            return unsupported_response
+
+        fast_response = self._handle_read_only_fast_path(
             command,
             source=source
         )
+
+        if fast_response:
+            return fast_response
+
+        planned_response = None
+
+        if self._should_use_action_planner(command):
+            planned_response = self._handle_planned_command(
+                command,
+                source=source
+            )
 
         if planned_response:
             return planned_response
@@ -574,6 +706,163 @@ class EntityRuntime:
             )
 
         return fallback_response
+
+    def _should_use_action_planner(self, command):
+        normalized = command.lower()
+        action_patterns = (
+            r"\bremind(?:er)?\b",
+            r"\bcalendar\b",
+            r"\bschedule\b",
+            r"\bnotify\b",
+            r"\bnotification\b",
+            r"\bntfy\b",
+            r"\bwake me\b",
+            r"\b(?:alarm|timer)\b",
+            r"\bremember\b",
+            r"\bstore (?:this|that|a|the|my)\b",
+            r"\bset (?:my )?(?:voice|presence|location|status)\b",
+            r"\bchange (?:my )?voice\b",
+            r"\bsend (?:me |a |an |this |that )",
+            r"\bcreate (?:an? )?(?:event|task|reminder)\b",
+            r"\badd .+\b(?:calendar|schedule)\b"
+        )
+        return any(
+            re.search(pattern, normalized)
+            for pattern in action_patterns
+        )
+
+    def _handle_unsupported_external_action(self, command):
+        normalized = command.lower()
+
+        if (
+            re.search(r"\b(delete|remove|cancel)\b", normalized)
+            and "calendar" in normalized
+        ):
+            return (
+                "I can create and read Google Calendar events, but I cannot "
+                "delete or modify them yet. I did not change your calendar."
+            )
+
+        if re.search(r"\b(e-?mail|send an? email)\b", normalized):
+            return (
+                "I do not have an email actuator yet, so I cannot send that "
+                "message."
+            )
+
+        if re.search(
+            r"\b(book|buy|purchase|order|reserve)\b.*\b"
+            r"(flight|hotel|ticket|reservation|item)\b",
+            normalized
+        ):
+            return (
+                "I cannot make purchases or reservations. I can help you "
+                "compare options and plan them."
+            )
+
+        if re.search(r"\b(rm\s+-rf|sudo|shell command)\b", normalized):
+            return "I cannot execute shell commands through the Entity runtime."
+
+        return None
+
+    def _handle_read_only_fast_path(self, command, source="voice"):
+        if self._is_diagnostics_command(command):
+            return self._execute_read_only_fast_path(
+                command,
+                source,
+                "diagnostics",
+                self._run_diagnostics
+            )
+
+        math_response = self.arithmetic_handler.answer(command)
+
+        if math_response:
+            return self._record_read_only_fast_path(
+                command,
+                source,
+                "arithmetic",
+                math_response
+            )
+
+        if self._is_briefing_command(command):
+            return self._execute_read_only_fast_path(
+                command,
+                source,
+                "briefing",
+                self.today_briefing.build
+            )
+
+        weather_location = self._weather_location(command)
+
+        if weather_location is not None:
+            return self._execute_read_only_fast_path(
+                command,
+                source,
+                "weather",
+                lambda: self._run_weather(
+                    location=weather_location,
+                    question=command
+                )
+            )
+
+        return None
+
+    def _execute_read_only_fast_path(
+        self,
+        command,
+        source,
+        tool,
+        callback
+    ):
+        self._emit_lifecycle("tool_started", tool=tool)
+
+        try:
+            response = callback()
+        finally:
+            self._emit_lifecycle("tool_finished", tool=tool)
+
+        if not response:
+            return None
+
+        return self._record_read_only_fast_path(
+            command,
+            source,
+            tool,
+            response
+        )
+
+    def _record_read_only_fast_path(
+        self,
+        command,
+        source,
+        tool,
+        response
+    ):
+        self._record_deterministic_decision(
+            command,
+            source=source,
+            tool=tool,
+            response=response
+        )
+        return response
+
+    def _record_deterministic_decision(
+        self,
+        command,
+        source,
+        tool,
+        response
+    ):
+        return self.task_store.add_planner_decision(
+            input_text=command,
+            channel=source,
+            intent=f"deterministic_{tool}",
+            confidence=1,
+            tools=[{"tool": tool, "args": {}}],
+            reason="Handled by a deterministic read-only fast path.",
+            confirmation_required=False,
+            outcome="executed",
+            response=response
+        )
 
     def _handle_runtime_command_fallback(self, command, source="voice"):
         if self._is_diagnostics_command(command):
@@ -652,6 +941,15 @@ class EntityRuntime:
         if not plan:
             return None
 
+        if plan.steps and all(step.tool == "answer" for step in plan.steps):
+            decision_id = self._record_plan_decision(plan, command, source=source)
+            self.task_store.update_planner_decision(
+                decision_id,
+                outcome="delegated_to_conversation",
+                response=""
+            )
+            return None
+
         responses = []
         needs_confirmation = self._plan_needs_confirmation(plan)
         decision_id = self._record_plan_decision(
@@ -680,20 +978,30 @@ class EntityRuntime:
             return prompt
 
         step_results = []
+        failed_tools = []
         for step in plan.steps:
-            response = self._execute_plan_step(
-                step,
-                command,
-                source=source
-            )
+            if (
+                step.tool == "notify"
+                and self._notify_is_covered_by_reminder(step, plan.steps)
+            ):
+                response = "ntfy delivery scheduled with the reminder."
+            else:
+                response = self._execute_plan_step(
+                    step,
+                    command,
+                    source=source
+                )
+
+            succeeded = self._plan_step_succeeded(response)
             step_results.append(
                 {
                     "tool": step.tool,
-                    "result": response
+                    "result": response,
+                    "succeeded": succeeded
                 }
             )
 
-            if response:
+            if succeeded:
                 responses.append(response)
                 self._notify_significant_plan_step(
                     step,
@@ -701,15 +1009,34 @@ class EntityRuntime:
                     response,
                     source=source
                 )
+            else:
+                failed_tools.append(step.tool)
 
         if responses:
             final_response = " ".join(responses)
         else:
             final_response = plan.response or None
 
+        if failed_tools:
+            failures = ", ".join(
+                tool.replace("_", " ")
+                for tool in failed_tools
+            )
+            failure_message = f"I could not complete: {failures}."
+            final_response = " ".join(
+                part for part in (final_response, failure_message) if part
+            )
+
+        if failed_tools and len(failed_tools) == len(plan.steps):
+            outcome = "failed"
+        elif failed_tools:
+            outcome = "partially_failed"
+        else:
+            outcome = "executed"
+
         self.task_store.update_planner_decision(
             decision_id,
-            outcome="executed",
+            outcome=outcome,
             response=final_response or "",
             metadata={
                 "step_results": step_results
@@ -717,6 +1044,50 @@ class EntityRuntime:
         )
 
         return final_response
+
+    def _notify_is_covered_by_reminder(self, notify_step, steps):
+        notify_due = self._datetime_from_args(
+            notify_step.args or {},
+            "time",
+            "due_at"
+        )
+
+        if notify_due is None:
+            return False
+
+        for step in steps:
+            if step.tool != "create_reminder":
+                continue
+
+            reminder_due = self._datetime_from_args(
+                step.args or {},
+                "time",
+                "due_at"
+            )
+
+            if reminder_due is None:
+                continue
+
+            if abs((notify_due - reminder_due).total_seconds()) <= 60:
+                return True
+
+        return False
+
+    def _plan_step_succeeded(self, result):
+        if not result:
+            return False
+
+        normalized = str(result).lower()
+        failure_phrases = (
+            "failed",
+            "could not",
+            "may not have been created",
+            "setup needed",
+            "not supported",
+            "not understood",
+            "i need "
+        )
+        return not any(phrase in normalized for phrase in failure_phrases)
 
     def _planner_capability_context(self):
         return {
@@ -779,7 +1150,12 @@ class EntityRuntime:
             },
             {
                 "name": "notify",
-                "description": "Send args.text through the notification channel."
+                "description": (
+                    "Send args.text now, or schedule it when args.time is an "
+                    "ISO datetime. A reminder already delivers through ntfy "
+                    "when due, so do not add a duplicate timed notify for the "
+                    "same alert."
+                )
             },
             {
                 "name": "research",
@@ -803,11 +1179,18 @@ class EntityRuntime:
             },
             {
                 "name": "create_calendar_event",
-                "description": "Schedule a Google Calendar event from the user's text."
+                "description": (
+                    "Schedule a Google Calendar event. Prefer args.text and "
+                    "an ISO datetime in args.start_time."
+                )
             },
             {
                 "name": "create_reminder",
-                "description": "Create a reminder from the user's text."
+                "description": (
+                    "Create a reminder with args.text and an ISO datetime in "
+                    "args.time. When due, Entity handles it and also delivers "
+                    "it through ntfy."
+                )
             },
             {
                 "name": "store_memory",
@@ -971,21 +1354,31 @@ class EntityRuntime:
         self.confirmation_store.clear()
         responses = []
         step_results = []
+        failed_tools = []
 
         for step in plan.steps:
-            response = self._execute_plan_step(
-                step,
-                original_text,
-                source=source
-            )
+            if (
+                step.tool == "notify"
+                and self._notify_is_covered_by_reminder(step, plan.steps)
+            ):
+                response = "ntfy delivery scheduled with the reminder."
+            else:
+                response = self._execute_plan_step(
+                    step,
+                    original_text,
+                    source=source
+                )
+
+            succeeded = self._plan_step_succeeded(response)
             step_results.append(
                 {
                     "tool": step.tool,
-                    "result": response
+                    "result": response,
+                    "succeeded": succeeded
                 }
             )
 
-            if response:
+            if succeeded:
                 responses.append(response)
                 self._notify_significant_plan_step(
                     step,
@@ -993,16 +1386,32 @@ class EntityRuntime:
                     response,
                     source=source
                 )
+            else:
+                failed_tools.append(step.tool)
 
         if responses:
             final_response = " ".join(responses)
         else:
             final_response = "Confirmed."
 
+        if failed_tools:
+            failures = ", ".join(
+                tool.replace("_", " ")
+                for tool in failed_tools
+            )
+            final_response += f" I could not complete: {failures}."
+
+        if failed_tools and len(failed_tools) == len(plan.steps):
+            outcome = "confirmed_failed"
+        elif failed_tools:
+            outcome = "confirmed_partially_failed"
+        else:
+            outcome = "confirmed_executed"
+
         if decision_id:
             self.task_store.update_planner_decision(
                 decision_id,
-                outcome="confirmed_executed",
+                outcome=outcome,
                 response=final_response,
                 metadata={
                     "step_results": step_results
@@ -1012,9 +1421,16 @@ class EntityRuntime:
         return final_response
 
     def _handle_decision_audit_command(self, command):
-        normalized = command.lower().strip()
+        normalized = command.lower().strip(" .?!")
+        compliance_question = bool(
+            re.search(
+                r"\b(did you|have you)\b.*\b(comply|complete|do|done|"
+                r"everything|all)\b",
+                normalized
+            )
+        )
 
-        if normalized not in {
+        if not compliance_question and normalized not in {
             "why did you do that",
             "what did you just decide",
             "show last decision",
@@ -1024,12 +1440,56 @@ class EntityRuntime:
         }:
             return None
 
-        decision = self.task_store.last_planner_decision()
+        if compliance_question:
+            decision = next(
+                (
+                    item
+                    for item in self.task_store.recent_planner_decisions(
+                        limit=20
+                    )
+                    if item.get("metadata", {}).get("step_results")
+                ),
+                None
+            )
+        else:
+            decision = self.task_store.last_planner_decision()
 
         if not decision:
             return "No planner decisions have been recorded yet."
 
+        if compliance_question:
+            return self._format_execution_compliance(decision)
+
         return self._format_planner_decision(decision)
+
+    def _format_execution_compliance(self, decision):
+        step_results = decision.get("metadata", {}).get("step_results", [])
+
+        if not step_results:
+            return "I cannot verify that from the recorded execution results."
+
+        completed = []
+        failed = []
+
+        for item in step_results:
+            tool = str(item.get("tool", "unknown")).replace("_", " ")
+            succeeded = item.get("succeeded")
+
+            if succeeded is None:
+                succeeded = self._plan_step_succeeded(item.get("result"))
+
+            (completed if succeeded else failed).append(tool)
+
+        if not failed:
+            return "Yes. Verified completed: " + ", ".join(completed) + "."
+
+        message = "No."
+
+        if completed:
+            message += " Completed: " + ", ".join(completed) + "."
+
+        message += " Failed or unverified: " + ", ".join(failed) + "."
+        return message
 
     def _format_planner_decision(self, decision):
         tools = [
@@ -1159,6 +1619,7 @@ class EntityRuntime:
             return args.get("text") or args.get("question") or ""
 
         self._set_active_work(tool, command, source=source)
+        self._emit_lifecycle("tool_started", tool=tool)
 
         try:
             if tool == "diagnostics":
@@ -1196,6 +1657,12 @@ class EntityRuntime:
 
                 if not text:
                     return "I need text to send as a notification."
+
+                if args.get("time") or args.get("due_at"):
+                    return self._schedule_notification_from_args(
+                        args,
+                        source=source
+                    )
 
                 return self._send_notification(
                     text,
@@ -1236,9 +1703,23 @@ class EntityRuntime:
                 )
 
             if tool == "create_calendar_event":
+                if self._calendar_args_are_structured(args):
+                    return self._create_calendar_event_from_args(
+                        args,
+                        command,
+                        channel=source
+                    )
+
                 return self._handle_calendar_command(command, channel=source)
 
             if tool == "create_reminder":
+                if args.get("time") or args.get("due_at"):
+                    return self._create_reminder_from_args(
+                        args,
+                        command,
+                        source=source
+                    )
+
                 return self._create_reminder_from_command(command, source=source)
 
             if tool == "store_memory":
@@ -1253,6 +1734,99 @@ class EntityRuntime:
             return None
         finally:
             self._finish_active_work()
+            self._emit_lifecycle("tool_finished", tool=tool)
+
+    def _datetime_from_args(self, args, *names):
+        for name in names:
+            value = args.get(name)
+
+            if not value:
+                continue
+
+            try:
+                parsed = datetime.fromisoformat(str(value).strip())
+            except ValueError:
+                continue
+
+            timezone = ZoneInfo(
+                os.getenv("ENTITY_TIMEZONE", "America/New_York")
+            )
+
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone)
+            else:
+                parsed = parsed.astimezone(timezone)
+
+            return parsed
+
+        return None
+
+    def _calendar_args_are_structured(self, args):
+        return bool(
+            args.get("start_time")
+            or args.get("start")
+            or (args.get("date") and args.get("time"))
+        )
+
+    def _create_calendar_event_from_args(
+        self,
+        args,
+        command,
+        channel="voice"
+    ):
+        start = self._datetime_from_args(args, "start_time", "start")
+
+        if start is None and args.get("date") and args.get("time"):
+            start = self._datetime_from_args(
+                {"start": f"{args['date']}T{args['time']}"},
+                "start"
+            )
+
+        if start is None:
+            return "Calendar event was not understood."
+
+        end = self._datetime_from_args(args, "end_time", "end")
+
+        if end is None:
+            duration = int(
+                args.get("duration_minutes")
+                or os.getenv("ENTITY_CALENDAR_DEFAULT_EVENT_MINUTES", "60")
+            )
+            end = start + timedelta(minutes=duration)
+
+        if end <= start:
+            return "Calendar event was not understood: end time is not after start time."
+
+        summary = str(
+            args.get("summary")
+            or args.get("title")
+            or args.get("text")
+            or "Calendar event"
+        ).strip()
+        draft = CalendarEventDraft(
+            summary=summary,
+            start=start,
+            end=end,
+            location=str(args.get("location", "")).strip(),
+            description=str(
+                args.get("description")
+                or f"Created by Entity from: {command}"
+            ).strip(),
+            source_text=command
+        )
+        response = self.execute(
+            Action(
+                type="calendar",
+                payload={"operation": "create_event", "draft": draft}
+            )
+        )
+        self._notify_significant_action(
+            "created a calendar event",
+            command,
+            response,
+            source=channel
+        )
+        return response
 
     def _handle_active_work_command(self, command):
         normalized = command.lower().strip()
@@ -1411,23 +1985,79 @@ class EntityRuntime:
         if not reminder:
             return None
 
+        return self._schedule_reminder(
+            reminder.message,
+            reminder.due_at,
+            reminder.priority,
+            command,
+            source=source
+        )
+
+    def _create_reminder_from_args(
+        self,
+        args,
+        command,
+        source="voice"
+    ):
+        if args.get("recurrence"):
+            return (
+                "I could not schedule the reminder: recurring reminders are "
+                "not supported yet."
+            )
+
+        due = self._datetime_from_args(args, "time", "due_at")
+
+        if due is None or due <= datetime.now(due.tzinfo):
+            return "I could not schedule the reminder: its due time is invalid or past."
+
+        message = str(
+            args.get("message")
+            or args.get("text")
+            or args.get("title")
+            or "Reminder"
+        ).strip()
+
+        try:
+            priority = min(10, max(1, int(args.get("priority", 7))))
+        except (TypeError, ValueError):
+            priority = 7
+
+        return self._schedule_reminder(
+            message,
+            due.timestamp(),
+            priority,
+            command,
+            source=source
+        )
+
+    def _schedule_reminder(
+        self,
+        message,
+        due_at,
+        priority,
+        command,
+        source="voice",
+        kind="reminder"
+    ):
+        message = str(message).strip() or "Reminder"
+
         task_id = self.task_store.add_task(
-            title=reminder.message,
-            message=reminder.message,
-            due_at=reminder.due_at,
-            kind="reminder",
-            priority=reminder.priority,
+            title=message,
+            message=message,
+            due_at=due_at,
+            kind=kind,
+            priority=priority,
             source=source
         )
 
         self.scheduler_observer.add_reminder_at(
-            reminder.due_at,
-            reminder.message,
-            priority=reminder.priority,
+            due_at,
+            message,
+            priority=priority,
             task_id=task_id
         )
 
-        response = f"Reminder set: {reminder.message}."
+        response = f"Reminder set: {self._terminal_punctuation(message)}"
         self._notify_significant_action(
             "set a reminder",
             command,
@@ -1435,6 +2065,36 @@ class EntityRuntime:
             source=source
         )
         return response
+
+    def _schedule_notification_from_args(self, args, source="voice"):
+        due = self._datetime_from_args(args, "time", "due_at")
+
+        if due is None or due <= datetime.now(due.tzinfo):
+            return "I could not schedule the notification: its due time is invalid or past."
+
+        text = str(args.get("text", "")).strip()
+
+        if not text:
+            return "I need text to send as a notification."
+
+        try:
+            priority = min(10, max(1, int(args.get("priority", 8))))
+        except (TypeError, ValueError):
+            priority = 8
+
+        response = self._schedule_reminder(
+            text,
+            due.timestamp(),
+            priority,
+            text,
+            source=source,
+            kind="notification"
+        )
+        return response.replace("Reminder set:", "Notification scheduled:", 1)
+
+    def _terminal_punctuation(self, text):
+        text = str(text).strip()
+        return text if text.endswith((".", "!", "?")) else f"{text}."
 
     def _store_explicit_memory(self, command, args, source="user"):
         content = str(args.get("content", "")).strip()
@@ -1486,6 +2146,12 @@ class EntityRuntime:
         if not message:
             return None
 
+        self._emit_lifecycle(
+            "service_error",
+            component="startup_health",
+            message=message
+        )
+
         self._deliver_alert(
             message,
             title="Entity startup diagnostic",
@@ -1496,19 +2162,22 @@ class EntityRuntime:
         return message
 
     def _handle_briefing_command(self, command):
+        if not self._is_briefing_command(command):
+            return None
+
+        return self.today_briefing.build()
+
+    def _is_briefing_command(self, command):
         normalized = command.lower().strip()
 
-        if not (
+        return (
             "today briefing" in normalized
             or "daily briefing" in normalized
             or "morning briefing" in normalized
             or "brief me" in normalized
             or "what's my day" in normalized
             or "what is my day" in normalized
-        ):
-            return None
-
-        return self.today_briefing.build()
+        )
 
     def _handle_weather_command(self, command):
         location = self._weather_location(command)
@@ -1705,6 +2374,7 @@ class EntityRuntime:
             r"^\s*look up\s+(.+)$",
             r"^\s*search(?: the internet| online| web)? for\s+(.+)$",
             r"^\s*find(?: online)?\s+(.+)$",
+            r"^\s*read about\s+(.+?)\s+online(?:\s+and\s+report back(?:\s+to me)?)?\s*[.!?]*$",
             r"^\s*learn about\s+(.+)$",
             r"^\s*study\s+(.+)$"
         ]
@@ -2060,10 +2730,24 @@ class EntityRuntime:
 
         for actuator in self.actuators:
             if actuator.can_handle(action):
-                result = actuator.execute(action)
-                self._record_action(action, result)
-                self._learn_from_action(action)
-                return result
+                if action.type == "speak":
+                    self._emit_lifecycle("speaking")
+
+                try:
+                    result = actuator.execute(action)
+                    self._record_action(action, result)
+                    self._learn_from_action(action)
+                    return result
+                except Exception as exc:
+                    self._emit_lifecycle(
+                        "error",
+                        component=actuator.__class__.__name__,
+                        message=str(exc)
+                    )
+                    raise
+                finally:
+                    if action.type == "speak":
+                        self._emit_lifecycle("idle")
 
         print(
             "No actuator for action:",
@@ -2071,6 +2755,23 @@ class EntityRuntime:
         )
 
         return None
+
+    def _emit_lifecycle(self, state, **details):
+        return self.lifecycle.emit(state, **details)
+
+    def _start_visual_sink(self):
+        if not self.visual_sink or not self.visual_sink.enabled:
+            return
+
+        self.visual_sink.start()
+        self.lifecycle.subscribe(self.visual_sink.publish)
+
+    def _stop_visual_sink(self):
+        if not self.visual_sink:
+            return
+
+        self.lifecycle.unsubscribe(self.visual_sink.publish)
+        self.visual_sink.close()
 
     def _record_action(self, action, result):
         self.recent_actions.append(

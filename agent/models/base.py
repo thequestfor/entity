@@ -13,7 +13,7 @@ class ModelProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def generate(self, prompt, temperature=0):
+    def generate(self, prompt, temperature=0, response_format=None):
         raise NotImplementedError
 
     def stream(self, prompt, temperature=0):

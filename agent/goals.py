@@ -77,6 +77,17 @@ class AutonomousGoalPolicy:
         goal = self._model_goal(context)
 
         if goal:
+            if (
+                goal.name == "review_failed_tool"
+                and not self._recent_failed_decision(
+                    context["recent_decisions"],
+                    context["recent_goals"]
+                )
+            ):
+                return idle_goal(
+                    "The recent failed decision has already been reviewed."
+                )
+
             return goal
 
         return self._fallback_goal(context)
@@ -185,7 +196,10 @@ class AutonomousGoalPolicy:
                 speak=True
             )
 
-        failed = self._recent_failed_decision(context["recent_decisions"])
+        failed = self._recent_failed_decision(
+            context["recent_decisions"],
+            context["recent_goals"]
+        )
 
         if failed:
             return AutonomousGoal(
@@ -229,7 +243,7 @@ class AutonomousGoalPolicy:
 
         return idle_goal("No useful autonomous goal right now.")
 
-    def _recent_failed_decision(self, decisions):
+    def _recent_failed_decision(self, decisions, recent_goals=None):
         failed_outcomes = {
             "fallback_used",
             "canceled",
@@ -238,6 +252,16 @@ class AutonomousGoalPolicy:
 
         for decision in decisions:
             if decision.get("outcome") in failed_outcomes:
+                decision_time = decision.get("updated_at", "")
+                already_reviewed = any(
+                    goal.get("name") == "review_failed_tool"
+                    and goal.get("created_at", "") >= decision_time
+                    for goal in (recent_goals or [])
+                )
+
+                if already_reviewed:
+                    continue
+
                 return decision
 
         return None

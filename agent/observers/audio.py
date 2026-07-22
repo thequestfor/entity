@@ -6,12 +6,16 @@ from agent.events import Event
 
 
 class AudioObserver:
-    def __init__(self, microphone=None):
+    def __init__(self, microphone=None, on_state=None):
+        self.on_state = on_state
         self.microphone = microphone or self._default_microphone()
         self.running = False
         self.thread = None
 
     def start(self, event_bus=None):
+        if self.running:
+            return
+
         self.event_bus = event_bus
         self.running = True
         self.microphone.start()
@@ -36,14 +40,32 @@ class AudioObserver:
                 time.sleep(0.05)
                 continue
 
-            event = self.wait_for_event()
+            try:
+                if not self.microphone.running:
+                    self._emit_state("recovering", component="microphone")
+                    self.microphone.start()
+
+                event = self.wait_for_event()
+            except Exception as exc:
+                self._emit_state(
+                    "error",
+                    component="audio",
+                    message=str(exc)
+                )
+                time.sleep(2)
+                continue
 
             if event and self.event_bus:
                 self.event_bus.publish(event)
+            elif self.running:
+                self._emit_state("idle")
 
     def wait_for_event(self):
-        self.microphone.wait_for_wake()
+        if not self.microphone.wait_for_wake():
+            return None
 
+        self._emit_state("wake_detected")
+        self._emit_state("listening")
         command = self.microphone.listen()
 
         if not command:
@@ -62,4 +84,8 @@ class AudioObserver:
     def _default_microphone(self):
         from agent.audio.microphone import Microphone
 
-        return Microphone()
+        return Microphone(on_state=self._emit_state)
+
+    def _emit_state(self, state, **details):
+        if self.on_state:
+            self.on_state(state, **details)

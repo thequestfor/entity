@@ -7,7 +7,7 @@ class LocalStubProvider(ModelProvider):
     def available(self):
         return False
 
-    def generate(self, prompt, temperature=0):
+    def generate(self, prompt, temperature=0, response_format=None):
         raise ModelUnavailable(
             "No local model provider is configured."
         )

@@ -29,9 +29,15 @@ class SchedulerObserver:
         self.store = store or self._default_store()
 
     def start(self, event_bus):
-        self.event_bus = event_bus
+        with self.condition:
+            if self.running:
+                return
+
+            self.event_bus = event_bus
+            self.reminders.clear()
+            self.running = True
+
         self._load_pending_tasks()
-        self.running = True
         self.thread = threading.Thread(
             target=self._run,
             daemon=True
@@ -45,6 +51,8 @@ class SchedulerObserver:
 
         if self.thread:
             self.thread.join(timeout=2)
+
+        self.thread = None
 
     def add_reminder(
         self,
@@ -117,9 +125,6 @@ class SchedulerObserver:
                 priority=reminder.priority
             )
         )
-
-        if reminder.task_id:
-            self.store.complete_task(reminder.task_id)
 
     def _load_pending_tasks(self):
         for task in self.store.pending_tasks():

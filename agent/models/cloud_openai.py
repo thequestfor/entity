@@ -24,22 +24,31 @@ class CloudOpenAIProvider(ModelProvider):
             and importlib.util.find_spec("openai") is not None
         )
 
-    def generate(self, prompt, temperature=0):
+    def generate(self, prompt, temperature=0, response_format=None):
         if not self.available():
             raise ModelUnavailable(
                 "Cloud OpenAI provider is disabled or missing a key."
             )
 
         try:
-            response = self._client().chat.completions.create(
-                model=self.model,
-                messages=[
+            request = {
+                "model": self.model,
+                "messages": [
                     {
                         "role": "user",
                         "content": prompt
                     }
                 ],
-                temperature=temperature
+                "temperature": temperature
+            }
+
+            if response_format == "json":
+                request["response_format"] = {
+                    "type": "json_object"
+                }
+
+            response = self._client().chat.completions.create(
+                **request
             )
         except Exception as exc:
             raise ModelUnavailable(
