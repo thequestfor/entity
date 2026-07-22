@@ -69,9 +69,9 @@ Preset without blocking Entity's runtime.
 ```
 
 The 2D interface has no build dependencies. The 3D interface requires Node.js
-and installs its dependencies from `visual_interface/package-lock.json` with
-`npm install`; Entity builds it when 3D mode starts. Set the default and browser
-behavior in `.env`:
+18 or newer. Entity installs the locked dependencies when they change and
+builds the interface when 3D mode starts. Set the default and browser behavior
+in `.env`:
 
 ```dotenv
 ENTITY_VISUAL_MODE=2d

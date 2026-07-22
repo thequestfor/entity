@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import queue
@@ -219,16 +220,11 @@ class WebVisualSink:
             raise RuntimeError("The 3D visual interface source is missing.")
 
         try:
-            if not (source / "node_modules" / ".bin" / "vite").exists():
-                subprocess.run(
-                    ["npm", "ci"],
-                    cwd=source,
-                    check=True
-                )
-            subprocess.run(
-                ["npm", "run", "build"],
-                cwd=source,
-                check=True
+            node = subprocess.run(
+                ["node", "--version"],
+                check=True,
+                capture_output=True,
+                text=True
             )
         except FileNotFoundError as exc:
             raise RuntimeError(
@@ -236,8 +232,78 @@ class WebVisualSink:
             ) from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(
-                "The 3D visual interface failed to build."
+                "Node.js could not be started for the 3D visual interface."
             ) from exc
+
+        version = node.stdout.strip().lstrip("v")
+        try:
+            major_version = int(version.split(".", 1)[0])
+        except ValueError as exc:
+            raise RuntimeError(
+                f"Could not understand the installed Node.js version: {version}"
+            ) from exc
+
+        if major_version < 18:
+            raise RuntimeError(
+                "The 3D visual interface requires Node.js 18 or newer; "
+                f"found {version}."
+            )
+
+        if not self._three_dependencies_current(source):
+            self._run_npm(source, "ci", purpose="install its dependencies")
+            self._write_three_dependency_marker(source)
+
+        self._run_npm(source, "run", "build", purpose="build")
+
+    def _run_npm(self, source, *arguments, purpose):
+        try:
+            result = subprocess.run(
+                ["npm", *arguments],
+                cwd=source,
+                capture_output=True,
+                text=True
+            )
+        except FileNotFoundError as exc:
+            raise RuntimeError(
+                "The 3D visual interface requires Node.js and npm."
+            ) from exc
+
+        if result.returncode == 0:
+            return
+
+        output = "\n".join(
+            part.strip() for part in (result.stdout, result.stderr)
+            if part and part.strip()
+        )
+        detail = f"\n\n{output[-6000:]}" if output else ""
+        raise RuntimeError(
+            f"The 3D visual interface could not {purpose}.{detail}"
+        )
+
+    def _three_dependencies_current(self, source):
+        vite = source / "node_modules" / ".bin" / "vite"
+        marker = source / "node_modules" / ".entity-lock-hash"
+        if not vite.exists() or not marker.is_file():
+            return False
+
+        try:
+            return marker.read_text(encoding="utf-8").strip() == (
+                self._three_lock_hash(source)
+            )
+        except OSError:
+            return False
+
+    def _write_three_dependency_marker(self, source):
+        marker = source / "node_modules" / ".entity-lock-hash"
+        marker.write_text(self._three_lock_hash(source), encoding="utf-8")
+
+    def _three_lock_hash(self, source):
+        lock_file = source / "package-lock.json"
+        if not lock_file.is_file():
+            raise RuntimeError(
+                "The 3D visual interface package-lock.json is missing."
+            )
+        return hashlib.sha256(lock_file.read_bytes()).hexdigest()
 
     def _env_bool(self, name, default=False):
         value = os.getenv(name)
