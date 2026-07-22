@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Entity Visual Presence Mockup</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="stage" aria-label="Entity visual presence mockup">
+      <section class="presence-shell">
+        <div class="glass-plate">
+          <canvas id="entity-canvas" width="1200" height="900"></canvas>
+          <div class="scanline-overlay" aria-hidden="true"></div>
+          <div class="corner-readout top-left">
+            <span class="label">ENTITY</span>
+            <strong id="mode-readout">IDLE</strong>
+          </div>
+          <div class="corner-readout top-right">
+            <span class="label">SIGNAL</span>
+            <strong id="energy-readout">62%</strong>
+          </div>
+          <div class="status-panel">
+            <span id="message-readout">Soft standby</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="controls" aria-label="Mockup controls">
+        <div class="state-buttons" role="group" aria-label="Entity state">
+          <button class="active" data-mode="idle">Idle</button>
+          <button data-mode="listening">Listening</button>
+          <button data-mode="thinking">Thinking</button>
+          <button data-mode="speaking">Speaking</button>
+          <button data-mode="acting">Acting</button>
+          <button data-mode="autonomous_goal">Autonomous</button>
+          <button data-mode="waiting_confirmation">Waiting</button>
+          <button data-mode="service_issue">Service Issue</button>
+          <button data-mode="offline">Offline</button>
+        </div>
+
+        <div class="control-row">
+          <label>
+            Energy
+            <input id="energy" type="range" min="0" max="100" value="62">
+          </label>
+          <label>
+            Bloom
+            <input id="bloom" type="range" min="0" max="100" value="74">
+          </label>
+          <label class="toggle">
+            <input id="scanlines" type="checkbox" checked>
+            <span>CRT scanlines</span>
+          </label>
+        </div>
+
+        <label class="message-control">
+          Message
+          <input id="message" type="text" value="Soft standby">
+        </label>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
