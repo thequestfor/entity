@@ -140,7 +140,7 @@ const pmremGenerator = new THREE.PMREMGenerator(renderer);
 scene.environment = pmremGenerator.fromScene(environment, 0.04).texture;
 
 const camera = new THREE.PerspectiveCamera(43, window.innerWidth / window.innerHeight, 0.1, 120);
-camera.position.set(0.58, 1.55, framedCameraDistance(camera.aspect));
+camera.position.set(0.58, 1.55, 8.45);
 camera.lookAt(0, 1.05, -0.25);
 
 const composer = new EffectComposer(renderer);
@@ -285,7 +285,7 @@ const haloMaterial = new THREE.MeshBasicMaterial({
 const orb = new THREE.Mesh(new THREE.SphereGeometry(1.45, 96, 64), orbMaterial);
 orb.position.set(0, 1.7, 0);
 orb.castShadow = true;
-orb.receiveShadow = true;
+orb.receiveShadow = false;
 entity.add(orb);
 
 const core = new THREE.Mesh(
@@ -456,11 +456,6 @@ function makePalette(primary: string, secondary: string, accent: string, roomCol
 
 function hasPalette(mode: string | null): mode is Mode {
   return mode !== null && Object.prototype.hasOwnProperty.call(palettes, mode);
-}
-
-function framedCameraDistance(aspect: number) {
-  const narrowness = THREE.MathUtils.clamp(1.35 - aspect, 0, 0.8);
-  return 8.45 + narrowness * 2.55;
 }
 
 function createPanelTexture(base: string, line: string, width: number, height: number, divisions: number, lineAlpha: number) {
@@ -1158,7 +1153,7 @@ function createFloatingPanels() {
   for (let i = 0; i < 7; i += 1) {
     const panel = new THREE.Mesh(new THREE.PlaneGeometry(0.56 + (i % 2) * 0.24, 0.9), panelMaterial.clone());
     const side = i % 2 === 0 ? -1 : 1;
-    panel.position.set(side * (1.55 + i * 0.16), 1.5 + (i % 3) * 0.46, -1.7 - i * 0.3);
+    panel.position.set(side * (2.25 + i * 0.13), 1.5 + (i % 3) * 0.46, -1.7 - i * 0.3);
     panel.rotation.y = side * -0.38;
     panel.rotation.z = side * 0.06;
     room.add(panel);
@@ -1462,11 +1457,21 @@ function animate() {
   outerAuraMaterial.color.copy(state.displaySecondary);
   outerAuraMaterial.opacity = (0.05 + activity * 0.11) * offline;
 
-  orb.scale.setScalar((1 + Math.sin(elapsed * 1.08) * 0.012 + activity * 0.025) * offline);
+  const orbScale = (
+    1
+    + Math.sin(elapsed * 1.08) * 0.012
+    + activity * 0.025
+  ) * offline;
+  orb.scale.set(orbScale * 1.13, orbScale, orbScale);
   orb.scale.x += Math.sin(elapsed * 3.2) * voice * 0.018;
   orb.scale.y += Math.cos(elapsed * 2.8) * voice * 0.03;
   core.scale.setScalar(0.82 + activity * 0.52 + Math.sin(elapsed * 6.4) * voice * 0.12);
-  colorShell.scale.setScalar(1.002 + activity * 0.012 + Math.sin(elapsed * 2.4) * voice * 0.006);
+  const colorShellClearance = (
+    1.45 / 1.462
+  ) * (
+    1.018 + Math.sin(elapsed * 2.4) * voice * 0.003
+  );
+  colorShell.scale.copy(orb.scale).multiplyScalar(colorShellClearance);
   colorShell.rotation.y += delta * (0.2 + activity * 0.75);
   lowerColorWell.scale.set(1.1 + activity * 0.12, 0.46 + activity * 0.08, 0.72 + activity * 0.08);
   outerModeAura.scale.setScalar(1.0 + activity * 0.1 + Math.sin(elapsed * 1.8) * voice * 0.04);
@@ -1599,7 +1604,6 @@ if (previewParams.get("standalone") !== "1") {
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
-  camera.position.z = framedCameraDistance(camera.aspect);
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
   composer.setSize(window.innerWidth, window.innerHeight);
