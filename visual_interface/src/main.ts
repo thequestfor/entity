@@ -122,13 +122,13 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 0.82;
+renderer.toneMappingExposure = 0.62;
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color("#c5d5d8");
-scene.fog = new THREE.FogExp2("#dce8ea", 0.0042);
+scene.background = new THREE.Color("#829397");
+scene.fog = new THREE.FogExp2("#93a4a7", 0.0042);
 
 const environment = new RoomEnvironment();
 const pmremGenerator = new THREE.PMREMGenerator(renderer);
@@ -173,7 +173,7 @@ const orbMaterial = new THREE.MeshPhysicalMaterial({
   clearcoatRoughness: 0.025,
   attenuationColor: "#9eefff",
   attenuationDistance: 2.2,
-  envMapIntensity: 3.2
+  envMapIntensity: 1.8
 });
 
 const stemMaterial = new THREE.MeshPhysicalMaterial({
@@ -187,7 +187,7 @@ const stemMaterial = new THREE.MeshPhysicalMaterial({
   opacity: 0.38,
   clearcoat: 0.9,
   clearcoatRoughness: 0.1,
-  envMapIntensity: 2.4
+  envMapIntensity: 1.5
 });
 
 const panelMaterial = new THREE.MeshPhysicalMaterial({
@@ -221,7 +221,7 @@ const darkGlassMaterial = new THREE.MeshPhysicalMaterial({
   clearcoat: 0.85,
   clearcoatRoughness: 0.14,
   map: wallTexture,
-  envMapIntensity: 2.2
+  envMapIntensity: 1.35
 });
 
 const chromeMaterial = new THREE.MeshStandardMaterial({
@@ -335,7 +335,7 @@ const colorShell = new THREE.Mesh(
   new THREE.MeshBasicMaterial({
     color: "#63f6ff",
     transparent: true,
-    opacity: 0.44,
+    opacity: 0.24,
     blending: THREE.AdditiveBlending,
     depthTest: false,
     depthWrite: false
@@ -350,7 +350,7 @@ const lowerColorWell = new THREE.Mesh(
   new THREE.MeshBasicMaterial({
     color: "#63f6ff",
     transparent: true,
-    opacity: 0.5,
+    opacity: 0.28,
     blending: THREE.AdditiveBlending,
     depthTest: false,
     depthWrite: false
@@ -366,7 +366,7 @@ const outerModeAura = new THREE.Mesh(
   new THREE.MeshBasicMaterial({
     color: "#63f6ff",
     transparent: true,
-    opacity: 0.22,
+    opacity: 0.12,
     blending: THREE.AdditiveBlending,
     depthTest: false,
     depthWrite: false,
@@ -462,10 +462,10 @@ function createPanelTexture(base: string, line: string, width: number, height: n
 }
 
 function createLighting() {
-  const ambient = new THREE.HemisphereLight("#ffffff", "#8a999c", 0.82);
+  const ambient = new THREE.HemisphereLight("#e7f0f0", "#526267", 0.48);
   scene.add(ambient);
 
-  const key = new THREE.SpotLight("#ffffff", 9.4, 18, Math.PI * 0.24, 0.62, 1.08);
+  const key = new THREE.SpotLight("#eef7f7", 5.2, 18, Math.PI * 0.24, 0.62, 1.08);
   key.position.set(-3.0, 5.4, 4.6);
   key.target.position.set(0, 1.1, -0.4);
   key.castShadow = true;
@@ -475,19 +475,19 @@ function createLighting() {
   scene.add(key);
   scene.add(key.target);
 
-  const rim = new THREE.SpotLight("#dffbff", 7.4, 13, Math.PI * 0.24, 0.65, 1.28);
+  const rim = new THREE.SpotLight("#dffbff", 3.8, 13, Math.PI * 0.24, 0.65, 1.28);
   rim.position.set(4.2, 3.6, -2.4);
   rim.target.position.set(0, 1.6, 0);
   rim.castShadow = true;
   scene.add(rim);
   scene.add(rim.target);
 
-  const coreLight = new THREE.PointLight("#aefcff", 4.2, 6.4, 1.5);
+  const coreLight = new THREE.PointLight("#aefcff", 2.2, 6.4, 1.5);
   coreLight.position.copy(core.position);
   coreLight.castShadow = true;
   scene.add(coreLight);
 
-  const roomPulse = new THREE.PointLight("#8ff8ff", 1.6, 12, 1.6);
+  const roomPulse = new THREE.PointLight("#8ff8ff", 0.7, 12, 1.6);
   roomPulse.position.set(0, 1.25, 2.2);
   scene.add(roomPulse);
 
@@ -495,7 +495,7 @@ function createLighting() {
   modeGlow.position.copy(orb.position);
   entity.add(modeGlow);
 
-  const consoleLight = new THREE.RectAreaLight("#f5ffff", 3.8, 5.8, 0.55);
+  const consoleLight = new THREE.RectAreaLight("#e9f3f3", 1.8, 5.8, 0.55);
   consoleLight.position.set(0, 0.48, 2.15);
   consoleLight.rotation.x = -Math.PI * 0.48;
   scene.add(consoleLight);
@@ -1324,8 +1324,9 @@ function animate() {
   const activity = Math.max(voice, palette.pulse * 0.55 + state.energy * 0.18);
   const offline = state.mode === "offline" ? 0.22 : 1;
 
-  scene.background = new THREE.Color("#edf5f5");
-  scene.fog = new THREE.FogExp2("#eef6f6", 0.0038 + (1 - offline) * 0.01);
+  (scene.background as THREE.Color).copy(state.displayRoom).multiplyScalar(0.58);
+  (scene.fog as THREE.FogExp2).color.copy(state.displayRoom).multiplyScalar(0.66);
+  (scene.fog as THREE.FogExp2).density = 0.0038 + (1 - offline) * 0.01;
 
   orbMaterial.color.copy(state.displaySecondary).lerp(state.displayPrimary, 0.14);
   orbMaterial.emissive.copy(state.displaySecondary);
@@ -1339,7 +1340,7 @@ function animate() {
 
   const coreMaterial = core.material as THREE.MeshBasicMaterial;
   coreMaterial.color.copy(state.displayAccent);
-  coreMaterial.opacity = (0.42 + activity * 0.48) * offline;
+  coreMaterial.opacity = (0.24 + activity * 0.3) * offline;
 
   const shellMaterial = innerShell.material as THREE.MeshBasicMaterial;
   shellMaterial.color.copy(state.displaySecondary);
@@ -1347,19 +1348,19 @@ function animate() {
 
   const halo = bodyHalo.material as THREE.MeshBasicMaterial;
   halo.color.copy(state.displaySecondary);
-  halo.opacity = (0.14 + activity * 0.28) * offline;
+  halo.opacity = (0.07 + activity * 0.13) * offline;
 
   const colorShellMaterial = colorShell.material as THREE.MeshBasicMaterial;
   colorShellMaterial.color.copy(state.displaySecondary);
-  colorShellMaterial.opacity = (0.3 + activity * 0.48) * offline;
+  colorShellMaterial.opacity = (0.12 + activity * 0.22) * offline;
 
   const lowerColorMaterial = lowerColorWell.material as THREE.MeshBasicMaterial;
   lowerColorMaterial.color.copy(state.displayAccent).lerp(state.displaySecondary, 0.5);
-  lowerColorMaterial.opacity = (0.32 + activity * 0.52) * offline;
+  lowerColorMaterial.opacity = (0.14 + activity * 0.25) * offline;
 
   const outerAuraMaterial = outerModeAura.material as THREE.MeshBasicMaterial;
   outerAuraMaterial.color.copy(state.displaySecondary);
-  outerAuraMaterial.opacity = (0.12 + activity * 0.28) * offline;
+  outerAuraMaterial.opacity = (0.05 + activity * 0.11) * offline;
 
   orb.scale.setScalar((1 + Math.sin(elapsed * 1.08) * 0.012 + activity * 0.025) * offline);
   orb.scale.x += Math.sin(elapsed * 3.2) * voice * 0.018;
@@ -1465,13 +1466,13 @@ function animate() {
   lights.coreLight.color.copy(state.displayAccent);
   lights.roomPulse.color.set("#f7ffff");
   lights.modeGlow.color.copy(state.displaySecondary);
-  lights.rim.intensity = (2.4 + activity * 2.6) * offline;
-  lights.coreLight.intensity = (3.4 + activity * 7.2) * offline;
-  lights.roomPulse.intensity = (0.65 + activity * 0.8) * offline;
-  lights.modeGlow.intensity = (1.8 + activity * 5.4) * offline;
+  lights.rim.intensity = (1.3 + activity * 1.4) * offline;
+  lights.coreLight.intensity = (1.8 + activity * 3.4) * offline;
+  lights.roomPulse.intensity = (0.25 + activity * 0.35) * offline;
+  lights.modeGlow.intensity = (0.8 + activity * 2.3) * offline;
 
-  bloomPass.strength = (0.12 + activity * 0.32) * offline;
-  bloomPass.radius = 0.28 + activity * 0.12;
+  bloomPass.strength = (0.055 + activity * 0.17) * offline;
+  bloomPass.radius = 0.2 + activity * 0.1;
 
   camera.position.x = Math.sin(elapsed * 0.12) * 0.16 + voice * Math.sin(elapsed * 1.4) * 0.045;
   camera.position.y = 1.55 + Math.sin(elapsed * 0.17) * 0.035;
