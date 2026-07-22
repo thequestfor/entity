@@ -30,7 +30,7 @@ const palettes: Record<Mode, Palette> = {
   idle: makePalette("#eaffff", "#16b8c4", "#a9fff3", "#c8d8da", "IDLE", 0.16),
   listening: makePalette("#eef8ff", "#297dff", "#72d9ff", "#cbd7df", "LISTENING", 0.34),
   thinking: makePalette("#fbf4ff", "#9d42e8", "#d3a1ff", "#d2cedd", "THINKING", 0.46),
-  speaking: makePalette("#effff4", "#24d66f", "#9affbd", "#cbdad2", "SPEAKING", 0.76),
+  speaking: makePalette("#e4ffed", "#0ca854", "#72e99d", "#c6d8ce", "SPEAKING", 0.76),
   acting: makePalette("#fff7ed", "#ff7b25", "#ffc16d", "#ddd2c8", "ACTING", 0.4),
   waiting_confirmation: makePalette("#fff8ec", "#ff9e2c", "#ffe0a1", "#ded5c9", "WAITING", 0.22),
   autonomous_goal: makePalette("#fffce8", "#e9b51f", "#fff088", "#ddd9c7", "AUTONOMOUS", 0.28),
@@ -100,6 +100,7 @@ const energyInputEl = energyInput;
 const runtimeLinkEl = runtimeLink;
 const runtimeLabelEl = runtimeLabel;
 const messageLabelEl = messageLabel;
+const previewParams = new URLSearchParams(window.location.search);
 
 const state = {
   mode: "idle" as Mode,
@@ -151,9 +152,9 @@ const bubbles = new THREE.Group();
 scene.add(room, entity, particles, bubbles);
 
 const clock = new THREE.Clock();
-const tmpColor = new THREE.Color();
 const tmpVector = new THREE.Vector3();
 const livingGreen = new THREE.Color("#91ffd0");
+const softRoomWhite = new THREE.Color("#d9e9e7");
 const floorTexture = createPanelTexture("#dde8e8", "#ffffff", 1024, 1024, 12, 0.18);
 const wallTexture = createPanelTexture("#c9dde3", "#eaffff", 1024, 1024, 8, 0.11);
 const consoleTexture = createPanelTexture("#e8f0f0", "#ffffff", 1024, 512, 8, 0.16);
@@ -161,19 +162,19 @@ const consoleTexture = createPanelTexture("#e8f0f0", "#ffffff", 1024, 512, 8, 0.
 const orbMaterial = new THREE.MeshPhysicalMaterial({
   color: "#dffbff",
   emissive: "#63f6ff",
-  emissiveIntensity: 0.18,
-  roughness: 0.035,
-  metalness: 0,
-  transmission: 0.52,
-  thickness: 2.8,
+  emissiveIntensity: 0.06,
+  roughness: 0.2,
+  metalness: 0.04,
+  transmission: 0.1,
+  thickness: 1.5,
   ior: 1.42,
-  transparent: true,
-  opacity: 0.64,
-  clearcoat: 1,
-  clearcoatRoughness: 0.025,
+  transparent: false,
+  opacity: 1,
+  clearcoat: 0.82,
+  clearcoatRoughness: 0.1,
   attenuationColor: "#9eefff",
-  attenuationDistance: 0.95,
-  envMapIntensity: 1.4
+  attenuationDistance: 0.7,
+  envMapIntensity: 1.05
 });
 
 const stemMaterial = new THREE.MeshPhysicalMaterial({
@@ -331,14 +332,47 @@ bodyHalo.renderOrder = 8;
 entity.add(bodyHalo);
 
 const colorShell = new THREE.Mesh(
-  new THREE.SphereGeometry(1.3, 64, 32),
-  new THREE.MeshBasicMaterial({
-    color: "#63f6ff",
+  new THREE.SphereGeometry(1.462, 96, 64),
+  new THREE.ShaderMaterial({
+    uniforms: {
+      tintColor: { value: new THREE.Color("#63f6ff") },
+      baseAlpha: { value: 0.62 },
+      visibility: { value: 1 }
+    },
+    vertexShader: `
+      varying vec3 vViewNormal;
+      varying vec3 vViewPosition;
+      varying float vLocalY;
+
+      void main() {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vViewPosition = viewPosition.xyz;
+        vViewNormal = normalize(normalMatrix * normal);
+        vLocalY = position.y / 1.462;
+        gl_Position = projectionMatrix * viewPosition;
+      }
+    `,
+    fragmentShader: `
+      uniform vec3 tintColor;
+      uniform float baseAlpha;
+      uniform float visibility;
+      varying vec3 vViewNormal;
+      varying vec3 vViewPosition;
+      varying float vLocalY;
+
+      void main() {
+        vec3 viewDirection = normalize(-vViewPosition);
+        float fresnel = pow(1.0 - max(dot(vViewNormal, viewDirection), 0.0), 2.2);
+        float alpha = (baseAlpha + fresnel * 0.26) * visibility;
+        float verticalShade = mix(0.64, 0.98, clamp(vLocalY * 0.5 + 0.5, 0.0, 1.0));
+        gl_FragColor = vec4(tintColor * verticalShade, alpha);
+      }
+    `,
     transparent: true,
-    opacity: 0.3,
     blending: THREE.NormalBlending,
     depthTest: true,
-    depthWrite: false
+    depthWrite: false,
+    toneMapped: false
   })
 );
 colorShell.position.copy(orb.position);
@@ -390,7 +424,19 @@ createBubbleField();
 const lights = createLighting();
 createControlRoom();
 
-setMode("idle");
+const requestedMode = previewParams.get("mode") as Mode | null;
+const initialMode = hasPalette(requestedMode)
+  ? requestedMode
+  : "idle";
+const requestedEnergyParam = previewParams.get("energy");
+const requestedEnergy = Number(requestedEnergyParam);
+if (requestedEnergyParam !== null && Number.isFinite(requestedEnergy)) {
+  const previewEnergy = THREE.MathUtils.clamp(requestedEnergy, 0, 100) / 100;
+  state.energy = previewEnergy;
+  state.targetEnergy = previewEnergy;
+  energyInputEl.value = String(Math.round(previewEnergy * 100));
+}
+setMode(initialMode);
 animate();
 
 function makePalette(primary: string, secondary: string, accent: string, roomColor: string, label: string, pulse: number): Palette {
@@ -402,6 +448,10 @@ function makePalette(primary: string, secondary: string, accent: string, roomCol
     label,
     pulse
   };
+}
+
+function hasPalette(mode: string | null): mode is Mode {
+  return mode !== null && Object.prototype.hasOwnProperty.call(palettes, mode);
 }
 
 function createPanelTexture(base: string, line: string, width: number, height: number, divisions: number, lineAlpha: number) {
@@ -495,12 +545,16 @@ function createLighting() {
   modeGlow.position.copy(orb.position);
   entity.add(modeGlow);
 
+  const spillLight = new THREE.PointLight("#63f6ff", 0, 7.5, 1.8);
+  spillLight.position.set(0, 1.45, 1.65);
+  scene.add(spillLight);
+
   const consoleLight = new THREE.RectAreaLight("#e9f3f3", 1.8, 5.8, 0.55);
   consoleLight.position.set(0, 0.48, 2.15);
   consoleLight.rotation.x = -Math.PI * 0.48;
   scene.add(consoleLight);
 
-  return { ambient, key, rim, coreLight, roomPulse, modeGlow };
+  return { ambient, key, rim, coreLight, roomPulse, modeGlow, spillLight };
 }
 
 function createControlRoom() {
@@ -1260,7 +1314,7 @@ function createParticleField() {
 }
 
 function setMode(mode: Mode, message = modeMessages[mode]) {
-  if (!(mode in palettes)) return;
+  if (!hasPalette(mode)) return;
   state.mode = mode;
   state.palette = palettes[mode];
   modeLabelEl.textContent = state.palette.label;
@@ -1308,8 +1362,8 @@ function connectRuntime() {
 (window as unknown as { EntityVisual: object }).EntityVisual = { setMode, applyLifecycleEvent };
 
 function animate() {
-  const elapsed = clock.getElapsedTime();
   const delta = clock.getDelta();
+  const elapsed = clock.elapsedTime;
   state.energy = THREE.MathUtils.lerp(state.energy, state.targetEnergy, 1 - Math.exp(-delta * 3.2));
 
   const palette = state.palette;
@@ -1328,12 +1382,11 @@ function animate() {
   (scene.fog as THREE.FogExp2).color.copy(state.displayRoom).multiplyScalar(0.66);
   (scene.fog as THREE.FogExp2).density = 0.0038 + (1 - offline) * 0.01;
 
-  orbMaterial.color.copy(state.displaySecondary).lerp(state.displayPrimary, 0.04);
+  orbMaterial.color.copy(state.displaySecondary).multiplyScalar(0.72);
   orbMaterial.emissive.copy(state.displaySecondary);
-  orbMaterial.emissiveIntensity = (0.06 + activity * 0.24) * offline;
+  orbMaterial.emissiveIntensity = (0.035 + activity * 0.1) * offline;
   orbMaterial.attenuationColor.copy(state.displaySecondary);
-  orbMaterial.opacity = 0.58 + activity * 0.1;
-  orbMaterial.roughness = 0.055 - Math.min(activity * 0.02, 0.03);
+  orbMaterial.roughness = 0.2 - Math.min(activity * 0.045, 0.06);
 
   stemMaterial.color.copy(state.displaySecondary).lerp(state.displayPrimary, 0.28);
   stemMaterial.opacity = 0.34 + activity * 0.18;
@@ -1350,9 +1403,10 @@ function animate() {
   halo.color.copy(state.displaySecondary);
   halo.opacity = (0.07 + activity * 0.13) * offline;
 
-  const colorShellMaterial = colorShell.material as THREE.MeshBasicMaterial;
-  colorShellMaterial.color.copy(state.displaySecondary);
-  colorShellMaterial.opacity = (0.24 + activity * 0.16) * offline;
+  const colorShellMaterial = colorShell.material as THREE.ShaderMaterial;
+  (colorShellMaterial.uniforms.tintColor.value as THREE.Color).copy(state.displaySecondary);
+  colorShellMaterial.uniforms.baseAlpha.value = 0.54 + activity * 0.12;
+  colorShellMaterial.uniforms.visibility.value = offline;
 
   const lowerColorMaterial = lowerColorWell.material as THREE.MeshBasicMaterial;
   lowerColorMaterial.color.copy(state.displayAccent).lerp(state.displaySecondary, 0.5);
@@ -1366,7 +1420,7 @@ function animate() {
   orb.scale.x += Math.sin(elapsed * 3.2) * voice * 0.018;
   orb.scale.y += Math.cos(elapsed * 2.8) * voice * 0.03;
   core.scale.setScalar(0.82 + activity * 0.52 + Math.sin(elapsed * 6.4) * voice * 0.12);
-  colorShell.scale.setScalar(0.86 + activity * 0.16 + Math.sin(elapsed * 2.4) * voice * 0.04);
+  colorShell.scale.setScalar(1.002 + activity * 0.012 + Math.sin(elapsed * 2.4) * voice * 0.006);
   colorShell.rotation.y += delta * (0.2 + activity * 0.75);
   lowerColorWell.scale.set(1.1 + activity * 0.12, 0.46 + activity * 0.08, 0.72 + activity * 0.08);
   outerModeAura.scale.setScalar(1.0 + activity * 0.1 + Math.sin(elapsed * 1.8) * voice * 0.04);
@@ -1464,12 +1518,14 @@ function animate() {
 
   lights.rim.color.copy(state.displaySecondary);
   lights.coreLight.color.copy(state.displayAccent);
-  lights.roomPulse.color.set("#f7ffff");
+  lights.roomPulse.color.copy(state.displaySecondary).lerp(softRoomWhite, 0.56);
   lights.modeGlow.color.copy(state.displaySecondary);
+  lights.spillLight.color.copy(state.displaySecondary);
   lights.rim.intensity = (1.3 + activity * 1.4) * offline;
   lights.coreLight.intensity = (1.8 + activity * 3.4) * offline;
   lights.roomPulse.intensity = (0.25 + activity * 0.35) * offline;
   lights.modeGlow.intensity = (0.8 + activity * 2.3) * offline;
+  lights.spillLight.intensity = (0.35 + activity * 1.45) * offline;
 
   bloomPass.strength = (0.055 + activity * 0.17) * offline;
   bloomPass.radius = 0.2 + activity * 0.1;
@@ -1491,7 +1547,9 @@ energyInputEl.addEventListener("input", () => {
   state.targetEnergy = Number(energyInputEl.value) / 100;
 });
 
-connectRuntime();
+if (previewParams.get("standalone") !== "1") {
+  connectRuntime();
+}
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
