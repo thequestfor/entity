@@ -14,6 +14,13 @@ def stream_text(token):
         queue.say(sentence)
 
 
+def stream_phrase(phrase):
+    phrase = str(phrase or "").strip()
+
+    if phrase:
+        queue.say(phrase)
+
+
 def flush():
 
     for sentence in buffer.flush():

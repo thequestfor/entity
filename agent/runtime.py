@@ -322,7 +322,8 @@ class EntityRuntime:
             action = Action(
                 type="speak",
                 payload={
-                    "stream": response_stream
+                    "stream": response_stream,
+                    "phrased_stream": True
                 }
             )
 

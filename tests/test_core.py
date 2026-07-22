@@ -14,9 +14,84 @@ from agent.models.base import ModelUnavailable
 from agent.planner import AgentPlan, AgentPlanner, PlanStep
 from agent.goals import AutonomousGoalPolicy
 from agent.weather import WeatherReport
+from agent.speech.buffer import SentenceBuffer
 
 
 class CoreBehaviorTests(unittest.TestCase):
+    def test_sentence_buffer_releases_long_natural_phrase(self):
+        buffer = SentenceBuffer(soft_limit=40, hard_limit=70)
+
+        phrases = buffer.add(
+            "This is a deliberately long opening phrase, followed by more text"
+        )
+
+        self.assertEqual(
+            ["This is a deliberately long opening phrase,"],
+            phrases
+        )
+        self.assertEqual(["followed by more text"], buffer.flush())
+
+    def test_brain_releases_first_sentence_before_model_finishes(self):
+        class Memory:
+            remembered = None
+
+            def context_for(self, command):
+                return {}
+
+            def remember(self, category, item):
+                self.remembered = item
+
+        progress = []
+
+        def live_stream(*args, **kwargs):
+            progress.append("first")
+            yield "The first sentence is ready."
+            progress.append("second")
+            yield " The second sentence follows."
+
+        memory = Memory()
+        response = Brain(
+            memory=memory,
+            stream_generator=live_stream
+        ).respond_stream("Hello", state={})
+
+        self.assertEqual("The first sentence is ready.", next(response))
+        self.assertEqual(["first"], progress)
+        self.assertEqual(" The second sentence follows.", next(response))
+
+        with self.assertRaises(StopIteration):
+            next(response)
+
+        self.assertEqual(["first", "second"], progress)
+        self.assertEqual(
+            "The first sentence is ready. The second sentence follows.",
+            memory.remembered["entity"]
+        )
+
+    def test_brain_holds_contaminated_opening_until_rewritten(self):
+        class Memory:
+            remembered = None
+
+            def context_for(self, command):
+                return {}
+
+            def remember(self, category, item):
+                self.remembered = item
+
+        memory = Memory()
+        brain = Brain(
+            memory=memory,
+            generator=lambda *args, **kwargs: "The verified answer is concise.",
+            stream_generator=lambda *args, **kwargs: iter([
+                "AFFIRMATIVE, BEN. SYSTEM OPERATIONAL."
+            ])
+        )
+
+        response = "".join(brain.respond_stream("Question", state={}))
+
+        self.assertEqual("The verified answer is concise.", response)
+        self.assertEqual(response, memory.remembered["entity"])
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.store = MemoryStore(Path(self.temp_dir.name) / "memory.db")
@@ -111,6 +186,17 @@ class CoreBehaviorTests(unittest.TestCase):
         )
 
         self.assertEqual("answer", payload["intent"])
+
+    def test_router_keeps_simple_why_questions_on_fast_path(self):
+        router = ModelRouter(providers=[])
+
+        self.assertFalse(router.should_escalate("Why do rainbows form?"))
+        self.assertFalse(router.should_escalate("What do you think?"))
+        self.assertTrue(
+            router.should_escalate(
+                "Think carefully through this scheduling conflict."
+            )
+        )
 
     def test_router_prefers_cloud_while_unreal_is_reachable(self):
         class Provider:

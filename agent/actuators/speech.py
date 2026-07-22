@@ -12,18 +12,29 @@ class SpeechActuator:
 
         text = action.payload.get("text", "")
         stream = action.payload.get("stream")
+        phrased_stream = bool(action.payload.get("phrased_stream"))
 
         with speaking():
             if stream is not None:
-                full_response = ""
+                response_parts = []
 
-                for token in stream:
-                    full_response += token
-                    speech.stream_text(token)
+                try:
+                    for token in stream:
+                        response_parts.append(str(token))
+                        if phrased_stream:
+                            speech.stream_phrase(token)
+                        else:
+                            speech.stream_text(token)
+                finally:
+                    if not phrased_stream:
+                        speech.flush()
+                    speech.wait()
 
-                speech.flush()
-                speech.wait()
-
+                full_response = (
+                    " ".join(part.strip() for part in response_parts).strip()
+                    if phrased_stream
+                    else "".join(response_parts)
+                )
                 return full_response
 
             if text:

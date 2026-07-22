@@ -12,6 +12,8 @@ research, traffic-aware departure advice, and optional ntfy messaging.
 3. Deterministic Python handlers execute allowed actions and request confirmation
    for uncertain or sensitive work.
 4. Actuators speak, notify, inspect diagnostics, or write calendar events.
+   Conversational model output streams into phrase-buffered TTS, so speech can
+   begin while the remainder of the answer is still being generated.
 5. Conversations, decisions, tasks, goals, and selected memories persist in
    `agent/entity_memory.db`.
 

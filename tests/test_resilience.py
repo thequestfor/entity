@@ -1,9 +1,11 @@
 import os
 import io
 import json
+import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import urllib.error
 from contextlib import redirect_stdout
@@ -26,13 +28,42 @@ from agent.observers.calendar import CalendarObserver
 from agent.observers.scheduler import SchedulerObserver
 from agent.planner import AgentPlan, PlanStep
 from agent.research import DuckDuckGoParser
-from agent.events import Event
+from agent.events import Action, Event
+from agent.actuators.speech import SpeechActuator
 from agent.runtime import EntityRuntime
 from agent.speech.queue import SpeechQueue
 from agent.visual.unreal import STATE_PROFILES, UnrealRemoteControlSink
 
 
 class ResilienceTests(unittest.TestCase):
+    def test_speech_actuator_queues_phrase_before_stream_finishes(self):
+        calls = []
+        waited = []
+        fake_speech = types.SimpleNamespace(
+            stream_phrase=lambda phrase: calls.append(phrase),
+            stream_text=lambda token: calls.append(token),
+            flush=lambda: calls.append("flush"),
+            wait=lambda: waited.append(True),
+            say=lambda text: calls.append(text)
+        )
+
+        def phrases():
+            yield "First phrase."
+            self.assertEqual(["First phrase."], calls)
+            yield " Second phrase."
+
+        action = Action(
+            type="speak",
+            payload={"stream": phrases(), "phrased_stream": True}
+        )
+
+        with patch.dict(sys.modules, {"speech": fake_speech}):
+            response = SpeechActuator().execute(action)
+
+        self.assertEqual("First phrase. Second phrase.", response)
+        self.assertEqual(["First phrase.", " Second phrase."], calls)
+        self.assertEqual([True], waited)
+
     def test_route_question_uses_verified_provider_instead_of_chat(self):
         class Routes:
             home_address = "7600 Stonehaven Dr"
