@@ -1,9 +1,10 @@
 # Entity Visual Mockup
 
-Standalone mockup for Entity's visual presence.
+Canvas-based 2D visual presence for Entity.
 
-Open `index.html` directly in a browser. No server, dependencies, or build
-step are required.
+Run `.venv/bin/python main.py 2d` from the project root to connect it to Entity.
+It can also be opened directly for a standalone manual preview. No JavaScript
+dependencies or build step are required.
 
 The mockup explores a Soft Aero Cybercore direction:
 
@@ -29,8 +30,8 @@ The mockup explores a Soft Aero Cybercore direction:
   tactical overlay
 - small warm/green/red accents only for meaning
 
-The control strip at the bottom lets you preview the states that Entity will
-eventually drive from runtime state:
+The collapsed interface laboratory lets you preview the states that Entity also
+drives from runtime lifecycle events:
 
 - idle
 - listening

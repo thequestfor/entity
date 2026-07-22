@@ -783,6 +783,14 @@ class EntityRuntime:
                 math_response
             )
 
+        route_response = self._handle_route_time_command(
+            command,
+            source=source
+        )
+
+        if route_response:
+            return route_response
+
         if self._is_briefing_command(command):
             return self._execute_read_only_fast_path(
                 command,
@@ -805,6 +813,143 @@ class EntityRuntime:
             )
 
         return None
+
+    def _handle_route_time_command(self, command, source="voice"):
+        is_route_question = self._is_route_time_question(command)
+        get_state = getattr(self.task_store, "get_state", None)
+        pending = (
+            get_state("pending_route_query") or {}
+            if callable(get_state)
+            else {}
+        )
+        if pending:
+            try:
+                pending_is_stale = (
+                    time.time() - float(pending.get("created_at", 0)) > 600
+                )
+            except (TypeError, ValueError):
+                pending_is_stale = True
+
+            if pending_is_stale:
+                self.task_store.set_state("pending_route_query", None)
+                pending = {}
+        origin = None
+        destination = None
+
+        if is_route_question:
+            origin, destination = self._route_endpoints(command)
+
+            if not destination:
+                return self._record_read_only_fast_path(
+                    command,
+                    source,
+                    "route",
+                    "Where are you driving to?"
+                )
+
+            if not origin:
+                origin = self.route_planner.home_address.strip()
+
+            if not origin:
+                self.task_store.set_state(
+                    "pending_route_query",
+                    {
+                        "destination": destination,
+                        "created_at": time.time()
+                    }
+                )
+                return self._record_read_only_fast_path(
+                    command,
+                    source,
+                    "route",
+                    f"What address are you starting from for the drive to "
+                    f"{destination}?"
+                )
+        elif pending.get("destination"):
+            origin = self._route_origin_followup(command)
+
+            if not origin:
+                return None
+
+            destination = str(pending["destination"])
+            self.task_store.set_state("pending_route_query", None)
+        else:
+            return None
+
+        return self._execute_read_only_fast_path(
+            command,
+            source,
+            "route",
+            lambda: self._verified_route_time(origin, destination)
+        )
+
+    def _verified_route_time(self, origin, destination):
+        try:
+            return self.route_planner.travel_time(origin, destination)
+        except Exception as exc:
+            print("Route lookup failed:", exc)
+            return (
+                "I couldn't retrieve a verified route time right now, so I "
+                "won't estimate one from memory."
+            )
+
+    def _is_route_time_question(self, command):
+        normalized = command.lower()
+        asks_duration = bool(re.search(
+            r"\b(how long|drive time|travel time|traffic|eta|route time)\b",
+            normalized
+        ))
+        mentions_travel = bool(re.search(
+            r"\b(drive|driving|trip|travel|traffic|route|get to)\b",
+            normalized
+        ))
+        return asks_duration and (mentions_travel or "eta" in normalized)
+
+    def _route_endpoints(self, command):
+        text = command.strip().rstrip("?.!")
+        from_to = re.search(
+            r"\bfrom\s+(.+?)\s+to\s+(.+)$",
+            text,
+            flags=re.IGNORECASE
+        )
+
+        if from_to:
+            return (
+                self._clean_route_location(from_to.group(1)),
+                self._clean_route_location(from_to.group(2))
+            )
+
+        destinations = re.split(r"\bto\s+", text, flags=re.IGNORECASE)
+
+        if len(destinations) < 2:
+            return None, None
+
+        return None, self._clean_route_location(destinations[-1])
+
+    def _route_origin_followup(self, command):
+        text = command.strip().rstrip("?.!")
+        patterns = (
+            r"^(?:i(?:'m| am)\s+)?(?:starting|leaving|departing)"
+            r"(?:\s+from|\s+at)?\s+(.+)$",
+            r"^(?:i(?:'m| am)\s+)?at\s+(.+)$",
+            r"^from\s+(.+)$"
+        )
+
+        for pattern in patterns:
+            match = re.match(pattern, text, flags=re.IGNORECASE)
+
+            if match:
+                return self._clean_route_location(match.group(1))
+
+        return None
+
+    def _clean_route_location(self, location):
+        return re.sub(
+            r"\s+(?:right now|with (?:current )?traffic|in traffic)$",
+            "",
+            location.strip(),
+            flags=re.IGNORECASE
+        ).strip(" ,")
 
     def _execute_read_only_fast_path(
         self,
@@ -967,6 +1112,10 @@ class EntityRuntime:
                 decision_id=decision_id
             )
             prompt = self._confirmation_prompt(plan, pending)
+            self._emit_lifecycle(
+                "waiting_confirmation",
+                message=prompt
+            )
             self.task_store.update_planner_decision(
                 decision_id,
                 outcome="pending_confirmation",

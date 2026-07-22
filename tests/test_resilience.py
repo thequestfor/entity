@@ -33,6 +33,103 @@ from agent.visual.unreal import STATE_PROFILES, UnrealRemoteControlSink
 
 
 class ResilienceTests(unittest.TestCase):
+    def test_route_question_uses_verified_provider_instead_of_chat(self):
+        class Routes:
+            home_address = "7600 Stonehaven Dr"
+
+            def travel_time(self, origin, destination):
+                return f"verified: {origin} -> {destination}: 12 minutes"
+
+        class Store:
+            def get_state(self, key):
+                return None
+
+            def set_state(self, key, value):
+                raise AssertionError("No pending route should be stored")
+
+            def add_planner_decision(self, **kwargs):
+                return kwargs
+
+        class Lifecycle:
+            def emit(self, *args, **kwargs):
+                return None
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.route_planner = Routes()
+        runtime.task_store = Store()
+        runtime.lifecycle = Lifecycle()
+
+        response = runtime._handle_route_time_command(
+            "How long is the drive to 5815 Blakeney Park Dr?"
+        )
+
+        self.assertIn("verified", response)
+        self.assertIn("12 minutes", response)
+
+    def test_route_origin_followup_completes_pending_lookup(self):
+        class Routes:
+            home_address = ""
+
+            def travel_time(self, origin, destination):
+                return f"verified: {origin} -> {destination}"
+
+        class Store:
+            state = None
+
+            def get_state(self, key):
+                return self.state
+
+            def set_state(self, key, value):
+                self.state = value
+
+            def add_planner_decision(self, **kwargs):
+                return kwargs
+
+        class Lifecycle:
+            def emit(self, *args, **kwargs):
+                return None
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.route_planner = Routes()
+        runtime.task_store = Store()
+        runtime.lifecycle = Lifecycle()
+
+        question = runtime._handle_route_time_command(
+            "How long is the drive to Blakeney Park?"
+        )
+        response = runtime._handle_route_time_command(
+            "I'm starting at 7600 Stonehaven Dr in Marvin"
+        )
+
+        self.assertIn("starting from", question)
+        self.assertIn("7600 Stonehaven", response)
+        self.assertIsNone(runtime.task_store.state)
+
+    def test_route_provider_failure_never_falls_back_to_a_guess(self):
+        class Routes:
+            home_address = "Home"
+
+            def travel_time(self, origin, destination):
+                raise RuntimeError("provider unavailable")
+
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.route_planner = Routes()
+
+        response = runtime._verified_route_time("Home", "Clinic")
+
+        self.assertIn("couldn't retrieve a verified route time", response)
+        self.assertIn("won't estimate", response)
+
+    def test_route_parser_uses_final_to_as_destination(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        origin, destination = runtime._route_endpoints(
+            "How long does it take to drive to Spectrum Center?"
+        )
+
+        self.assertIsNone(origin)
+        self.assertEqual("Spectrum Center", destination)
+
     def test_ordinary_conversation_bypasses_action_planner(self):
         runtime = EntityRuntime.__new__(EntityRuntime)
 
@@ -316,7 +413,7 @@ class ResilienceTests(unittest.TestCase):
             "created", "booting", "wake_detected", "listening",
             "transcribing", "thinking", "tool_started", "tool_finished",
             "speaking", "autonomous", "recovering", "service_error",
-            "error", "idle", "stopping", "stopped"
+            "error", "waiting_confirmation", "idle", "stopping", "stopped"
         }
 
         self.assertEqual(expected_states, set(STATE_PROFILES))

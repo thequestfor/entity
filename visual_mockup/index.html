@@ -3,13 +3,19 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Entity Visual Presence Mockup</title>
+    <meta name="theme-color" content="#dcebef">
+    <title>Entity · Living Interface</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
     <main class="stage" aria-label="Entity visual presence mockup">
       <section class="presence-shell">
         <div class="glass-plate">
+          <div class="interface-rail" aria-hidden="true">
+            <span>LOCAL PRESENCE</span>
+            <i></i>
+            <span>AE-01</span>
+          </div>
           <canvas id="entity-canvas" width="1200" height="900"></canvas>
           <div class="scanline-overlay" aria-hidden="true"></div>
           <div class="corner-readout top-left">
@@ -17,8 +23,15 @@
             <strong id="mode-readout">IDLE</strong>
           </div>
           <div class="corner-readout top-right">
-            <span class="label">SIGNAL</span>
+            <span class="label">VITALITY</span>
             <strong id="energy-readout">62%</strong>
+          </div>
+          <div class="runtime-link" id="runtime-link" data-connected="false">
+            <span class="link-light"></span>
+            <span id="runtime-label">AWAITING ENTITY</span>
+          </div>
+          <div class="biosignal" aria-label="Entity homeostasis">
+            <span>HOMEOSTASIS</span><i><b></b></i><strong>STABLE</strong>
           </div>
           <div class="status-panel">
             <span id="message-readout">Soft standby</span>
@@ -26,7 +39,11 @@
         </div>
       </section>
 
-      <section class="controls" aria-label="Mockup controls">
+      <details class="controls" aria-label="Interface laboratory controls">
+        <summary>
+          <span>Interface laboratory</span>
+          <small>manual state preview</small>
+        </summary>
         <div class="state-buttons" role="group" aria-label="Entity state">
           <button class="active" data-mode="idle">Idle</button>
           <button data-mode="listening">Listening</button>
@@ -58,7 +75,7 @@
           Message
           <input id="message" type="text" value="Soft standby">
         </label>
-      </section>
+      </details>
     </main>
 
     <script src="app.js"></script>

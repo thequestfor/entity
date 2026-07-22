@@ -12,8 +12,8 @@ const messageReadout = document.getElementById("message-readout");
 
 const palettes = {
   idle: {
-    primary: "#edfaff",
-    secondary: "#9cd9ea",
+    primary: "#edf8f8",
+    secondary: "#53c5cf",
     accent: "#ffffff",
     label: "IDLE",
     message: "Soft standby",
@@ -21,45 +21,45 @@ const palettes = {
     pulse: 0.18
   },
   listening: {
-    primary: "#ffffff",
-    secondary: "#b2e4ff",
-    accent: "#d8fbff",
+    primary: "#eef6ff",
+    secondary: "#4f8cff",
+    accent: "#b8d8ff",
     label: "LISTENING",
     message: "Listening",
     rotation: 0.28,
     pulse: 0.36
   },
   thinking: {
-    primary: "#f1fbff",
-    secondary: "#9fc6e3",
-    accent: "#c3eeff",
+    primary: "#f6f1ff",
+    secondary: "#a56cff",
+    accent: "#e0c9ff",
     label: "THINKING",
     message: "Planning",
     rotation: 0.95,
     pulse: 0.28
   },
   speaking: {
-    primary: "#ffffff",
-    secondary: "#8ef7ff",
-    accent: "#f4feff",
+    primary: "#effff5",
+    secondary: "#64ef91",
+    accent: "#c8ffda",
     label: "SPEAKING",
     message: "Speaking",
     rotation: 0.42,
     pulse: 0.52
   },
   acting: {
-    primary: "#effcff",
-    secondary: "#9ad7c3",
-    accent: "#b8ffda",
+    primary: "#fff8ed",
+    secondary: "#ffad55",
+    accent: "#ffe0ae",
     label: "ACTING",
     message: "Executing action",
     rotation: 0.7,
     pulse: 0.32
   },
   autonomous_goal: {
-    primary: "#eaf8ff",
-    secondary: "#b8ffd8",
-    accent: "#e7fff3",
+    primary: "#fffbea",
+    secondary: "#ffd45f",
+    accent: "#fff0ae",
     label: "AUTONOMOUS",
     message: "Autonomous goal active",
     rotation: 0.36,
@@ -115,6 +115,10 @@ function resize() {
 }
 
 function setMode(mode) {
+  if (!palettes[mode]) {
+    return;
+  }
+
   state.mode = mode;
   const palette = palettes[mode];
   state.message = palette.message;
@@ -780,6 +784,7 @@ function drawGlassBlob(cx, cy, radius, palette, time, energy) {
   drawInteriorShadow(cx, cy, radius, palette, time, energy);
   drawRefractionPools(cx, cy, radius, palette, time, energy);
   drawLivingCore(cx, cy, radius, palette, time, energy);
+  drawNervePlexus(cx, cy, radius, palette, time, energy);
   drawFrostedSparkle(cx, cy, radius, palette, time, energy);
   ctx.restore();
 
@@ -1104,6 +1109,68 @@ function drawLivingCore(cx, cy, radius, palette, time, energy) {
     ctx.stroke();
   }
 
+  ctx.restore();
+}
+
+function drawNervePlexus(cx, cy, radius, palette, time, energy) {
+  const activity = activeEnergy(time, energy);
+  const cadence = 1.18 + activity * 0.65;
+  const beatA = Math.pow(Math.max(0, Math.sin(time * cadence * Math.PI)), 12);
+  const beatB = Math.pow(Math.max(0, Math.sin((time - 0.17) * cadence * Math.PI)), 16) * 0.46;
+  const heartbeat = beatA + beatB;
+
+  ctx.save();
+  ctx.globalCompositeOperation = "screen";
+  ctx.lineCap = "round";
+
+  for (let i = 0; i < 14; i += 1) {
+    const angle = (i / 14) * Math.PI * 2 + Math.sin(time * 0.16 + i) * 0.05;
+    const innerX = cx + Math.cos(angle + 0.24) * radius * 0.16;
+    const innerY = cy + Math.sin(angle + 0.24) * radius * 0.12;
+    const outerX = cx + Math.cos(angle) * radius * (0.61 + (i % 3) * 0.07);
+    const outerY = cy + Math.sin(angle) * radius * (0.48 + (i % 4) * 0.045);
+    const pulse = 0.5 + 0.5 * Math.sin(time * (1.5 + activity) - i * 0.58);
+    ctx.strokeStyle = rgba(
+      i % 3 === 0 ? "#9affd2" : palette.secondary,
+      0.035 + pulse * 0.07 + heartbeat * 0.05
+    );
+    ctx.lineWidth = 0.55 + pulse * 0.72;
+    ctx.beginPath();
+    ctx.moveTo(innerX, innerY);
+    ctx.bezierCurveTo(
+      cx + Math.cos(angle + 0.72) * radius * 0.34,
+      cy + Math.sin(angle + 0.72) * radius * 0.28,
+      cx + Math.cos(angle - 0.42) * radius * 0.5,
+      cy + Math.sin(angle - 0.42) * radius * 0.4,
+      outerX,
+      outerY
+    );
+    ctx.stroke();
+
+    const flow = (time * (0.2 + activity * 0.3) + i * 0.071) % 1;
+    const nodeX = innerX + (outerX - innerX) * flow;
+    const nodeY = innerY + (outerY - innerY) * flow;
+    ctx.fillStyle = rgba("#dffff2", 0.14 + pulse * 0.22);
+    ctx.beginPath();
+    ctx.arc(nodeX, nodeY, 0.8 + heartbeat * 1.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  const sac = ctx.createRadialGradient(cx - radius * 0.025, cy - radius * 0.035, 0, cx, cy, radius * 0.23);
+  sac.addColorStop(0, rgba("#ffffff", 0.42 + heartbeat * 0.2));
+  sac.addColorStop(0.28, rgba("#9affd2", 0.2 + activity * 0.16));
+  sac.addColorStop(0.7, rgba(palette.secondary, 0.08 + heartbeat * 0.08));
+  sac.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = sac;
+  ctx.beginPath();
+  ctx.ellipse(
+    cx, cy,
+    radius * (0.18 + heartbeat * 0.018),
+    radius * (0.14 + heartbeat * 0.025),
+    Math.sin(time * 0.2) * 0.08,
+    0, Math.PI * 2
+  );
+  ctx.fill();
   ctx.restore();
 }
 
@@ -1856,6 +1923,87 @@ messageInput.addEventListener("input", () => {
 scanlinesInput.addEventListener("change", syncReadouts);
 window.addEventListener("resize", resize);
 
+const runtimeLink = document.getElementById("runtime-link");
+const runtimeLabel = document.getElementById("runtime-label");
+const lifecycleModes = {
+  created: "offline",
+  booting: "thinking",
+  wake_detected: "listening",
+  listening: "listening",
+  transcribing: "thinking",
+  thinking: "thinking",
+  tool_started: "acting",
+  tool_finished: "acting",
+  speaking: "speaking",
+  autonomous: "autonomous_goal",
+  waiting_confirmation: "waiting_confirmation",
+  recovering: "service_issue",
+  service_error: "service_issue",
+  error: "service_issue",
+  idle: "idle",
+  stopping: "offline",
+  stopped: "offline"
+};
+const lifecycleEnergy = {
+  booting: 0.42,
+  wake_detected: 0.84,
+  listening: 0.72,
+  transcribing: 0.64,
+  thinking: 0.76,
+  tool_started: 0.9,
+  tool_finished: 0.58,
+  speaking: 0.86,
+  autonomous: 0.78,
+  waiting_confirmation: 0.54,
+  recovering: 0.74,
+  service_error: 0.94,
+  error: 1,
+  idle: 0.42,
+  stopping: 0.18,
+  stopped: 0.05
+};
+
+function applyLifecycleEvent(event) {
+  const lifecycleState = String(event?.state || "idle");
+  const mode = lifecycleModes[lifecycleState] || "idle";
+  setMode(mode);
+  state.targetEnergy = lifecycleEnergy[lifecycleState] ?? 0.55;
+  energyInput.value = String(Math.round(state.targetEnergy * 100));
+  const detail = event?.details || {};
+  state.message = detail.message || (detail.tool
+    ? `${palettes[mode].message} · ${detail.tool}`
+    : palettes[mode].message);
+  messageInput.value = state.message;
+  syncReadouts();
+}
+
+function connectRuntime() {
+  if (window.location.protocol === "file:" || !window.EventSource) {
+    runtimeLabel.textContent = "MANUAL PREVIEW";
+    return;
+  }
+
+  const events = new EventSource("/events");
+  events.onopen = () => {
+    runtimeLink.dataset.connected = "true";
+    runtimeLabel.textContent = "ENTITY LINKED";
+  };
+  events.onmessage = (message) => {
+    try {
+      applyLifecycleEvent(JSON.parse(message.data));
+    } catch (error) {
+      console.warn("Ignored malformed Entity lifecycle event.", error);
+    }
+  };
+  events.onerror = () => {
+    runtimeLink.dataset.connected = "false";
+    runtimeLabel.textContent = "RECONNECTING";
+  };
+}
+
+window.EntityVisual = { setMode, applyLifecycleEvent };
+
 resize();
 syncReadouts();
+connectRuntime();
 requestAnimationFrame(drawFrame);

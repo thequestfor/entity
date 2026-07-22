@@ -9,10 +9,11 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
-    "@types/three": "^0.164.0",
-    "three": "^0.164.1",
-    "vite": "^5.4.19",
-    "typescript": "^5.5.4"
+    "three": "^0.185.1"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/three": "^0.185.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.1.5"
+  }
 }

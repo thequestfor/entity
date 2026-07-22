@@ -1,10 +1,9 @@
 # Entity Visual Interface Prototype
 
-Experimental real-time 3D visual shell for Entity.
+Real-time 3D visual shell for Entity.
 
-This is intentionally separate from the Python assistant runtime and the older
-`visual_mockup/` canvas sketch. It is a test environment for the eventual
-fullscreen visual body.
+The Three.js scene is served by Entity in `3d` mode and reacts to the same
+lifecycle events as the 2D and Unreal interfaces.
 
 ## Goal
 
@@ -23,6 +22,12 @@ npm run dev
 
 Then open the Vite URL, usually `http://127.0.0.1:5173`.
 
+To run it connected to Entity from the project root:
+
+```sh
+.venv/bin/python main.py 3d
+```
+
 ## Current Prototype
 
 - Three.js scene with real camera, perspective, lights, shadows, and bloom.
@@ -40,7 +45,7 @@ Then open the Vite URL, usually `http://127.0.0.1:5173`.
 - Foreground floor/deck geometry is modeled so the room fills the camera view
   instead of fading into an unfinished dark strip.
 
-## Next Integration Step
+## Runtime bridge
 
 Add a local state bridge:
 
@@ -53,5 +58,5 @@ Add a local state bridge:
 }
 ```
 
-The visual app should subscribe to Entity runtime state and replace the manual
-test controls.
+Entity streams renderer-neutral lifecycle events over local Server-Sent Events.
+The collapsed interface laboratory remains available for manual state previews.

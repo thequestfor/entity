@@ -85,6 +85,24 @@ class RoutePlannerTests(unittest.TestCase):
 
         self.assertNotIn("secret", str(raised.exception))
 
+    def test_live_travel_time_is_labeled_as_provider_verified(self):
+        planner = self.planner()
+        planner.estimate = lambda origin, destination: type(
+            "Estimate",
+            (),
+            {
+                "duration_minutes": 12,
+                "distance_miles": 6.2,
+                "traffic_delay_seconds": 0
+            }
+        )()
+
+        response = planner.travel_time("Home", "Clinic")
+
+        self.assertIn("TomTom live traffic", response)
+        self.assertIn("12 minutes", response)
+        self.assertIn("No traffic delay reported", response)
+
 
 if __name__ == "__main__":
     unittest.main()

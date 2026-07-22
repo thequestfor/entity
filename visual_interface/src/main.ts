@@ -12,6 +12,7 @@ type Mode =
   | "thinking"
   | "speaking"
   | "acting"
+  | "waiting_confirmation"
   | "autonomous_goal"
   | "service_issue"
   | "offline";
@@ -26,14 +27,55 @@ type Palette = {
 };
 
 const palettes: Record<Mode, Palette> = {
-  idle: makePalette("#f8feff", "#9ee8ef", "#ffffff", "#cfd7d9", "IDLE", 0.16),
-  listening: makePalette("#ffffff", "#7feaff", "#ddfbff", "#d6dde0", "LISTENING", 0.34),
-  thinking: makePalette("#f5fbff", "#a7c7ff", "#d8f2ff", "#d1d4dc", "THINKING", 0.46),
-  speaking: makePalette("#ffffff", "#63f6ff", "#f8ffff", "#d5dee0", "SPEAKING", 0.76),
-  acting: makePalette("#efffff", "#88ffd1", "#bbffe5", "#d3ddd7", "ACTING", 0.4),
-  autonomous_goal: makePalette("#efffff", "#c1ffcf", "#e9fff4", "#d5ddd5", "AUTONOMOUS", 0.28),
-  service_issue: makePalette("#fff2e8", "#ff916d", "#ffd4c0", "#ddd4ce", "SERVICE", 0.42),
+  idle: makePalette("#eaffff", "#16b8c4", "#a9fff3", "#c8d8da", "IDLE", 0.16),
+  listening: makePalette("#eef8ff", "#297dff", "#72d9ff", "#cbd7df", "LISTENING", 0.34),
+  thinking: makePalette("#fbf4ff", "#9d42e8", "#d3a1ff", "#d2cedd", "THINKING", 0.46),
+  speaking: makePalette("#effff4", "#24d66f", "#9affbd", "#cbdad2", "SPEAKING", 0.76),
+  acting: makePalette("#fff7ed", "#ff7b25", "#ffc16d", "#ddd2c8", "ACTING", 0.4),
+  waiting_confirmation: makePalette("#fff8ec", "#ff9e2c", "#ffe0a1", "#ded5c9", "WAITING", 0.22),
+  autonomous_goal: makePalette("#fffce8", "#e9b51f", "#fff088", "#ddd9c7", "AUTONOMOUS", 0.28),
+  service_issue: makePalette("#fff0ec", "#f04438", "#ff9177", "#ddcecb", "SERVICE ISSUE", 0.42),
   offline: makePalette("#d9dde0", "#7c878c", "#f0f3f4", "#a8adb0", "OFFLINE", 0.05)
+};
+
+const modeMessages: Record<Mode, string> = {
+  idle: "Present · listening for you",
+  listening: "Receiving your voice",
+  thinking: "Gathering context and forming a response",
+  speaking: "Speaking with you",
+  acting: "Working with a connected service",
+  waiting_confirmation: "Waiting for your confirmation",
+  autonomous_goal: "Pursuing an autonomous goal",
+  service_issue: "A service needs attention",
+  offline: "Entity is offline"
+};
+
+const lifecycleModes: Record<string, Mode> = {
+  created: "offline",
+  booting: "thinking",
+  wake_detected: "listening",
+  listening: "listening",
+  transcribing: "thinking",
+  thinking: "thinking",
+  tool_started: "acting",
+  tool_finished: "acting",
+  speaking: "speaking",
+  autonomous: "autonomous_goal",
+  waiting_confirmation: "waiting_confirmation",
+  recovering: "service_issue",
+  service_error: "service_issue",
+  error: "service_issue",
+  idle: "idle",
+  stopping: "offline",
+  stopped: "offline"
+};
+
+const lifecycleEnergy: Record<string, number> = {
+  created: 20, booting: 50, wake_detected: 68, listening: 72,
+  transcribing: 65, thinking: 76, tool_started: 82, tool_finished: 58,
+  speaking: 88, autonomous: 70, waiting_confirmation: 54,
+  recovering: 72, service_error: 78, error: 88, idle: 42,
+  stopping: 14, stopped: 0
 };
 
 const canvas = document.querySelector<HTMLCanvasElement>("#scene");
@@ -41,9 +83,13 @@ const modeLabel = document.querySelector<HTMLElement>("#mode-label");
 const energyLabel = document.querySelector<HTMLElement>("#energy-label");
 const modeSwatch = document.querySelector<HTMLElement>("#mode-swatch");
 const energyInput = document.querySelector<HTMLInputElement>("#energy");
+const runtimeLink = document.querySelector<HTMLElement>("#runtime-link");
+const runtimeLabel = document.querySelector<HTMLElement>("#runtime-label");
+const messageLabel = document.querySelector<HTMLElement>("#message-label");
 const buttons = [...document.querySelectorAll<HTMLButtonElement>("[data-mode]")];
 
-if (!canvas || !modeLabel || !energyLabel || !modeSwatch || !energyInput) {
+if (!canvas || !modeLabel || !energyLabel || !modeSwatch || !energyInput ||
+    !runtimeLink || !runtimeLabel || !messageLabel) {
   throw new Error("Visual interface DOM is incomplete.");
 }
 
@@ -51,6 +97,9 @@ const modeLabelEl = modeLabel;
 const energyLabelEl = energyLabel;
 const modeSwatchEl = modeSwatch;
 const energyInputEl = energyInput;
+const runtimeLinkEl = runtimeLink;
+const runtimeLabelEl = runtimeLabel;
+const messageLabelEl = messageLabel;
 
 const state = {
   mode: "idle" as Mode,
@@ -104,6 +153,7 @@ scene.add(room, entity, particles, bubbles);
 const clock = new THREE.Clock();
 const tmpColor = new THREE.Color();
 const tmpVector = new THREE.Vector3();
+const livingGreen = new THREE.Color("#91ffd0");
 const floorTexture = createPanelTexture("#dde8e8", "#ffffff", 1024, 1024, 12, 0.18);
 const wallTexture = createPanelTexture("#c9dde3", "#eaffff", 1024, 1024, 8, 0.11);
 const consoleTexture = createPanelTexture("#e8f0f0", "#ffffff", 1024, 512, 8, 0.16);
@@ -330,9 +380,10 @@ entity.add(outerModeAura);
 
 const causticRings = createCausticRings();
 const energyThreads = createEnergyThreads();
+const visceralNetwork = createVisceralNetwork();
 const modeRings = createModeRings();
 const particleField = createParticleField();
-entity.add(causticRings, energyThreads, modeRings);
+entity.add(causticRings, energyThreads, visceralNetwork, modeRings);
 particles.add(particleField);
 createBubbleField();
 
@@ -1132,6 +1183,60 @@ function createEnergyThreads() {
   return group;
 }
 
+function createVisceralNetwork() {
+  const group = new THREE.Group();
+  const strandMaterial = new THREE.MeshBasicMaterial({
+    color: "#86ffd0",
+    transparent: true,
+    opacity: 0.16,
+    blending: THREE.AdditiveBlending,
+    depthWrite: false
+  });
+
+  for (let i = 0; i < 12; i += 1) {
+    const angle = (i / 12) * Math.PI * 2;
+    const elevation = -0.72 + (i % 5) * 0.34;
+    const points = [
+      new THREE.Vector3(Math.cos(angle) * 0.16, 1.7 + elevation * 0.12, Math.sin(angle) * 0.16),
+      new THREE.Vector3(Math.cos(angle + 0.7) * 0.43, 1.7 + elevation * 0.48, Math.sin(angle + 0.7) * 0.43),
+      new THREE.Vector3(Math.cos(angle - 0.36) * 0.72, 1.7 + elevation * 0.78, Math.sin(angle - 0.36) * 0.72),
+      new THREE.Vector3(Math.cos(angle) * 1.02, 1.7 + elevation, Math.sin(angle) * 1.02)
+    ];
+    const curve = new THREE.CatmullRomCurve3(points);
+    const strand = new THREE.Mesh(
+      new THREE.TubeGeometry(curve, 36, 0.008 + (i % 3) * 0.004, 6, false),
+      strandMaterial.clone()
+    );
+    strand.userData.phase = i * 0.57;
+    group.add(strand);
+
+    const node = new THREE.Mesh(
+      new THREE.SphereGeometry(0.025 + (i % 3) * 0.008, 12, 8),
+      strandMaterial.clone()
+    );
+    node.position.copy(points[2]);
+    node.userData.phase = i * 0.57 + 0.8;
+    node.userData.node = true;
+    group.add(node);
+  }
+
+  const heart = new THREE.Mesh(
+    new THREE.DodecahedronGeometry(0.31, 2),
+    new THREE.MeshBasicMaterial({
+      color: "#c8ffe2",
+      transparent: true,
+      opacity: 0.3,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
+    })
+  );
+  heart.position.copy(orb.position);
+  heart.scale.set(0.92, 1.12, 0.88);
+  heart.userData.heart = true;
+  group.add(heart);
+  return group;
+}
+
 function createParticleField() {
   const geometry = new THREE.BufferGeometry();
   const positions = new Float32Array(360 * 3);
@@ -1154,13 +1259,53 @@ function createParticleField() {
   return new THREE.Points(geometry, material);
 }
 
-function setMode(mode: Mode) {
+function setMode(mode: Mode, message = modeMessages[mode]) {
+  if (!(mode in palettes)) return;
   state.mode = mode;
   state.palette = palettes[mode];
   modeLabelEl.textContent = state.palette.label;
   modeSwatchEl.style.color = `#${state.palette.secondary.getHexString()}`;
+  messageLabelEl.textContent = message;
   buttons.forEach((button) => button.classList.toggle("active", button.dataset.mode === mode));
 }
+
+function applyLifecycleEvent(event: { state?: string; details?: Record<string, unknown> }) {
+  const lifecycleState = event.state ?? "idle";
+  const mode = lifecycleModes[lifecycleState] ?? "idle";
+  const detailMessage = typeof event.details?.message === "string" ? event.details.message : undefined;
+  const tool = typeof event.details?.tool === "string" ? event.details.tool : undefined;
+  const message = detailMessage ?? (tool ? `${modeMessages[mode]} · ${tool}` : modeMessages[mode]);
+  setMode(mode, message);
+  const energy = lifecycleEnergy[lifecycleState] ?? 50;
+  state.targetEnergy = energy / 100;
+  energyInputEl.value = String(energy);
+}
+
+function connectRuntime() {
+  if (!("EventSource" in window)) {
+    runtimeLabelEl.textContent = "MANUAL PREVIEW";
+    return;
+  }
+
+  const source = new EventSource("/events");
+  source.onopen = () => {
+    runtimeLinkEl.dataset.connected = "true";
+    runtimeLabelEl.textContent = "ENTITY CONNECTED";
+  };
+  source.onmessage = (message) => {
+    try {
+      applyLifecycleEvent(JSON.parse(message.data));
+    } catch {
+      messageLabelEl.textContent = "Received an unreadable lifecycle event";
+    }
+  };
+  source.onerror = () => {
+    runtimeLinkEl.dataset.connected = "false";
+    runtimeLabelEl.textContent = "RECONNECTING";
+  };
+}
+
+(window as unknown as { EntityVisual: object }).EntityVisual = { setMode, applyLifecycleEvent };
 
 function animate() {
   const elapsed = clock.getElapsedTime();
@@ -1246,6 +1391,32 @@ function animate() {
     line.material.opacity = (0.04 + activity * 0.32) * offline;
   });
 
+  const beatA = Math.pow(
+    Math.max(0, Math.sin(elapsed * Math.PI * (1.05 + activity * 0.34))),
+    12
+  );
+  const beatB = Math.pow(
+    Math.max(0, Math.sin((elapsed - 0.17) * Math.PI * (1.05 + activity * 0.34))),
+    16
+  ) * 0.44;
+  const heartbeat = beatA + beatB;
+  visceralNetwork.children.forEach((child) => {
+    const mesh = child as THREE.Mesh;
+    const material = mesh.material as THREE.MeshBasicMaterial;
+    const phase = (child.userData.phase as number) ?? 0;
+    const flow = 0.5 + Math.sin(elapsed * (2.2 + activity) - phase) * 0.5;
+    material.color.copy(state.displaySecondary).lerp(livingGreen, 0.34);
+    material.opacity = (0.045 + flow * 0.13 + heartbeat * 0.09) * offline;
+
+    if (child.userData.heart) {
+      const heartScale = 1 + heartbeat * 0.13 + Math.sin(elapsed * 1.1) * 0.02;
+      child.scale.set(0.92 * heartScale, 1.12 * heartScale, 0.88 * heartScale);
+      child.rotation.y += delta * (0.12 + activity * 0.3);
+    } else if (child.userData.node) {
+      child.scale.setScalar(0.8 + flow * 0.9 + heartbeat * 0.45);
+    }
+  });
+
   modeRings.children.forEach((child, index) => {
     const ring = child as THREE.Mesh<THREE.TorusGeometry, THREE.MeshBasicMaterial>;
     ring.material.color.copy(index % 2 === 0 ? state.displaySecondary : state.displayAccent);
@@ -1318,6 +1489,8 @@ buttons.forEach((button) => {
 energyInputEl.addEventListener("input", () => {
   state.targetEnergy = Number(energyInputEl.value) / 100;
 });
+
+connectRuntime();
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;

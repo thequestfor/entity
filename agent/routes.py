@@ -161,6 +161,30 @@ class RoutePlanner:
 
         raise RuntimeError(self._unsupported_provider_message())
 
+    def travel_time(self, origin, destination):
+        if not self.available():
+            return (
+                "I can't verify that travel time because route planning is "
+                "not fully configured. I won't guess."
+            )
+
+        estimate = self.estimate(origin, destination)
+        distance = round(estimate.distance_miles, 1)
+
+        if self.uses_live_traffic():
+            delay = self._traffic_delay_text(estimate).strip()
+            return (
+                f"TomTom live traffic puts the drive from {origin} to "
+                f"{destination} at about {estimate.duration_minutes} minutes "
+                f"over {distance} miles. {delay}"
+            )
+
+        return (
+            f"The estimated drive from {origin} to {destination} is about "
+            f"{estimate.duration_minutes} minutes over {distance} miles. "
+            "This routing provider does not include verified live traffic."
+        )
+
     def _openrouteservice_estimate(self, origin, destination):
         origin_coords = self.geocode(origin)
         destination_coords = self.geocode(destination)

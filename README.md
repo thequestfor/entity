@@ -47,12 +47,38 @@ ENTITY_TOMTOM_API_KEY=
 ENTITY_HOME_ADDRESS=
 ```
 
+Direct questions such as “How long is the drive to the airport?” use the
+configured home address and routing provider. “From A to B” requests use both
+explicit locations. Route questions never fall back to an LLM-generated time;
+if the provider cannot verify the route, Entity says so instead of guessing.
+
 Keep `.env`, OAuth credentials, tokens, and `agent/entity_memory.db` private. They
 are ignored by Git.
 
-For a visual interface, keep Entity in its own process. The optional Unreal proof
-of concept sends lifecycle states to an Unreal Remote Control Preset without
-blocking Entity's runtime. Enable it with:
+Entity can run with one of three live visual interfaces. The 2D and 3D modes
+start a private localhost server, open the interface in a browser, and stream
+lifecycle events to it. Unreal sends the same events to an Unreal Remote Control
+Preset without blocking Entity's runtime.
+
+```bash
+.venv/bin/python main.py 2d
+.venv/bin/python main.py 3d
+.venv/bin/python main.py unreal
+```
+
+The 2D interface has no build dependencies. The 3D interface requires Node.js
+and installs its dependencies from `visual_interface/package-lock.json` with
+`npm install`; Entity builds it when 3D mode starts. Set the default and browser
+behavior in `.env`:
+
+```dotenv
+ENTITY_VISUAL_MODE=2d
+ENTITY_VISUAL_HOST=127.0.0.1
+ENTITY_VISUAL_PORT=8765
+ENTITY_VISUAL_OPEN_BROWSER=true
+```
+
+For Unreal mode, enable Remote Control and configure:
 
 ```dotenv
 ENTITY_UNREAL_ENABLED=true
@@ -91,7 +117,7 @@ fails.
 ## Run
 
 ```bash
-.venv/bin/python main.py
+.venv/bin/python main.py 2d
 ```
 
 Entity announces startup, begins listening for the wake word, and starts enabled

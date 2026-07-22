@@ -69,6 +69,12 @@ STATE_PROFILES = {
         "BreathExpansion": 0.9,
         "ShellColor": (1.0, 0.78, 0.04)
     },
+    "waiting_confirmation": {
+        "ShellStrength": 18.0,
+        "BreathSpeed": 0.22,
+        "BreathExpansion": 0.72,
+        "ShellColor": (1.0, 0.52, 0.08)
+    },
     "recovering": {
         "ShellStrength": 24.0,
         "BreathSpeed": 0.75,

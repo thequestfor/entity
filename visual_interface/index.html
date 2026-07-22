@@ -3,27 +3,45 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Entity Visual Interface Prototype</title>
+    <meta name="theme-color" content="#e6eff0" />
+    <title>Entity · Spatial Interface</title>
   </head>
   <body>
     <main id="app">
-      <canvas id="scene" aria-label="Entity 3D visual interface prototype"></canvas>
-      <section class="hud" aria-label="Prototype controls">
-        <div class="readout">
-          <span>ENTITY</span>
+      <canvas id="scene" aria-label="Entity 3D spatial interface"></canvas>
+      <div class="atmosphere" aria-hidden="true"></div>
+      <section class="hud" aria-label="Entity status">
+        <div class="identity-lockup">
+          <span class="eyebrow">LOCAL PRESENCE / AE-01</span>
+          <strong>ENTITY</strong>
+        </div>
+        <div class="readout mode-readout">
+          <span>ACTIVE STATE</span>
           <strong id="mode-label">IDLE</strong>
         </div>
-        <div class="readout right">
-          <span>ENERGY</span>
+        <div class="runtime-link" id="runtime-link" data-connected="false">
+          <i></i>
+          <span id="runtime-label">AWAITING ENTITY</span>
+        </div>
+        <div class="readout right vitality-readout">
+          <span>VITALITY</span>
           <strong id="energy-label">62%</strong>
         </div>
         <div class="mode-swatch" id="mode-swatch" aria-hidden="true"></div>
+      </section>
+      <div class="message-readout" id="message-label">Soft standby</div>
+      <div class="biosignal" aria-label="Entity homeostasis">
+        <span>HOMEOSTASIS</span><i><b></b></i><strong>STABLE</strong>
+      </div>
+      <details class="mode-lab">
+        <summary>Interface laboratory <small>manual preview</small></summary>
         <div class="state-buttons">
           <button data-mode="idle" class="active">Idle</button>
           <button data-mode="listening">Listening</button>
           <button data-mode="thinking">Thinking</button>
           <button data-mode="speaking">Speaking</button>
           <button data-mode="acting">Acting</button>
+          <button data-mode="waiting_confirmation">Waiting</button>
           <button data-mode="autonomous_goal">Autonomous</button>
           <button data-mode="service_issue">Service</button>
           <button data-mode="offline">Offline</button>
@@ -32,7 +50,7 @@
           Energy
           <input id="energy" type="range" min="0" max="100" value="62" />
         </label>
-      </section>
+      </details>
     </main>
     <script type="module" src="/src/main.ts"></script>
   </body>
