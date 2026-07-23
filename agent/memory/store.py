@@ -338,6 +338,27 @@ class MemoryStore:
 
         return [self._autonomous_goal_from_row(row) for row in rows]
 
+    def update_autonomous_goal(self, goal_id, outcome, metadata=None):
+        with self._connect() as conn:
+            if metadata is None:
+                conn.execute(
+                    """
+                    UPDATE autonomous_goals
+                    SET outcome = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (outcome, utc_now(), goal_id)
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE autonomous_goals
+                    SET outcome = ?, metadata = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (outcome, self._json(metadata), utc_now(), goal_id)
+                )
+
     def count_autonomous_goals(self):
         with self._connect() as conn:
             row = conn.execute(
@@ -421,6 +442,24 @@ class MemoryStore:
                     utc_now(),
                     task_id
                 )
+            )
+
+    def cancel_task(self, task_id, reason=""):
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT metadata FROM tasks WHERE id = ?",
+                (task_id,)
+            ).fetchone()
+            metadata = json.loads(row["metadata"] or "{}") if row else {}
+            if reason:
+                metadata["canceled_reason"] = reason
+            conn.execute(
+                """
+                UPDATE tasks
+                SET status = 'canceled', completed_at = ?, metadata = ?
+                WHERE id = ? AND status = 'pending'
+                """,
+                (utc_now(), self._json(metadata), task_id)
             )
 
     def get_geocode(self, query, provider):
@@ -613,6 +652,28 @@ class MemoryStore:
 
         return [dict(row) for row in rows]
 
+    def recent_observations(self, limit=8):
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source, type, priority, payload, created_at
+                FROM events
+                WHERE type NOT IN (
+                    'user_speech', 'remote_message', 'autonomous_goal'
+                )
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,)
+            ).fetchall()
+
+        observations = []
+        for row in rows:
+            item = dict(row)
+            item["payload"] = json.loads(item.get("payload") or "{}")
+            observations.append(item)
+        return observations
+
     def search(self, query, limit=8):
         if not query.strip():
             return self.list_memories(limit=limit)
@@ -665,7 +726,8 @@ class MemoryStore:
 
         return {
             "relevant_memories": memories,
-            "recent_conversations": conversations
+            "recent_conversations": conversations,
+            "recent_observations": self.recent_observations(limit=5)
         }
 
     def _memory_from_row(self, row):

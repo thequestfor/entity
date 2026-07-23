@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#071013" />
+    <title>Entity Intelligence</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">ENTITY / READ-ONLY OBSERVATORY</p>
+        <h1>World Intelligence</h1>
+      </div>
+      <div class="connection" id="connection" data-online="false">
+        <i></i><span>CONNECTING</span>
+      </div>
+    </header>
+
+    <main>
+      <section class="metrics" aria-label="Intelligence totals">
+        <article><span>DOCUMENTS</span><strong id="document-count">—</strong></article>
+        <article><span>SITUATIONS</span><strong id="situation-count">—</strong></article>
+        <article><span>ACTIVE CLAIMS</span><strong id="claim-count">—</strong></article>
+        <article><span>CONTESTED</span><strong id="contested-count">—</strong></article>
+        <article><span>ACTIVE SOURCES</span><strong id="source-count">—</strong></article>
+        <article><span>SOURCE ISSUES</span><strong id="issue-count">—</strong></article>
+      </section>
+
+      <section class="panel briefing-panel" aria-live="polite">
+        <p class="eyebrow">LATEST DETERMINISTIC BRIEFING</p>
+        <h2 id="briefing-headline">Waiting for analyzed evidence…</h2>
+        <p id="briefing-period"></p>
+      </section>
+
+      <section class="panel map-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">GEOGRAPHIC EVIDENCE</p>
+            <h2>Located situations</h2>
+          </div>
+          <span>Approximate equirectangular view</span>
+        </div>
+        <div class="world-map" id="world-map" aria-label="Located situations"></div>
+      </section>
+
+      <section class="layout">
+        <article class="panel situation-panel">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">EVOLVING MODELS</p>
+              <h2>Current situations</h2>
+            </div>
+            <label>
+              Category
+              <select id="category-filter">
+                <option value="">All categories</option>
+              </select>
+            </label>
+          </div>
+          <div class="situations" id="situation-list" aria-live="polite"></div>
+          <div class="situation-detail" id="situation-detail"></div>
+        </article>
+
+        <aside>
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">PROVENANCE</p>
+                <h2>Source health</h2>
+              </div>
+            </div>
+            <div class="sources" id="source-list"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">CALIBRATION</p>
+                <h2>Learned publisher trust</h2>
+              </div>
+            </div>
+            <div class="sources" id="reputation-list"></div>
+          </article>
+
+          <article class="panel">
+            <div class="panel-heading">
+              <div>
+                <p class="eyebrow">EXPERIMENTAL FORECASTS</p>
+                <h2>Scored world-model predictions</h2>
+              </div>
+            </div>
+            <div class="sources" id="forecast-list"></div>
+          </article>
+
+          <article class="panel notice">
+            <p class="eyebrow">EVIDENCE DISCIPLINE</p>
+            <p>
+              Situation models are deterministic and provisional. Confidence
+              reflects source evidence—not truth. Learned trust is bounded,
+              delayed, auditable, and never uses private mail.
+            </p>
+          </article>
+        </aside>
+      </section>
+
+      <section class="panel evidence-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">LATEST EVIDENCE</p>
+            <h2>Observed developments</h2>
+          </div>
+          <span class="last-retrieval">Retrieved <strong id="last-retrieval">—</strong></span>
+        </div>
+        <div class="feed" id="document-feed" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <template id="situation-template">
+      <button class="situation" type="button">
+        <span class="situation-topline">
+          <span class="category"></span>
+          <span class="status"></span>
+        </span>
+        <strong></strong>
+        <span class="situation-stats"></span>
+        <span class="confidence-track"><i></i></span>
+      </button>
+    </template>
+
+    <template id="document-template">
+      <article class="document">
+        <div class="document-meta">
+          <span class="category"></span>
+          <span class="source"></span>
+          <time></time>
+        </div>
+        <h3></h3>
+        <p></p>
+        <a target="_blank" rel="noopener noreferrer">Open original source</a>
+      </article>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

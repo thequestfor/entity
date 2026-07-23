@@ -267,6 +267,9 @@ class AutonomousGoalPolicy:
         return None
 
     def _briefing_makes_sense(self, context):
+        if self._env_bool("ENTITY_DAILY_BRIEFING_ENABLED", True):
+            return False
+
         presence = context.get("presence") or {}
 
         if presence.get("availability") in {"sleeping", "do_not_disturb"}:

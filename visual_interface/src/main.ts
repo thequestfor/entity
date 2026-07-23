@@ -5,6 +5,7 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 
 type Mode =
   | "idle"
@@ -61,6 +62,8 @@ const lifecycleModes: Record<string, Mode> = {
   tool_finished: "acting",
   speaking: "speaking",
   autonomous: "autonomous_goal",
+  intelligence_collecting: "autonomous_goal",
+  world_model_updating: "thinking",
   waiting_confirmation: "waiting_confirmation",
   recovering: "service_issue",
   service_error: "service_issue",
@@ -73,7 +76,8 @@ const lifecycleModes: Record<string, Mode> = {
 const lifecycleEnergy: Record<string, number> = {
   created: 20, booting: 50, wake_detected: 68, listening: 72,
   transcribing: 65, thinking: 76, tool_started: 82, tool_finished: 58,
-  speaking: 88, autonomous: 70, waiting_confirmation: 54,
+  speaking: 88, autonomous: 70, intelligence_collecting: 74,
+  world_model_updating: 78, waiting_confirmation: 54,
   recovering: 72, service_error: 78, error: 88, idle: 42,
   stopping: 14, stopped: 0
 };
@@ -101,6 +105,15 @@ const runtimeLinkEl = runtimeLink;
 const runtimeLabelEl = runtimeLabel;
 const messageLabelEl = messageLabel;
 const previewParams = new URLSearchParams(window.location.search);
+type Quality = "low" | "balanced" | "high";
+const requestedQuality = previewParams.get("quality");
+const quality: Quality = requestedQuality === "low" || requestedQuality === "high"
+  ? requestedQuality
+  : "balanced";
+const renderPixelRatio = Math.min(
+  window.devicePixelRatio,
+  quality === "high" ? 1.5 : quality === "low" ? 0.85 : 1
+);
 
 const state = {
   mode: "idle" as Mode,
@@ -123,13 +136,14 @@ const renderer = new THREE.WebGLRenderer({
   alpha: false,
   powerPreference: "high-performance"
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setPixelRatio(renderPixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.62;
-renderer.shadowMap.enabled = true;
+renderer.shadowMap.enabled = quality !== "low";
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.info.autoReset = false;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color("#829397");
@@ -144,6 +158,7 @@ camera.position.set(0.58, 1.55, 8.45);
 camera.lookAt(0, 1.05, -0.25);
 
 const composer = new EffectComposer(renderer);
+composer.setPixelRatio(renderPixelRatio);
 composer.addPass(new RenderPass(scene, camera));
 const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.42, 0.64, 0.58);
 composer.addPass(bloomPass);
@@ -156,12 +171,15 @@ const bubbles = new THREE.Group();
 scene.add(room, entity, particles, bubbles);
 
 const clock = new THREE.Clock();
+let sampledFrames = 0;
+let sampledAt = performance.now();
+let sampledFps = 0;
 const tmpVector = new THREE.Vector3();
 const livingGreen = new THREE.Color("#91ffd0");
 const softRoomWhite = new THREE.Color("#d9e9e7");
-const floorTexture = createPanelTexture("#dde8e8", "#ffffff", 1024, 1024, 12, 0.18);
-const wallTexture = createPanelTexture("#c9dde3", "#eaffff", 1024, 1024, 8, 0.11);
-const consoleTexture = createPanelTexture("#e8f0f0", "#ffffff", 1024, 512, 8, 0.16);
+const floorTexture = createPanelTexture("#dde8e8", "#ffffff", 512, 512, 12, 0.18);
+const wallTexture = createPanelTexture("#c9dde3", "#eaffff", 512, 512, 8, 0.11);
+const consoleTexture = createPanelTexture("#e8f0f0", "#ffffff", 512, 256, 8, 0.16);
 
 const orbMaterial = new THREE.MeshPhysicalMaterial({
   color: "#dffbff",
@@ -169,7 +187,7 @@ const orbMaterial = new THREE.MeshPhysicalMaterial({
   emissiveIntensity: 0.06,
   roughness: 0.2,
   metalness: 0.04,
-  transmission: 0.1,
+  transmission: 0,
   thickness: 1.5,
   ior: 1.42,
   transparent: false,
@@ -185,11 +203,12 @@ const stemMaterial = new THREE.MeshPhysicalMaterial({
   color: "#c8f8ff",
   roughness: 0.16,
   metalness: 0,
-  transmission: 0.45,
+  transmission: 0,
   thickness: 1.4,
   ior: 1.37,
   transparent: true,
   opacity: 0.38,
+  depthWrite: false,
   clearcoat: 0.9,
   clearcoatRoughness: 0.1,
   envMapIntensity: 1.5
@@ -199,9 +218,10 @@ const panelMaterial = new THREE.MeshPhysicalMaterial({
   color: "#bdeeff",
   roughness: 0.22,
   metalness: 0,
-  transmission: 0.28,
+  transmission: 0,
   transparent: true,
   opacity: 0.22,
+  depthWrite: false,
   side: THREE.DoubleSide,
   clearcoat: 0.7,
   clearcoatRoughness: 0.18
@@ -217,12 +237,13 @@ const roomMaterial = new THREE.MeshStandardMaterial({
 });
 
 const darkGlassMaterial = new THREE.MeshPhysicalMaterial({
-  color: "#aebabe",
-  roughness: 0.18,
-  metalness: 0.14,
-  transmission: 0.16,
+  color: "#c9dadd",
+  roughness: 0.24,
+  metalness: 0.08,
+  transmission: 0,
   transparent: true,
-  opacity: 0.66,
+  opacity: 0.2,
+  depthWrite: false,
   clearcoat: 0.85,
   clearcoatRoughness: 0.14,
   map: wallTexture,
@@ -240,9 +261,10 @@ const glossyWhiteMaterial = new THREE.MeshPhysicalMaterial({
   color: "#eef5f6",
   roughness: 0.16,
   metalness: 0.08,
-  transmission: 0.06,
+  transmission: 0,
   transparent: true,
-  opacity: 0.86,
+  opacity: 0.84,
+  depthWrite: false,
   clearcoat: 1,
   clearcoatRoughness: 0.08,
   envMapIntensity: 2.4
@@ -252,11 +274,12 @@ const aquaGlassMaterial = new THREE.MeshPhysicalMaterial({
   color: "#7fe8ff",
   roughness: 0.04,
   metalness: 0,
-  transmission: 0.58,
+  transmission: 0,
   thickness: 1.2,
   ior: 1.34,
   transparent: true,
   opacity: 0.34,
+  depthWrite: false,
   clearcoat: 1,
   clearcoatRoughness: 0.04,
   attenuationColor: "#56dfff",
@@ -282,7 +305,7 @@ const haloMaterial = new THREE.MeshBasicMaterial({
   blending: THREE.AdditiveBlending
 });
 
-const orb = new THREE.Mesh(new THREE.SphereGeometry(1.45, 96, 64), orbMaterial);
+const orb = new THREE.Mesh(new THREE.SphereGeometry(1.45, 64, 40), orbMaterial);
 orb.position.set(0, 1.7, 0);
 orb.castShadow = true;
 orb.receiveShadow = false;
@@ -302,7 +325,7 @@ core.position.copy(orb.position);
 entity.add(core);
 
 const innerShell = new THREE.Mesh(
-  new THREE.SphereGeometry(0.94, 64, 32),
+  new THREE.SphereGeometry(0.94, 48, 24),
   new THREE.MeshBasicMaterial({
     color: "#68f2ff",
     transparent: true,
@@ -318,25 +341,25 @@ entity.add(innerShell);
 const stem = new THREE.Mesh(new THREE.CapsuleGeometry(0.42, 1.08, 18, 44), stemMaterial);
 stem.position.set(0, 0.54, 0);
 stem.scale.set(1.0, 0.96, 0.72);
-stem.castShadow = true;
+stem.castShadow = false;
 stem.receiveShadow = true;
 entity.add(stem);
 
 const base = new THREE.Mesh(new THREE.CylinderGeometry(1.46, 1.9, 0.18, 96), stemMaterial);
 base.position.set(0, -0.1, 0);
 base.scale.set(1.0, 1.0, 0.45);
-base.castShadow = true;
+base.castShadow = false;
 base.receiveShadow = true;
 entity.add(base);
 
-const bodyHalo = new THREE.Mesh(new THREE.SphereGeometry(1.8, 64, 32), haloMaterial);
+const bodyHalo = new THREE.Mesh(new THREE.SphereGeometry(1.8, 48, 24), haloMaterial);
 bodyHalo.position.copy(orb.position);
 bodyHalo.scale.set(1, 0.96, 1);
 bodyHalo.renderOrder = 8;
 entity.add(bodyHalo);
 
 const colorShell = new THREE.Mesh(
-  new THREE.SphereGeometry(1.462, 96, 64),
+  new THREE.SphereGeometry(1.462, 64, 40),
   new THREE.ShaderMaterial({
     uniforms: {
       tintColor: { value: new THREE.Color("#63f6ff") },
@@ -374,7 +397,10 @@ const colorShell = new THREE.Mesh(
     `,
     transparent: true,
     blending: THREE.NormalBlending,
-    depthTest: true,
+    // The tint shell sits just outside the physical orb. Depth-testing it
+    // against that orb clipped grazing-angle pixels into flat side edges.
+    // Render this orb-local front overlay whole after the physical body.
+    depthTest: false,
     depthWrite: false,
     toneMapped: false
   })
@@ -427,6 +453,7 @@ createBubbleField();
 
 const lights = createLighting();
 createControlRoom();
+optimizeStaticRoom();
 
 const requestedMode = previewParams.get("mode") as Mode | null;
 const initialMode = hasPalette(requestedMode)
@@ -523,7 +550,10 @@ function createLighting() {
   key.position.set(-3.0, 5.4, 4.6);
   key.target.position.set(0, 1.1, -0.4);
   key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.mapSize.set(
+    quality === "high" ? 1536 : 1024,
+    quality === "high" ? 1536 : 1024
+  );
   key.shadow.camera.near = 0.5;
   key.shadow.camera.far = 24;
   scene.add(key);
@@ -532,13 +562,13 @@ function createLighting() {
   const rim = new THREE.SpotLight("#dffbff", 3.8, 13, Math.PI * 0.24, 0.65, 1.28);
   rim.position.set(4.2, 3.6, -2.4);
   rim.target.position.set(0, 1.6, 0);
-  rim.castShadow = true;
+  rim.castShadow = false;
   scene.add(rim);
   scene.add(rim.target);
 
   const coreLight = new THREE.PointLight("#aefcff", 2.2, 6.4, 1.5);
   coreLight.position.copy(core.position);
-  coreLight.castShadow = true;
+  coreLight.castShadow = false;
   scene.add(coreLight);
 
   const roomPulse = new THREE.PointLight("#8ff8ff", 0.7, 12, 1.6);
@@ -580,9 +610,10 @@ function createControlRoom() {
       color: "#bdf7ff",
       roughness: 0.08,
       metalness: 0,
-      transmission: 0.28,
+      transmission: 0,
       transparent: true,
       opacity: 0.42,
+      depthWrite: false,
       clearcoat: 1,
       clearcoatRoughness: 0.04,
       emissive: "#55e8ff",
@@ -596,7 +627,7 @@ function createControlRoom() {
   const backWall = new THREE.Mesh(new THREE.BoxGeometry(10.2, 5.8, 0.38), darkGlassMaterial);
   backWall.position.set(0, 2.28, -4.68);
   backWall.receiveShadow = true;
-  backWall.castShadow = true;
+  backWall.castShadow = false;
   room.add(backWall);
 
   const leftWall = makeWall(-1);
@@ -606,7 +637,7 @@ function createControlRoom() {
   const ceiling = new THREE.Mesh(new THREE.BoxGeometry(12.6, 0.28, 10.8), darkGlassMaterial);
   ceiling.position.set(0, 5.08, -1.55);
   ceiling.receiveShadow = true;
-  ceiling.castShadow = true;
+  ceiling.castShadow = false;
   room.add(ceiling);
 
   createArchitecture();
@@ -620,12 +651,90 @@ function createControlRoom() {
   createReferenceRoomFeatures();
 }
 
+function optimizeStaticRoom() {
+  room.updateMatrixWorld(true);
+  const buckets = new Map<string, {
+    material: THREE.Material;
+    geometries: THREE.BufferGeometry[];
+    receiveShadow: boolean;
+  }>();
+  const candidates: THREE.Mesh[] = [];
+
+  room.traverse((object) => {
+    if (!(object instanceof THREE.Mesh) || Array.isArray(object.material)) return;
+    let parent: THREE.Object3D | null = object.parent;
+    while (parent && parent !== room) {
+      if (typeof parent.userData.spin === "number") return;
+      parent = parent.parent;
+    }
+    const geometry = object.geometry.index
+      ? object.geometry.toNonIndexed()
+      : object.geometry.clone();
+    geometry.applyMatrix4(object.matrixWorld);
+    const attributes = Object.keys(geometry.attributes).sort().join(",");
+    const key = `${materialBatchKey(object.material)}|${attributes}`;
+    let bucket = buckets.get(key);
+    if (!bucket) {
+      bucket = {
+        material: object.material,
+        geometries: [],
+        receiveShadow: false
+      };
+    }
+    bucket.geometries.push(geometry);
+    bucket.receiveShadow ||= object.receiveShadow;
+    buckets.set(key, bucket);
+    candidates.push(object);
+  });
+
+  candidates.forEach((mesh) => mesh.removeFromParent());
+  buckets.forEach((bucket) => {
+    const geometry = bucket.geometries.length === 1
+      ? bucket.geometries[0]
+      : mergeGeometries(bucket.geometries, false);
+    if (!geometry) return;
+    geometry.computeBoundingSphere();
+    const mesh = new THREE.Mesh(geometry, bucket.material);
+    mesh.castShadow = false;
+    mesh.receiveShadow = bucket.receiveShadow;
+    room.add(mesh);
+  });
+}
+
+function materialBatchKey(material: THREE.Material) {
+  const candidate = material as THREE.Material & {
+    color?: THREE.Color;
+    emissive?: THREE.Color;
+    emissiveIntensity?: number;
+    map?: THREE.Texture | null;
+    roughness?: number;
+    metalness?: number;
+    clearcoat?: number;
+  };
+  return [
+    material.type,
+    candidate.color?.getHexString() ?? "",
+    candidate.emissive?.getHexString() ?? "",
+    candidate.emissiveIntensity ?? "",
+    candidate.map?.uuid ?? "",
+    candidate.roughness ?? "",
+    candidate.metalness ?? "",
+    candidate.clearcoat ?? "",
+    material.transparent,
+    material.opacity,
+    material.depthWrite,
+    material.depthTest,
+    material.side,
+    material.blending
+  ].join("|");
+}
+
 function makeWall(side: -1 | 1) {
   const wall = new THREE.Mesh(new THREE.BoxGeometry(0.34, 5.8, 8.8), darkGlassMaterial);
   wall.position.set(side * 5.12, 2.08, -1.1);
   wall.rotation.y = side * -Math.PI * 0.34;
   wall.receiveShadow = true;
-  wall.castShadow = true;
+  wall.castShadow = false;
   return wall;
 }
 
@@ -660,9 +769,10 @@ function createArchitecture() {
     color: "#82d6e5",
     roughness: 0.18,
     metalness: 0.05,
-    transmission: 0.18,
+    transmission: 0,
     transparent: true,
-    opacity: 0.52,
+    opacity: 0.46,
+    depthWrite: false,
     clearcoat: 1,
     clearcoatRoughness: 0.08,
     map: wallTexture
@@ -709,9 +819,10 @@ function createMonitorBanks() {
   const monitorMaterial = new THREE.MeshPhysicalMaterial({
     color: "#72cddd",
     roughness: 0.18,
-    transmission: 0.08,
+    transmission: 0,
     transparent: true,
-    opacity: 0.68,
+    opacity: 0.66,
+    depthWrite: false,
     side: THREE.DoubleSide,
     clearcoat: 0.8,
     map: consoleTexture,
@@ -753,9 +864,10 @@ function createConsoleDeck() {
     color: "#dce8e8",
     roughness: 0.2,
     metalness: 0.12,
-    transmission: 0.08,
+    transmission: 0,
     transparent: true,
-    opacity: 0.72,
+    opacity: 0.68,
+    depthWrite: false,
     clearcoat: 0.9,
     clearcoatRoughness: 0.16,
     map: consoleTexture
@@ -844,9 +956,10 @@ function createSkeuomorphicGoodies() {
           color: gemColors[(i + (side === 1 ? 2 : 0)) % gemColors.length],
           roughness: 0.05,
           metalness: 0,
-          transmission: 0.28,
+          transmission: 0,
           transparent: true,
           opacity: 0.88,
+          depthWrite: false,
           clearcoat: 1,
           clearcoatRoughness: 0.03,
           emissive: gemColors[(i + (side === 1 ? 2 : 0)) % gemColors.length],
@@ -854,7 +967,7 @@ function createSkeuomorphicGoodies() {
         })
       );
       gem.position.set(side * (2.28 + i * 0.13), 0.34, 2.2 + Math.sin(i) * 0.18);
-      gem.castShadow = true;
+      gem.castShadow = false;
       room.add(gem);
     }
 
@@ -896,10 +1009,11 @@ function createBubbleWallpaper() {
   const bubbleRimMaterial = new THREE.MeshPhysicalMaterial({
     color: "#eaffff",
     roughness: 0.04,
-    transmission: 0.55,
+    transmission: 0,
     thickness: 0.18,
     transparent: true,
     opacity: 0.48,
+    depthWrite: false,
     clearcoat: 1,
     clearcoatRoughness: 0.03,
     attenuationColor: "#72ddff",
@@ -927,7 +1041,7 @@ function createBubbleWallpaper() {
     sphere.position.set(x, y, z);
     sphere.scale.z = 0.22;
     sphere.userData.baseOpacity = 0.38 + (index % 3) * 0.035;
-    sphere.castShadow = true;
+    sphere.castShadow = false;
     sphere.receiveShadow = true;
     room.add(sphere);
 
@@ -957,7 +1071,7 @@ function createAquariumColumns() {
   tankPositions.forEach(([x, y, z, radius, height], index) => {
     const tank = new THREE.Mesh(new THREE.CylinderGeometry(radius, radius, height, 64, 1, true), aquaGlassMaterial.clone());
     tank.position.set(x, y, z);
-    tank.castShadow = true;
+    tank.castShadow = false;
     tank.receiveShadow = true;
     room.add(tank);
 
@@ -1013,9 +1127,10 @@ function createRoundedShelves() {
         new THREE.MeshPhysicalMaterial({
           color: ["#67f5ff", "#d9ff61", "#79ffb5", "#ffac72", "#ffffff"][(i + index) % 5],
           roughness: 0.08,
-          transmission: 0.28,
+          transmission: 0,
           transparent: true,
           opacity: 0.82,
+          depthWrite: false,
           clearcoat: 1,
           emissive: ["#00cfff", "#aaff00", "#00ff8a", "#ff7a2f", "#ffffff"][(i + index) % 5],
           emissiveIntensity: 0.08
@@ -1100,18 +1215,19 @@ function createBubbleField() {
     color: "#f9ffff",
     roughness: 0.02,
     metalness: 0,
-    transmission: 0.72,
+    transmission: 0,
     thickness: 0.35,
     ior: 1.34,
     transparent: true,
     opacity: 0.34,
+    depthWrite: false,
     clearcoat: 1,
     clearcoatRoughness: 0.02,
     envMapIntensity: 2.8
   });
 
   for (let i = 0; i < 44; i += 1) {
-    const bubble = new THREE.Mesh(new THREE.SphereGeometry(0.035 + Math.random() * 0.075, 24, 16), bubbleMaterial.clone());
+    const bubble = new THREE.Mesh(new THREE.SphereGeometry(0.035 + Math.random() * 0.075, 16, 10), bubbleMaterial.clone());
     const side = i % 3 === 0 ? -1 : i % 3 === 1 ? 1 : 0;
     bubble.position.set(
       side * (1.8 + Math.random() * 2.7) + (Math.random() - 0.5) * 0.8,
@@ -1122,7 +1238,7 @@ function createBubbleField() {
     bubble.userData.speed = 0.08 + Math.random() * 0.18;
     bubble.userData.phase = Math.random() * Math.PI * 2;
     bubble.userData.range = 4.6 + Math.random() * 1.2;
-    bubble.castShadow = true;
+    bubble.castShadow = false;
     bubbles.add(bubble);
   }
 }
@@ -1297,8 +1413,8 @@ function createVisceralNetwork() {
 
 function createParticleField() {
   const geometry = new THREE.BufferGeometry();
-  const positions = new Float32Array(360 * 3);
-  for (let i = 0; i < 360; i += 1) {
+  const positions = new Float32Array(240 * 3);
+  for (let i = 0; i < 240; i += 1) {
     positions[i * 3] = (Math.random() - 0.5) * 9.4;
     positions[i * 3 + 1] = Math.random() * 4.8;
     positions[i * 3 + 2] = (Math.random() - 0.5) * 7.2;
@@ -1381,9 +1497,22 @@ function connectRuntime() {
   };
 }
 
-(window as unknown as { EntityVisual: object }).EntityVisual = { setMode, applyLifecycleEvent };
+(window as unknown as { EntityVisual: object }).EntityVisual = {
+  setMode,
+  applyLifecycleEvent,
+  getRenderStats: () => ({
+    quality,
+    pixelRatio: renderer.getPixelRatio(),
+    fps: sampledFps,
+    calls: renderer.info.render.calls,
+    triangles: renderer.info.render.triangles,
+    points: renderer.info.render.points,
+    lines: renderer.info.render.lines
+  })
+};
 
 function animate() {
+  renderer.info.reset();
   const delta = clock.getDelta();
   const elapsed = clock.elapsedTime;
   state.energy = THREE.MathUtils.lerp(state.energy, state.targetEnergy, 1 - Math.exp(-delta * 3.2));
@@ -1587,6 +1716,18 @@ function animate() {
 
   energyLabelEl.textContent = `${Math.round(state.targetEnergy * 100)}%`;
   composer.render();
+  sampledFrames += 1;
+  const sampleNow = performance.now();
+  const sampleDuration = sampleNow - sampledAt;
+  if (sampleDuration >= 1000) {
+    sampledFps = Math.round(sampledFrames * 1000 / sampleDuration);
+    sampledFrames = 0;
+    sampledAt = sampleNow;
+    document.documentElement.dataset.renderFps = String(sampledFps);
+    document.documentElement.dataset.renderQuality = quality;
+    document.documentElement.dataset.renderCalls = String(renderer.info.render.calls);
+    document.documentElement.dataset.renderTriangles = String(renderer.info.render.triangles);
+  }
   requestAnimationFrame(animate);
 }
 

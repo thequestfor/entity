@@ -67,6 +67,7 @@ REMINDER_PLANNING_PATTERNS = [
 class ModelRouter:
     def __init__(self, providers=None, unreal_probe=None):
         self._unreal_probe = unreal_probe
+        self.last_provider_name = None
 
         if providers is not None:
             self.providers = providers
@@ -113,11 +114,13 @@ class ModelRouter:
 
         for provider in self._providers_for(user_input, on_escalation, routing):
             try:
-                return provider.generate(
+                response = provider.generate(
                     prompt,
                     temperature=temperature,
                     response_format=response_format
                 )
+                self.last_provider_name = provider.name
+                return response
             except ModelUnavailable as exc:
                 errors.append(f"{provider.name}: {exc}")
                 continue
@@ -149,6 +152,7 @@ class ModelRouter:
                     temperature=temperature
                 ):
                     yielded = True
+                    self.last_provider_name = provider.name
                     yield token
 
                 return
@@ -252,6 +256,16 @@ class ModelRouter:
                 preferred=["local_fast", "local_thinking", "cloud_openai"],
                 on_escalation=on_escalation,
                 reason="The fast local model is unavailable for learning."
+            )
+
+        if routing == "world_understanding":
+            return self._available_sequence(
+                preferred=["local_thinking", "cloud_openai", "local_fast"],
+                on_escalation=on_escalation,
+                reason=(
+                    "Cross-source worldview synthesis requires the reasoning "
+                    "model."
+                )
             )
 
         if routing == "research":

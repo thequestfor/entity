@@ -24,5 +24,13 @@ agent/core.py
 agent/memory.json
 agent/entity_memory.db
 agent/entity_memory.db-*
+agent/world_intelligence.db
+agent/world_intelligence.db-*
 agent/google_credentials.json
 agent/google_token.json
+agent/google_gmail_credentials.json
+agent/google_gmail_token.json
+agent/outlook_mail_token_cache.json
+agent/private/
+*.session
+*.session-journal

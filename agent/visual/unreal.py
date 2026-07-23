@@ -69,6 +69,18 @@ STATE_PROFILES = {
         "BreathExpansion": 0.9,
         "ShellColor": (1.0, 0.78, 0.04)
     },
+    "intelligence_collecting": {
+        "ShellStrength": 32.0,
+        "BreathSpeed": 0.48,
+        "BreathExpansion": 0.95,
+        "ShellColor": (1.0, 0.72, 0.03)
+    },
+    "world_model_updating": {
+        "ShellStrength": 30.0,
+        "BreathSpeed": 0.6,
+        "BreathExpansion": 1.08,
+        "ShellColor": (0.68, 0.06, 0.95)
+    },
     "waiting_confirmation": {
         "ShellStrength": 18.0,
         "BreathSpeed": 0.22,

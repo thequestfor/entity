@@ -4,6 +4,7 @@ google-auth-httplib2==0.4.0
 google-auth-oauthlib==1.4.0
 kokoro==0.9.4
 langgraph==1.2.9
+msal==1.37.0
 numpy==2.5.1
 onnxruntime==1.27.0
 openai==2.46.0
@@ -12,4 +13,5 @@ python-dotenv==1.2.2
 silero-vad==6.2.1
 sounddevice==0.5.5
 soundfile==0.14.0
+Telethon==1.44.0
 torch==2.13.0

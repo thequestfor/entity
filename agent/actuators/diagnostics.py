@@ -29,6 +29,7 @@ class DiagnosticsActuator:
         lines.extend(self._weather_status())
         lines.extend(self._research_status())
         lines.extend(self._research_memory_status(runtime))
+        lines.extend(self._intelligence_status(runtime))
         lines.extend(self._startup_health_status(runtime))
         lines.extend(self._presence_status(runtime))
         lines.extend(self._planner_status(runtime))
@@ -343,6 +344,19 @@ class DiagnosticsActuator:
                 f"Memory database unavailable: {exc}."
             ]
 
+    def _intelligence_status(self, runtime):
+        if runtime is None or not hasattr(runtime, "intelligence_service"):
+            return [
+                "World intelligence service status unavailable."
+            ]
+
+        try:
+            return [runtime.intelligence_service.setup_status()]
+        except Exception as exc:
+            return [
+                f"World intelligence service status unavailable: {exc}."
+            ]
+
     def _importance_status(self, runtime):
         if runtime is None or not hasattr(runtime, "importance_policy"):
             return [
@@ -401,6 +415,7 @@ class DiagnosticsActuator:
             "TTS": "kokoro",
             "Google Calendar API": "googleapiclient",
             "Google OAuth": "google_auth_oauthlib",
+            "Microsoft OAuth": "msal",
             "OpenAI client": "openai"
         }
         missing = [

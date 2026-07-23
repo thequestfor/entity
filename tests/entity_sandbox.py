@@ -47,13 +47,15 @@ class SandboxScheduler:
         due_at,
         message,
         priority=7,
-        task_id=None
+        task_id=None,
+        task_kind="reminder"
     ):
         reminder = {
             "due_at": due_at,
             "message": message,
             "priority": priority,
-            "task_id": task_id
+            "task_id": task_id,
+            "task_kind": task_kind
         }
         self.reminders.append(reminder)
         return reminder

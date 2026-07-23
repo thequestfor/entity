@@ -3,6 +3,9 @@ import os
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
+
+from agent.location import LocationResolver
 
 
 @dataclass
@@ -12,9 +15,16 @@ class WeatherReport:
     apparent_temperature_f: float | None = None
     precipitation_probability: int | None = None
     wind_speed_mph: float | None = None
+    wind_gust_mph: float | None = None
+    relative_humidity: int | None = None
     condition: str = ""
     high_f: float | None = None
     low_f: float | None = None
+    apparent_high_f: float | None = None
+    apparent_low_f: float | None = None
+    uv_index: float | None = None
+    precipitation_sum_in: float | None = None
+    precipitation_window: str = ""
 
     def format_response(self, question=""):
         parts = [
@@ -45,6 +55,15 @@ class WeatherReport:
         if self.wind_speed_mph is not None:
             parts.append(f"Wind is about {round(self.wind_speed_mph)} mph.")
 
+        if self.wind_gust_mph is not None and self.wind_gust_mph >= 20:
+            parts.append(f"Gusts may reach {round(self.wind_gust_mph)} mph.")
+
+        if self.precipitation_window:
+            parts.append(self.precipitation_window + ".")
+
+        if self.uv_index is not None and self.uv_index >= 6:
+            parts.append(f"Maximum UV index is {round(self.uv_index)}.")
+
         advice = self._advice(question)
 
         if advice:
@@ -67,20 +86,50 @@ class WeatherReport:
         if temp is None:
             temp = self.temperature_f
 
-        if temp is not None:
+        clothing_question = any(
+            word in normalized
+            for word in ("wear", "dress", "clothes", "clothing", "outfit", "jacket")
+        )
+
+        coolest = self.apparent_low_f
+        if coolest is None:
+            coolest = self.low_f if self.low_f is not None else temp
+        warmest = self.apparent_high_f
+        if warmest is None:
+            warmest = self.high_f if self.high_f is not None else temp
+
+        if clothing_question and coolest is not None:
+            if coolest <= 32:
+                advice.append("Wear a winter coat and warm layers.")
+            elif coolest <= 45:
+                advice.append("Wear a coat or a warm layered outfit.")
+            elif coolest <= 60:
+                advice.append("Take a light jacket or removable layer.")
+            elif warmest is not None and warmest >= 85:
+                advice.append("Wear light, breathable clothing.")
+            elif warmest is not None and warmest - coolest >= 18:
+                advice.append("Dress in layers for the temperature swing.")
+            else:
+                advice.append("Comfortable lightweight clothing should work.")
+        elif temp is not None:
             if temp <= 45:
                 advice.append("Wear a warm layer.")
             elif temp <= 60 and any(
-                word in normalized
-                for word in ("jacket", "wear", "outside", "cold")
+                word in normalized for word in ("outside", "cold")
             ):
                 advice.append("A light jacket is reasonable.")
+
+        if self.uv_index is not None and self.uv_index >= 6:
+            advice.append("Use sunscreen if you will be outside.")
+
+        if self.wind_gust_mph is not None and self.wind_gust_mph >= 30:
+            advice.append("Choose a wind-resistant outer layer.")
 
         return " ".join(advice)
 
 
 class WeatherTool:
-    def __init__(self):
+    def __init__(self, location_resolver=None):
         self.enabled = self._env_bool("ENTITY_WEATHER_ENABLED", default=True)
         self.provider = os.getenv("ENTITY_WEATHER_PROVIDER", "open-meteo").lower()
         self.default_location = os.getenv("ENTITY_WEATHER_LOCATION", "")
@@ -98,6 +147,10 @@ class WeatherTool:
         self.geocode_url = os.getenv(
             "ENTITY_OPEN_METEO_GEOCODE_URL",
             "https://geocoding-api.open-meteo.com/v1/search"
+        )
+        self.location_resolver = location_resolver or LocationResolver()
+        self.use_detected_location = self._env_bool(
+            "ENTITY_WEATHER_USE_DETECTED_LOCATION", default=True
         )
 
     def available(self):
@@ -137,6 +190,11 @@ class WeatherTool:
         if location:
             return self._geocode(location)
 
+        if self.use_detected_location:
+            estimate = self.location_resolver.resolve()
+            if estimate is not None:
+                return estimate.latitude, estimate.longitude, estimate.label
+
         if self.latitude and self.longitude:
             label = self.default_location or "configured location"
             return float(self.latitude), float(self.longitude), label
@@ -158,7 +216,7 @@ class WeatherTool:
             results = data.get("results") or []
 
             if results:
-                item = results[0]
+                item = self._best_location(results, location)
                 label = self._format_location(item, fallback=location)
                 return float(item["latitude"]), float(item["longitude"]), label
 
@@ -186,7 +244,7 @@ class WeatherTool:
         params = urllib.parse.urlencode(
             {
                 "name": location,
-                "count": 1,
+                "count": 20,
                 "language": "en",
                 "format": "json"
             }
@@ -204,11 +262,15 @@ class WeatherTool:
                 "timezone": os.getenv("ENTITY_TIMEZONE", "America/New_York"),
                 "current": (
                     "temperature_2m,apparent_temperature,"
-                    "weather_code,wind_speed_10m"
+                    "relative_humidity_2m,weather_code,wind_speed_10m,"
+                    "wind_gusts_10m,precipitation"
                 ),
+                "hourly": "precipitation_probability",
                 "daily": (
                     "temperature_2m_max,temperature_2m_min,"
-                    "precipitation_probability_max,weather_code"
+                    "apparent_temperature_max,apparent_temperature_min,"
+                    "precipitation_probability_max,precipitation_sum,"
+                    "weather_code,uv_index_max,wind_gusts_10m_max"
                 ),
                 "forecast_days": 1
             }
@@ -234,9 +296,31 @@ class WeatherTool:
                 daily.get("precipitation_probability_max")
             ),
             wind_speed_mph=self._number(current.get("wind_speed_10m")),
+            wind_gust_mph=max(
+                filter(
+                    lambda value: value is not None,
+                    [
+                        self._number(current.get("wind_gusts_10m")),
+                        self._number_first(daily.get("wind_gusts_10m_max"))
+                    ]
+                ),
+                default=None
+            ),
+            relative_humidity=self._integer(current.get("relative_humidity_2m")),
             condition=self._condition(current_code),
             high_f=self._number_first(daily.get("temperature_2m_max")),
-            low_f=self._number_first(daily.get("temperature_2m_min"))
+            low_f=self._number_first(daily.get("temperature_2m_min")),
+            apparent_high_f=self._number_first(
+                daily.get("apparent_temperature_max")
+            ),
+            apparent_low_f=self._number_first(
+                daily.get("apparent_temperature_min")
+            ),
+            uv_index=self._number_first(daily.get("uv_index_max")),
+            precipitation_sum_in=self._number_first(
+                daily.get("precipitation_sum")
+            ),
+            precipitation_window=self._precipitation_window(payload)
         )
 
     def _get_json(self, url):
@@ -258,6 +342,55 @@ class WeatherTool:
         ]
         label = ", ".join(part for part in parts if part)
         return label or fallback
+
+    def _best_location(self, results, requested):
+        requested_parts = [
+            part.strip().lower()
+            for part in requested.split(",")
+            if part.strip()
+        ]
+        requested_name = requested_parts[0] if requested_parts else requested.lower()
+        qualifiers = requested_parts[1:]
+
+        def score(item):
+            name = str(item.get("name") or "").lower()
+            place = " ".join(str(item.get(key) or "").lower() for key in (
+                "admin1", "admin2", "admin3", "country", "country_code"
+            ))
+            exact = 1000 if name == requested_name else 0
+            qualifier_score = sum(
+                500 for qualifier in qualifiers if qualifier in place
+            )
+            population = min(100, int(item.get("population") or 0) / 1000)
+            return exact + qualifier_score + population
+
+        return max(results, key=score)
+
+    def _precipitation_window(self, payload):
+        current_time = str((payload.get("current") or {}).get("time") or "")
+        hourly = payload.get("hourly") or {}
+        times = hourly.get("time") or []
+        probabilities = hourly.get("precipitation_probability") or []
+        likely = []
+        future_hours = 0
+        for timestamp, probability in zip(times, probabilities):
+            if current_time and str(timestamp) < current_time:
+                continue
+            if future_hours >= 12:
+                break
+            future_hours += 1
+            try:
+                if float(probability) >= 40:
+                    likely.append(str(timestamp))
+            except (TypeError, ValueError):
+                continue
+        if not likely:
+            return ""
+        first = datetime.fromisoformat(likely[0]).strftime("%-I %p")
+        last = datetime.fromisoformat(likely[-1]).strftime("%-I %p")
+        if first == last:
+            return f"Rain is most likely around {first}"
+        return f"Rain is most likely between {first} and {last}"
 
     def _condition(self, code):
         try:
@@ -310,6 +443,10 @@ class WeatherTool:
             return None
 
         return int(round(number))
+
+    def _integer(self, value):
+        number = self._number(value)
+        return int(round(number)) if number is not None else None
 
     def _number(self, value):
         try:

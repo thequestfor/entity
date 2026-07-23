@@ -25,10 +25,12 @@ from agent.memory.store import MemoryStore
 from agent.models.base import ModelUnavailable
 from agent.models.router import ModelRouter
 from agent.observers.audio import AudioObserver
+from agent.observers.autonomy import AutonomyObserver
 from agent.observers.calendar import CalendarObserver
 from agent.observers.scheduler import SchedulerObserver
 from agent.planner import AgentPlan, PlanStep
 from agent.research import DuckDuckGoParser
+from agent.reminders import ReminderFallbackParser
 from agent.events import Action, Event
 from agent.actuators.speech import SpeechActuator
 from agent.runtime import EntityRuntime
@@ -475,7 +477,8 @@ class ResilienceTests(unittest.TestCase):
         expected_states = {
             "created", "booting", "wake_detected", "listening",
             "transcribing", "thinking", "tool_started", "tool_finished",
-            "speaking", "autonomous", "recovering", "service_error",
+            "speaking", "autonomous", "intelligence_collecting",
+            "world_model_updating", "recovering", "service_error",
             "error", "waiting_confirmation", "idle", "stopping", "stopped"
         }
 
@@ -662,6 +665,81 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual("done", runtime.handle_event(event))
         self.assertEqual(["autonomous", "idle"], states)
 
+    def test_intelligence_activity_owns_and_releases_an_idle_visual(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.lifecycle = Lifecycle()
+        runtime._intelligence_lifecycle_sequence = None
+        states = []
+        runtime.lifecycle.subscribe(lambda event: states.append(event["state"]))
+        runtime.lifecycle.emit("idle")
+
+        runtime._handle_intelligence_activity(
+            "intelligence_collecting", message="Gathering"
+        )
+        runtime._handle_intelligence_activity(
+            "world_model_updating", message="Comparing"
+        )
+        runtime._handle_intelligence_activity(
+            "intelligence_finished", message="Complete"
+        )
+
+        self.assertEqual(
+            [
+                "idle", "intelligence_collecting",
+                "world_model_updating", "idle"
+            ],
+            states
+        )
+
+    def test_foreground_state_preempts_background_intelligence_visual(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.lifecycle = Lifecycle()
+        runtime._intelligence_lifecycle_sequence = None
+        runtime.lifecycle.emit("idle")
+        runtime._handle_intelligence_activity("intelligence_collecting")
+        runtime.lifecycle.emit("speaking")
+
+        runtime._handle_intelligence_activity("world_model_updating")
+        runtime._handle_intelligence_activity("intelligence_finished")
+
+        self.assertEqual("speaking", runtime.lifecycle.snapshot()["state"])
+
+    def test_both_web_visuals_map_world_intelligence_states(self):
+        root = Path(__file__).resolve().parents[1]
+        for relative in (
+            "visual_mockup/app.js",
+            "visual_interface/src/main.ts"
+        ):
+            source = (root / relative).read_text(encoding="utf-8")
+            self.assertIn('intelligence_collecting: "autonomous_goal"', source)
+            self.assertIn('world_model_updating: "thinking"', source)
+
+    def test_3d_tint_shell_does_not_depth_clip_against_physical_orb(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "visual_interface/src/main.ts"
+        ).read_text(encoding="utf-8")
+        shell = source.split("const colorShell =", 1)[1].split(
+            "colorShell.position", 1
+        )[0]
+
+        self.assertIn("depthTest: false", shell)
+        self.assertIn("depthWrite: false", shell)
+
+    def test_3d_balanced_profile_avoids_transmission_artifacts(self):
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root / "visual_interface/src/main.ts"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('quality: Quality =', source)
+        self.assertIn('quality === "low" ? 0.85 : 1', source)
+        self.assertNotRegex(source, r"transmission:\s*0\.[0-9]*[1-9]")
+        self.assertIn("coreLight.castShadow = false", source)
+        self.assertIn("rim.castShadow = false", source)
+        self.assertIn("optimizeStaticRoom();", source)
+        self.assertIn("mergeGeometries", source)
+
     def test_startup_service_issues_emit_visual_error_state(self):
         class Health:
             def alert_message(self):
@@ -776,6 +854,24 @@ class ResilienceTests(unittest.TestCase):
                 self.assertEqual(1, len(scheduler.reminders))
             finally:
                 scheduler.stop()
+
+    def test_scheduler_restores_scheduled_briefing_kind(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = MemoryStore(Path(temp) / "memory.db")
+            store.add_task(
+                "Wake up",
+                "Wake up",
+                time.time() + 3600,
+                kind="scheduled_briefing"
+            )
+            scheduler = SchedulerObserver(store=store)
+
+            scheduler._load_pending_tasks()
+
+            self.assertEqual(
+                "scheduled_briefing",
+                scheduler.reminders[0].task_kind
+            )
 
     def test_scheduler_keeps_task_pending_until_runtime_acknowledges_it(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -967,6 +1063,132 @@ class ResilienceTests(unittest.TestCase):
             "deterministic_weather",
             runtime.task_store.decisions[0]["intent"]
         )
+
+    def test_outfit_question_uses_default_weather_location(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        location = runtime._weather_location("What should I wear today?")
+
+        self.assertEqual("", location)
+
+    def test_briefing_aliases_are_available_on_demand(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        self.assertTrue(runtime._is_briefing_command("Give me my briefing"))
+        self.assertTrue(runtime._is_briefing_command("Morning update"))
+        self.assertTrue(runtime._is_scheduled_briefing_command(
+            "Wake me at 6 AM tomorrow and deliver the daily briefing."
+        ))
+
+    def test_wake_fallback_parses_tomorrow_after_clock_time(self):
+        parser = ReminderFallbackParser()
+        now = datetime.fromisoformat("2026-07-22T21:00:00-04:00")
+
+        with patch.object(parser, "_now", return_value=now):
+            draft = parser.parse(
+                "Wake me at 6 AM tomorrow and deliver the daily briefing."
+            )
+
+        self.assertEqual("Wake up", draft.message)
+        self.assertEqual(9, draft.priority)
+        self.assertEqual(
+            "2026-07-23T06:00:00-04:00",
+            datetime.fromtimestamp(draft.due_at, now.tzinfo).isoformat()
+        )
+
+    def test_wake_fallback_accepts_spoken_a_m_punctuation(self):
+        parser = ReminderFallbackParser()
+        now = datetime.fromisoformat("2026-07-22T21:00:00-04:00")
+
+        with patch.object(parser, "_now", return_value=now):
+            draft = parser.parse("Wake me up at 6 a.m. tomorrow.")
+
+        self.assertEqual(
+            "2026-07-23T06:00:00-04:00",
+            datetime.fromtimestamp(draft.due_at, now.tzinfo).isoformat()
+        )
+
+    def test_missed_alarm_question_is_not_a_new_reminder(self):
+        from agent.reminders import ReminderIntentExtractor
+
+        extractor = ReminderIntentExtractor.__new__(ReminderIntentExtractor)
+
+        self.assertFalse(extractor.looks_like_reminder(
+            "Why did you not wake me at 6?"
+        ))
+        self.assertFalse(extractor.looks_like_reminder(
+            "Did you actually schedule a reminder?"
+        ))
+
+    def test_scheduled_briefing_is_built_when_reminder_fires(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+        runtime.today_briefing = types.SimpleNamespace(
+            build=lambda: "Fresh intelligence."
+        )
+        runtime.awareness = types.SimpleNamespace(snapshot=lambda: {})
+        runtime.importance_policy = types.SimpleNamespace(
+            evaluate=lambda *args, **kwargs: None
+        )
+        delivered = []
+        delivery_options = []
+        runtime._deliver_alert = lambda message, **kwargs: (
+            delivered.append(message),
+            delivery_options.append(kwargs),
+            message
+        )[-1]
+        event = Event(
+            source="scheduler",
+            type="reminder",
+            payload={
+                "message": "Wake up",
+                "task_id": "task",
+                "task_kind": "scheduled_briefing"
+            }
+        )
+
+        result = runtime.handle_reminder(event)
+
+        self.assertEqual("Wake up. Fresh intelligence.", result)
+        self.assertEqual([result], delivered)
+        self.assertTrue(delivery_options[0]["force_speak"])
+
+    def test_learning_and_location_queries_use_deterministic_paths(self):
+        runtime = EntityRuntime.__new__(EntityRuntime)
+
+        self.assertTrue(runtime._is_learning_digest_command(
+            "What have you learned about Iran?"
+        ))
+        self.assertTrue(runtime._is_learning_digest_command(
+            "Tell me things the Entity has learned"
+        ))
+        self.assertEqual(
+            "Iran", runtime._learning_digest_topic(
+                "What have you learned about Iran?"
+            )
+        )
+        self.assertTrue(runtime._is_location_query("Where am I?"))
+
+    def test_daily_briefing_schedule_selects_only_once_per_day(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = MemoryStore(Path(directory) / "briefing.db")
+            observer = AutonomyObserver.__new__(AutonomyObserver)
+            observer.store = store
+            observer.daily_briefing_enabled = True
+            now = datetime.now(observer._timezone())
+            observer.daily_briefing_hour = now.hour
+            observer.daily_briefing_minute = now.minute
+            observer.daily_briefing_grace_hours = 4
+
+            first = observer._scheduled_briefing_goal({})
+            store.set_state(
+                "daily_briefing_last_date", now.date().isoformat()
+            )
+            second = observer._scheduled_briefing_goal({})
+
+            self.assertEqual("prepare_today_briefing", first.name)
+            self.assertTrue(first.notify)
+            self.assertTrue(first.speak)
+            self.assertIsNone(second)
 
     def test_explicit_read_about_online_request_uses_research(self):
         runtime = EntityRuntime.__new__(EntityRuntime)

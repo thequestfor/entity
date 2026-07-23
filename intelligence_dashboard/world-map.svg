@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 180" preserveAspectRatio="none">
+  <!--
+    A deliberately quiet equirectangular basemap. Coordinates match the
+    longitude/latitude projection used for situation markers in app.js.
+  -->
+  <g fill="#123238" fill-opacity=".88" stroke="#2f6261" stroke-opacity=".72" stroke-width=".45">
+    <path d="M17 38l9-12 15-7 14 5 9-4 14 9 8 13-5 8-10 2-5 10-11 1-7 8-12-2-4 11-13 5-11-8 3-14-8-7 6-12z"/>
+    <path d="M68 17l10-9 17 2 8 12-5 16-13 2-10-8z"/>
+    <path d="M89 82l13 3 10 16 5 21-4 19-9 23-8 2-4-18-8-15 3-17-5-13z"/>
+    <path d="M154 42l7-9 11 3 7-6 10 7-2 10-11 4-7 8-11-2z"/>
+    <path d="M165 58l13 4 8 14 2 17 11 14-4 21-10 22-13-3-5-20-9-15 4-17-5-15z"/>
+    <path d="M187 38l15-13 23-2 11 7 16-4 22 8 15 15 19 4 12 12-7 13-16 2-12 10-18-1-10 10-15-3-13 9-17-5-12-13-10-5 4-15-7-9z"/>
+    <path d="M248 91l12 7 5 14-7 12-8-4-6-14z"/>
+    <path d="M271 105l13-4 14 8 14 4 8 13-9 13-21-1-12-10-9-8z"/>
+    <path d="M320 49l5-3 4 4-2 6-5 1zM332 65l5-2 4 5-3 5-5-2zM345 78l5-1 3 4-3 4-5-2z"/>
+    <path d="M8 163l22-5 26 4 24-6 31 7 35-5 25 6 28-5 28 5 27-5 24 6 28-5 29 5 22-2-8 10-34 4-42-3-35 5-37-5-33 5-34-6-30 4-27-7-28 4-23-7z"/>
+  </g>
+</svg>

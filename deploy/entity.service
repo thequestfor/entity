@@ -1,0 +1,18 @@
+[Unit]
+Description=Entity voice assistant
+Wants=network-online.target
+After=network-online.target pipewire.service pipewire-pulse.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/entity/entity
+ExecStart=/home/entity/entity/.venv/bin/python /home/entity/entity/main.py 3d
+Environment=PYTHONUNBUFFERED=1
+Environment=ENTITY_VISUAL_OPEN_BROWSER=false
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

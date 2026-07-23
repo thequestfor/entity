@@ -61,7 +61,15 @@ class OllamaProvider(ModelProvider):
         except (OSError, URLError, json.JSONDecodeError) as exc:
             raise ModelUnavailable(str(exc)) from exc
 
-        return payload.get("response", "")
+        response = payload.get("response", "")
+        if response or response_format != "json":
+            return response
+
+        # Some Ollama reasoning models place a structured answer in the
+        # `thinking` field when JSON mode is enabled. It is still the model's
+        # final structured output, so expose it to the JSON parser without
+        # leaking hidden reasoning into ordinary conversational responses.
+        return payload.get("thinking", "")
 
     def stream(self, prompt, temperature=0):
         if not self.available():

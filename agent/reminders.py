@@ -41,10 +41,23 @@ class ReminderIntentExtractor:
     def looks_like_reminder(self, command):
         normalized = command.lower()
 
+        if re.search(
+            r"\b(?:why|how come)\s+(?:did|didn't|did not|haven't|have not)\b",
+            normalized
+        ):
+            return False
+
+        if re.search(
+            r"\b(?:did you|have you|why didn't you|why did you not)\b",
+            normalized
+        ):
+            return False
+
         return (
             "remind me" in normalized
             or "reminder" in normalized
             or "don't let me forget" in normalized
+            or "wake me" in normalized
         )
 
     def _prompt(self, command, awareness_state):
@@ -124,7 +137,40 @@ class ReminderFallbackParser:
     def parse(self, command):
         return (
             self._parse_relative(command)
+            or self._parse_wake(command)
             or self._parse_absolute(command)
+        )
+
+    def _parse_wake(self, command):
+        match = re.search(
+            r"\bwake me\s+"
+            r"(?:up\s+)?"
+            r"(?:(today|tomorrow|tonight|next\s+\w+)\s+)?"
+            r"(?:at\s+)?"
+            r"(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?"
+            r"(?:\s+(today|tomorrow|tonight|next\s+\w+))?",
+            command,
+            re.IGNORECASE
+        )
+
+        if not match:
+            return None
+
+        day_phrase = match.group(1) or match.group(5)
+        due = self._date_for_phrase(day_phrase).replace(
+            hour=self._normalize_hour(int(match.group(2)), match.group(4)),
+            minute=int(match.group(3) or 0),
+            second=0,
+            microsecond=0
+        )
+
+        if due <= self._now():
+            due += timedelta(days=1)
+
+        return ReminderDraft(
+            due_at=due.timestamp(),
+            message="Wake up",
+            priority=9
         )
 
     def _parse_relative(self, command):
@@ -268,7 +314,7 @@ class ReminderFallbackParser:
 
     def _normalize_hour(self, hour, meridiem):
         if meridiem:
-            meridiem = meridiem.lower()
+            meridiem = meridiem.lower().replace(".", "")
 
             if meridiem == "pm" and hour != 12:
                 return hour + 12

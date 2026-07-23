@@ -13,9 +13,12 @@ ALLOWED_TOOLS = {
     "ask",
     "diagnostics",
     "set_presence",
+    "location",
     "set_voice",
     "arithmetic",
     "briefing",
+    "schedule_briefing",
+    "learned_knowledge",
     "weather",
     "notify",
     "research",
@@ -139,6 +142,7 @@ class AgentPlanner:
             "capabilities": capability_context or {},
             "behavior_rules": behavior_rules,
             "relevant_memories": context.get("relevant_memories", []),
+            "recent_observations": context.get("recent_observations", []),
             "recent_actions": recent_actions[-5:],
             "recent_responses": recent_responses[-5:],
             "recent_decisions": recent_decisions[-5:]
@@ -160,6 +164,10 @@ class AgentPlanner:
             "args.notify true when the user wants the result sent after "
             "completion, or create a calendar event when the user wants "
             "something scheduled.\n"
+            "- A briefing requested for a future time must use "
+            "schedule_briefing with args.time as an ISO datetime and optional "
+            "args.wake_text. Do not use briefing or create_reminder for that "
+            "future briefing; briefing would run immediately.\n"
             "- Use observers listed in capability context as available input "
             "channels and actuators listed there as available output channels.\n"
             "- Use answer only when no tool is needed.\n"
@@ -267,6 +275,41 @@ class AgentPlanner:
         message = self._planned_message(plan.steps) or "Reminder"
         additions = []
 
+        if self._is_scheduled_briefing_request(normalized):
+            scheduled_briefing = next(
+                (
+                    step for step in plan.steps
+                    if step.tool == "schedule_briefing"
+                ),
+                None
+            )
+
+            if scheduled_briefing is None:
+                reminder = next(
+                    (
+                        step for step in plan.steps
+                        if step.tool == "create_reminder"
+                    ),
+                    None
+                )
+                if reminder is not None:
+                    reminder.tool = "schedule_briefing"
+                    scheduled_briefing = reminder
+                else:
+                    scheduled_briefing = PlanStep(
+                        tool="schedule_briefing",
+                        args={"time": scheduled_time}
+                    )
+                    plan.steps.append(scheduled_briefing)
+
+            scheduled_briefing.args.setdefault("time", scheduled_time)
+            scheduled_briefing.args.setdefault("wake_text", "Wake up")
+            plan.steps = [
+                step for step in plan.steps
+                if step.tool != "briefing"
+            ]
+            tools = {step.tool for step in plan.steps}
+
         for step in plan.steps:
             if step.tool == "create_reminder":
                 step.args.setdefault("text", message)
@@ -288,6 +331,7 @@ class AgentPlanner:
                 "reminder", "remind me", "wake me"
             ))
             and "create_reminder" not in tools
+            and "schedule_briefing" not in tools
         ):
             additions.append(
                 PlanStep(
@@ -314,6 +358,18 @@ class AgentPlanner:
 
         plan.steps.extend(additions)
         return plan
+
+    def _is_scheduled_briefing_request(self, normalized):
+        briefing_phrases = (
+            "briefing", "morning update", "daily intelligence"
+        )
+        scheduling_phrases = (
+            "wake me", "tomorrow", "tonight", "later", "schedule"
+        )
+        return (
+            any(phrase in normalized for phrase in briefing_phrases)
+            and any(phrase in normalized for phrase in scheduling_phrases)
+        )
 
     def _planned_time(self, steps):
         for step in steps:

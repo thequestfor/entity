@@ -58,7 +58,12 @@ Current capabilities:
   TomTom or openrouteservice is configured
 - live traffic travel-time and delay estimates when TomTom is configured
 - cached geocoding for repeated route destinations
-- Today Briefing summaries using calendar, reminders, and departure advice
+- Today Briefing summaries using local weather, calendar, reminders, departure
+  advice, news, world intelligence, and labeled prediction-market signals
+- explainable retained-learning summaries drawn from durable memory and the
+  evidence-weighted public world model rather than improvised model claims
+- privacy-controlled location detection from locally recognized Wi-Fi profiles,
+  with coarse public-IP estimation available only when explicitly enabled
 - startup diagnostic alerts for configured services that are offline or
   missing API credentials
 - persistent presence and availability state for choosing whether to speak,
@@ -69,6 +74,12 @@ Current capabilities:
   source links
 - sourced research memory ingestion when Ben asks Entity to remember web
   research
+- optional continuous public-source intelligence with traceable situation,
+  claim, contradiction, confidence, and briefing history
+- delegated read-only Gmail and Outlook evidence ingestion when explicitly
+  authorized; Entity cannot send, modify, or delete mail through these connectors
+- cost-bounded read-only X public-signal ingestion for explicitly configured
+  accounts and recent-search queries; Entity cannot perform X account actions
 - behavior feedback learning from explicit correction or praise, such as
   asking before similar actions or changing notification timing
 - recent action and response context for learning behavior rules from
@@ -87,7 +98,7 @@ Future capabilities:
 - continuous live traffic monitoring beyond calendar departure checks
 - computer interaction
 - smart device control
-- presence and availability detection
+- richer roaming presence and availability detection
 - curiosity-driven questions when observing something unfamiliar
 - richer multi-step tool planning across future sensors and peripherals
 

@@ -13,6 +13,7 @@ class Reminder:
     message: str = field(compare=False)
     priority: int = field(default=7, compare=False)
     task_id: str | None = field(default=None, compare=False)
+    task_kind: str = field(default="reminder", compare=False)
     id: str = field(
         default_factory=lambda: str(uuid4()),
         compare=False
@@ -59,13 +60,15 @@ class SchedulerObserver:
         delay_seconds,
         message,
         priority=7,
-        task_id=None
+        task_id=None,
+        task_kind="reminder"
     ):
         return self.add_reminder_at(
             time.time() + delay_seconds,
             message,
             priority=priority,
-            task_id=task_id
+            task_id=task_id,
+            task_kind=task_kind
         )
 
     def add_reminder_at(
@@ -73,13 +76,15 @@ class SchedulerObserver:
         due_at,
         message,
         priority=7,
-        task_id=None
+        task_id=None,
+        task_kind="reminder"
     ):
         reminder = Reminder(
             due_at=due_at,
             message=message,
             priority=priority,
-            task_id=task_id
+            task_id=task_id,
+            task_kind=task_kind
         )
 
         with self.condition:
@@ -120,7 +125,9 @@ class SchedulerObserver:
                 payload={
                     "message": reminder.message,
                     "reminder_id": reminder.id,
-                    "task_id": reminder.task_id
+                    "task_id": reminder.task_id,
+                    "task_kind": reminder.task_kind,
+                    "due_at": reminder.due_at
                 },
                 priority=reminder.priority
             )
@@ -132,7 +139,8 @@ class SchedulerObserver:
                 task["due_at"],
                 task["message"],
                 priority=task["priority"],
-                task_id=task["id"]
+                task_id=task["id"],
+                task_kind=task["kind"]
             )
 
     def _default_store(self):

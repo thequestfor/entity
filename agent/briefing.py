@@ -3,8 +3,11 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from agent.calendar import GoogleCalendarClient
+from agent.intelligence.config import IntelligenceConfig
+from agent.intelligence.store import IntelligenceStore
 from agent.memory.store import MemoryStore
 from agent.routes import RoutePlanner
+from agent.weather import WeatherTool
 
 
 class TodayBriefing:
@@ -12,11 +15,21 @@ class TodayBriefing:
         self,
         calendar_client=None,
         route_planner=None,
-        store=None
+        store=None,
+        weather_tool=None,
+        intelligence_store=None
     ):
         self.calendar_client = calendar_client or GoogleCalendarClient()
         self.route_planner = route_planner or RoutePlanner()
         self.store = store or MemoryStore()
+        self.weather_tool = weather_tool or WeatherTool()
+        self.intelligence_store = intelligence_store
+        if self.intelligence_store is None:
+            config = IntelligenceConfig.from_env()
+            if config.enabled:
+                self.intelligence_store = IntelligenceStore(
+                    config.database_path
+                )
 
     def build(self):
         lines = [
@@ -24,6 +37,11 @@ class TodayBriefing:
         ]
         calendar_lines = self._calendar_lines()
         reminder_lines = self._reminder_lines()
+        weather_line = self._weather_line()
+        intelligence_lines = self._intelligence_lines()
+
+        if weather_line:
+            lines.append(weather_line)
 
         if calendar_lines:
             lines.extend(calendar_lines)
@@ -35,7 +53,101 @@ class TodayBriefing:
         else:
             lines.append("No pending reminders.")
 
+        lines.extend(intelligence_lines)
+
         return " ".join(lines)
+
+    def _weather_line(self):
+        if not self.weather_tool.available():
+            return ""
+        return self.weather_tool.lookup(
+            question="What should I wear today?"
+        )
+
+    def _intelligence_lines(self):
+        if self.intelligence_store is None:
+            return []
+        try:
+            briefing = self.intelligence_store.latest_briefing()
+        except Exception:
+            return ["World-intelligence briefing is temporarily unavailable."]
+        if not briefing:
+            return ["No world-intelligence briefing is available yet."]
+
+        content = briefing.get("content") or {}
+        lines = [
+            "World intelligence: "
+            + str(content.get("headline") or "No material updates summarized.")
+        ]
+        situations = content.get("situations") or []
+        situations = [
+            item for item in situations
+            if item.get("status") == "contested"
+            or int(item.get("source_count") or 0) >= 2
+        ]
+        titles = [
+            str(item.get("title") or "").strip()
+            for item in situations[:2]
+            if str(item.get("title") or "").strip()
+        ]
+        if titles:
+            lines.append("Leading updates: " + "; ".join(titles) + ".")
+        conclusions = [
+            str(item.get("worldview") or "").strip()
+            for item in situations[:3]
+            if str(item.get("worldview") or "").strip()
+        ]
+        if conclusions:
+            lines.append(
+                "World-model conclusions: " + " ".join(conclusions)
+            )
+
+        if hasattr(self.intelligence_store, "list_documents"):
+            news = self.intelligence_store.list_documents(
+                limit=3, category="traditional-news"
+            )
+            news_titles = [item["title"] for item in news if item.get("title")]
+            if news_titles:
+                lines.append(
+                    "News watch: " + "; ".join(news_titles) + "."
+                )
+            markets = self.intelligence_store.list_documents(
+                limit=50, category="prediction-market"
+            )
+            market_lines = []
+            seen_market_titles = set()
+            for item in markets:
+                title = str(item.get("title") or "").strip()
+                if (
+                    not title or not item.get("summary")
+                    or self._sports_market(item)
+                    or title.lower() in seen_market_titles
+                ):
+                    continue
+                seen_market_titles.add(title.lower())
+                market_lines.append(f"{title} — {item['summary']}")
+                if len(market_lines) >= 2:
+                    break
+            if market_lines:
+                lines.append(
+                    "Prediction-market signals: "
+                    + " ".join(market_lines)
+                )
+        return lines
+
+    def _sports_market(self, item):
+        metadata = item.get("metadata") or {}
+        text = " ".join((
+            str(item.get("title") or ""),
+            str(metadata.get("event_title") or "")
+        )).lower()
+        markers = (
+            " nba", "nfl", "mlb", "nhl", "wnba", "fifa", "uefa",
+            "champions league", "world cup", " vs. ", " vs ", "o/u ",
+            "spread:", "moneyline", "goals scored", "points scored",
+            "tennis", "ufc", "boxing", "lol:"
+        )
+        return any(marker in f" {text}" for marker in markers)
 
     def _opening(self):
         now = datetime.now(self._timezone())

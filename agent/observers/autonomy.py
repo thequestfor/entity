@@ -1,10 +1,12 @@
 import os
 import threading
 import time
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from agent.confirmations import ConfirmationStore
 from agent.events import Event
-from agent.goals import AutonomousGoalPolicy
+from agent.goals import AutonomousGoal, AutonomousGoalPolicy
 from agent.health import StartupHealthCheck
 from agent.memory.store import MemoryStore
 from agent.reflection import PeriodicReflection
@@ -47,6 +49,18 @@ class AutonomyObserver:
             default=3600,
             minimum=300
         )
+        self.daily_briefing_enabled = self._env_bool(
+            "ENTITY_DAILY_BRIEFING_ENABLED", default=True
+        )
+        self.daily_briefing_hour = min(23, self._env_int(
+            "ENTITY_DAILY_BRIEFING_HOUR", default=7, minimum=0
+        ))
+        self.daily_briefing_minute = min(59, self._env_int(
+            "ENTITY_DAILY_BRIEFING_MINUTE", default=30, minimum=0
+        ))
+        self.daily_briefing_grace_hours = self._env_int(
+            "ENTITY_DAILY_BRIEFING_GRACE_HOURS", default=4, minimum=1
+        )
 
     def start(self, event_bus):
         self.event_bus = event_bus
@@ -77,6 +91,13 @@ class AutonomyObserver:
             + self.goal_policy.setup_status()
             + " "
             + self.reflection.setup_status()
+            + (
+                " Daily briefing scheduled for "
+                f"{self.daily_briefing_hour:02d}:"
+                f"{self.daily_briefing_minute:02d}."
+                if self.daily_briefing_enabled else
+                " Daily briefing schedule disabled."
+            )
         )
 
     def _run(self):
@@ -93,17 +114,19 @@ class AutonomyObserver:
     def _poll(self):
         health_issues = self.health_check.issues()
         pending_confirmation = self.confirmation_store.current()
-        goal = self.goal_policy.choose(
-            health_issues=health_issues,
-            pending_confirmation=pending_confirmation,
-            presence_state=self.store.get_state("presence", default={}) or {},
-            pending_tasks=self.store.pending_tasks(),
-            recent_decisions=self.store.recent_planner_decisions(limit=5),
-            recent_goals=self.store.recent_autonomous_goals(limit=10),
-            reflection_due=self.reflection.due()
-        )
+        presence_state = self.store.get_state("presence", default={}) or {}
+        scheduled_briefing = self._scheduled_briefing_goal(presence_state)
+        goal = scheduled_briefing or self.goal_policy.choose(
+                health_issues=health_issues,
+                pending_confirmation=pending_confirmation,
+                presence_state=presence_state,
+                pending_tasks=self.store.pending_tasks(),
+                recent_decisions=self.store.recent_planner_decisions(limit=5),
+                recent_goals=self.store.recent_autonomous_goals(limit=10),
+                reflection_due=self.reflection.due()
+            )
 
-        self.store.add_autonomous_goal(
+        goal_id = self.store.add_autonomous_goal(
             name=goal.name,
             priority=goal.priority,
             message=goal.message,
@@ -126,8 +149,9 @@ class AutonomyObserver:
         if not self._should_publish(signature):
             return
 
-        self._set_last_signature(signature)
-        self._set_last_published_at(time.time())
+        if not scheduled_briefing:
+            self._set_last_signature(signature)
+            self._set_last_published_at(time.time())
 
         self.event_bus.publish(
             Event(
@@ -136,12 +160,48 @@ class AutonomyObserver:
                 payload={
                     "message": goal.message,
                     "goal": goal.to_dict(),
+                    "goal_id": goal_id,
                     "health_issues": health_issues,
                     "pending_confirmation": bool(pending_confirmation)
                 },
                 priority=goal.priority
             )
         )
+
+    def _scheduled_briefing_goal(self, presence_state):
+        if not self.daily_briefing_enabled:
+            return None
+        if presence_state.get("availability") in {
+            "sleeping", "do_not_disturb"
+        }:
+            return None
+
+        now = datetime.now(self._timezone())
+        scheduled = now.replace(
+            hour=self.daily_briefing_hour,
+            minute=self.daily_briefing_minute,
+            second=0,
+            microsecond=0
+        )
+        if now < scheduled:
+            return None
+        if now > scheduled + timedelta(hours=self.daily_briefing_grace_hours):
+            return None
+        today = now.date().isoformat()
+        if self.store.get_state("daily_briefing_last_date", "") == today:
+            return None
+        return AutonomousGoal(
+            name="prepare_today_briefing",
+            priority=5,
+            message="Preparing today's scheduled morning briefing.",
+            reason="The configured daily briefing time has arrived.",
+            confidence=1.0,
+            notify=True,
+            speak=True
+        )
+
+    def _timezone(self):
+        return ZoneInfo(os.getenv("ENTITY_TIMEZONE", "America/New_York"))
 
     def _should_publish(self, signature):
         if signature != self._last_signature():
