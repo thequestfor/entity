@@ -6,6 +6,17 @@ from pathlib import Path
 DEFAULT_NEWS_RSS_FEEDS = (
     ("BBC News - World", "https://feeds.bbci.co.uk/news/world/rss.xml", 0.85),
     ("NPR - World", "https://feeds.npr.org/1004/rss.xml", 0.85),
+    ("UN News", "https://news.un.org/feed/subscribe/en/news/all/rss.xml", 0.9),
+    ("Deutsche Welle - World", "https://rss.dw.com/rdf/rss-en-all", 0.82),
+    ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml", 0.78),
+    ("France 24", "https://www.france24.com/en/rss", 0.8),
+    ("The Guardian - World", "https://www.theguardian.com/world/rss", 0.8),
+)
+
+DEFAULT_WORLD_BANK_INDICATORS = (
+    "FP.CPI.TOTL.ZG",  # Inflation, consumer prices (annual %)
+    "NY.GDP.MKTP.KD.ZG",  # GDP growth (annual %)
+    "SL.UEM.TOTL.ZS",  # Unemployment, total (% of labor force)
 )
 
 
@@ -31,6 +42,19 @@ class IntelligenceConfig:
     gdacs_enabled: bool = True
     who_outbreaks_enabled: bool = True
     nws_alerts_enabled: bool = True
+    cisa_kev_enabled: bool = True
+    github_advisories_enabled: bool = True
+    noaa_space_weather_enabled: bool = True
+    firms_enabled: bool = False
+    firms_map_key: str = ""
+    firms_source: str = "VIIRS_SNPP_NRT"
+    firms_days: int = 1
+    world_bank_enabled: bool = True
+    world_bank_countries: tuple[str, ...] = ("WLD",)
+    world_bank_indicators: tuple[str, ...] = DEFAULT_WORLD_BANK_INDICATORS
+    fred_enabled: bool = False
+    fred_api_key: str = ""
+    fred_series: tuple[str, ...] = ()
     gdelt_enabled: bool = False
     gdelt_queries: tuple[str, ...] = ()
     telegram_enabled: bool = False
@@ -133,6 +157,30 @@ class IntelligenceConfig:
                 "ENTITY_WHO_OUTBREAKS_ENABLED", True
             ),
             nws_alerts_enabled=_env_bool("ENTITY_NWS_ALERTS_ENABLED", True),
+            cisa_kev_enabled=_env_bool("ENTITY_CISA_KEV_ENABLED", True),
+            github_advisories_enabled=_env_bool(
+                "ENTITY_GITHUB_ADVISORIES_ENABLED", True
+            ),
+            noaa_space_weather_enabled=_env_bool(
+                "ENTITY_NOAA_SPACE_WEATHER_ENABLED", True
+            ),
+            firms_enabled=_env_bool("ENTITY_FIRMS_ENABLED", False),
+            firms_map_key=os.getenv("ENTITY_FIRMS_MAP_KEY", "").strip(),
+            firms_source=os.getenv(
+                "ENTITY_FIRMS_SOURCE", "VIIRS_SNPP_NRT"
+            ).strip() or "VIIRS_SNPP_NRT",
+            firms_days=_env_int("ENTITY_FIRMS_DAYS", 1, minimum=1),
+            world_bank_enabled=_env_bool("ENTITY_WORLD_BANK_ENABLED", True),
+            world_bank_countries=_env_csv(
+                os.getenv("ENTITY_WORLD_BANK_COUNTRIES"), ("WLD",)
+            ),
+            world_bank_indicators=_env_csv(
+                os.getenv("ENTITY_WORLD_BANK_INDICATORS"),
+                DEFAULT_WORLD_BANK_INDICATORS
+            ),
+            fred_enabled=_env_bool("ENTITY_FRED_ENABLED", False),
+            fred_api_key=os.getenv("ENTITY_FRED_API_KEY", "").strip(),
+            fred_series=_env_csv(os.getenv("ENTITY_FRED_SERIES"), ()),
             gdelt_enabled=_env_bool("ENTITY_GDELT_ENABLED", False),
             gdelt_queries=tuple(
                 value.strip()
@@ -278,3 +326,9 @@ def _env_news_feeds(value):
             parts[0], parts[1], max(0.0, min(1.0, credibility))
         ))
     return tuple(feeds)
+
+
+def _env_csv(value, default):
+    if value is None:
+        return tuple(default)
+    return tuple(item.strip() for item in value.split(",") if item.strip())

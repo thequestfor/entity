@@ -2,18 +2,24 @@ import threading
 from dataclasses import dataclass
 
 from agent.connectors import (
+    CisaKevConnector,
     EonetConnector,
+    FirmsConnector,
+    FredConnector,
     GdacsConnector,
     GdeltConnector,
     GmailConnector,
+    GitHubAdvisoriesConnector,
     OutlookConnector,
     NwsAlertsConnector,
+    NoaaSpaceWeatherConnector,
     NewsFeedConnector,
     PolymarketConnector,
     ReliefWebConnector,
     TelegramConnector,
     UsgsConnector,
     WhoOutbreakConnector,
+    WorldBankIndicatorsConnector,
     XConnector
 )
 from agent.intelligence.models import IngestResult
@@ -107,6 +113,43 @@ class IntelligenceWorker:
                 timeout=config.request_timeout_seconds,
                 max_items=config.max_items_per_source,
                 enabled=config.nws_alerts_enabled
+            ),
+            CisaKevConnector(
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.cisa_kev_enabled
+            ),
+            GitHubAdvisoriesConnector(
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.github_advisories_enabled
+            ),
+            NoaaSpaceWeatherConnector(
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.noaa_space_weather_enabled
+            ),
+            FirmsConnector(
+                map_key=config.firms_map_key,
+                source=config.firms_source,
+                days=config.firms_days,
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.firms_enabled
+            ),
+            WorldBankIndicatorsConnector(
+                countries=config.world_bank_countries,
+                indicators=config.world_bank_indicators,
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.world_bank_enabled
+            ),
+            FredConnector(
+                api_key=config.fred_api_key,
+                series=config.fred_series,
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.fred_enabled
             ),
             GdeltConnector(
                 queries=config.gdelt_queries,

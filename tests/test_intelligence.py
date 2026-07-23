@@ -5,12 +5,17 @@ import unittest
 import urllib.request
 from pathlib import Path
 
+from agent.connectors.cisa import CisaKevConnector
 from agent.connectors.eonet import EonetConnector
+from agent.connectors.firms import FirmsConnector
+from agent.connectors.fred import FredConnector
 from agent.connectors.gdacs import GdacsConnector
 from agent.connectors.gdelt import GdeltConnector
 from agent.connectors.gmail import GmailConnector
+from agent.connectors.github_advisories import GitHubAdvisoriesConnector
 from agent.connectors.mail_common import secure_write
 from agent.connectors.nws import NwsAlertsConnector
+from agent.connectors.noaa_swpc import NoaaSpaceWeatherConnector
 from agent.connectors.news import NewsFeedConnector
 from agent.connectors.outlook import OutlookConnector
 from agent.connectors.polymarket import PolymarketConnector
@@ -18,6 +23,7 @@ from agent.connectors.reliefweb import ReliefWebConnector
 from agent.connectors.telegram import TelegramConnector
 from agent.connectors.usgs import UsgsConnector
 from agent.connectors.who import WhoOutbreakConnector
+from agent.connectors.world_bank import WorldBankIndicatorsConnector
 from agent.connectors.x import XConnector
 from agent.intelligence.config import IntelligenceConfig
 from agent.intelligence.models import ConnectorBatch, SourceItem
@@ -379,6 +385,8 @@ class UnderstandingEngineTests(unittest.TestCase):
         forecast = self.store.list_forecasts()[0]
         self.assertEqual("active", forecast["status"])
         self.assertLessEqual(forecast["probability"], 0.69)
+        self.assertEqual("source-a", forecast["evidence"][0]["source_id"])
+        self.assertEqual(0.9, forecast["evidence"][0]["source_credibility"])
         self.store.resolve_forecast(
             forecast["id"], "yes", "Confirmed by later evidence.", [],
             "2026-07-24T00:00:00Z"
@@ -959,6 +967,118 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual("severe-storms", item.category)
         self.assertIn("Instructions:", item.summary)
         self.assertEqual("Extreme", item.metadata["severity"])
+
+    def test_cisa_kev_connector_normalizes_catalog_entry(self):
+        connector = CisaKevConnector(fetch_json=lambda _: {
+            "catalogVersion": "2026.07.23",
+            "vulnerabilities": [{
+                "cveID": "CVE-2026-12345",
+                "vendorProject": "Example",
+                "product": "Gateway",
+                "shortDescription": "Actively exploited issue.",
+                "requiredAction": "Apply the vendor fix.",
+                "dateAdded": "2026-07-23",
+                "dueDate": "2026-08-01",
+                "knownRansomwareCampaignUse": "Known"
+            }]
+        })
+        item = connector.poll().items[0]
+
+        self.assertEqual("CVE-2026-12345", item.external_id)
+        self.assertEqual("known-exploited-vulnerability", item.category)
+        self.assertIn("Required action:", item.summary)
+        self.assertEqual("Known", item.metadata["known_ransomware_campaign_use"])
+
+    def test_github_advisories_connector_normalizes_public_advisory(self):
+        connector = GitHubAdvisoriesConnector(fetch_json=lambda _: [{
+            "ghsa_id": "GHSA-test-1234",
+            "cve_id": "CVE-2026-54321",
+            "html_url": "https://github.com/advisories/GHSA-test-1234",
+            "summary": "Example advisory",
+            "description": "A vulnerable dependency.",
+            "published_at": "2026-07-23T12:00:00Z",
+            "severity": "high",
+            "cvss": {"score": 8.1}, "cwes": [{"cwe_id": "CWE-79"}]
+        }])
+        item = connector.poll().items[0]
+
+        self.assertEqual("GHSA-test-1234", item.external_id)
+        self.assertEqual("software-vulnerability", item.category)
+        self.assertEqual("high", item.metadata["severity"])
+
+    def test_noaa_space_weather_connector_normalizes_alert(self):
+        connector = NoaaSpaceWeatherConnector(fetch_json=lambda _: [{
+            "product_id": "ALTX3",
+            "product_name": "Space Weather Alert",
+            "issue_datetime": "2026-07-23T12:00:00Z",
+            "message": "Geomagnetic conditions are elevated."
+        }])
+        item = connector.poll().items[0]
+
+        self.assertEqual("ALTX3", item.external_id)
+        self.assertEqual("space-weather", item.category)
+        self.assertIn("Geomagnetic", item.summary)
+
+    def test_firms_requires_explicit_key_and_normalizes_detection(self):
+        self.assertFalse(FirmsConnector(map_key="", enabled=True).enabled)
+        connector = FirmsConnector(
+            map_key="test-key", enabled=True,
+            fetch_csv=lambda _: (
+                "latitude,longitude,bright_ti4,confidence,acq_date,acq_time,frp,daynight\n"
+                "40.12,-120.50,345.5,h,2026-07-23,0345,18.2,N\n"
+            )
+        )
+        item = connector.poll().items[0]
+
+        self.assertEqual("wildfire", item.category)
+        self.assertEqual(40.12, item.latitude)
+        self.assertEqual(-120.5, item.longitude)
+        self.assertEqual("h", item.metadata["confidence"])
+
+    def test_firms_redacts_map_key_from_collector_errors(self):
+        connector = FirmsConnector(
+            map_key="private-map-key", enabled=True,
+            fetch_csv=lambda url: (_ for _ in ()).throw(RuntimeError(url))
+        )
+        with self.assertRaisesRegex(RuntimeError, r"\[REDACTED\]") as context:
+            connector.poll()
+        self.assertNotIn("private-map-key", str(context.exception))
+
+    def test_world_bank_connector_normalizes_latest_indicator(self):
+        connector = WorldBankIndicatorsConnector(
+            countries=("WLD",), indicators=("FP.CPI.TOTL.ZG",),
+            fetch_json=lambda _: [{"page": 1}, [{
+                "date": "2025", "value": 3.4, "unit": "",
+                "country": {"value": "World"},
+                "indicator": {"value": "Inflation, consumer prices"}
+            }]]
+        )
+        item = connector.poll().items[0]
+
+        self.assertEqual("WLD:FP.CPI.TOTL.ZG:2025", item.external_id)
+        self.assertEqual("economic-indicator", item.category)
+        self.assertEqual(3.4, item.metadata["value"])
+
+    def test_fred_requires_explicit_key_and_redacts_it_from_errors(self):
+        self.assertFalse(FredConnector(api_key="", series=("UNRATE",), enabled=True).enabled)
+        connector = FredConnector(
+            api_key="private-fred-key", series=("UNRATE",), enabled=True,
+            fetch_json=lambda _: {"observations": [
+                {"date": "2026-07-01", "value": "4.1"},
+                {"date": "2026-06-01", "value": "4.0"}
+            ]}
+        )
+        item = connector.poll().items[0]
+        self.assertEqual("UNRATE:2026-07-01", item.external_id)
+        self.assertEqual(0.1, round(item.metadata["change"], 4))
+
+        failing = FredConnector(
+            api_key="private-fred-key", series=("UNRATE",), enabled=True,
+            fetch_json=lambda url: (_ for _ in ()).throw(RuntimeError(url))
+        )
+        with self.assertRaisesRegex(RuntimeError, r"\[REDACTED\]") as context:
+            failing.poll()
+        self.assertNotIn("private-fred-key", str(context.exception))
 
     def test_gdelt_requires_queries_and_deduplicates_articles(self):
         disabled = GdeltConnector(queries=(), enabled=True)

@@ -168,8 +168,20 @@ ENTITY_RELIEFWEB_APPNAME=
 ENTITY_GDACS_ENABLED=true
 ENTITY_WHO_OUTBREAKS_ENABLED=true
 ENTITY_NWS_ALERTS_ENABLED=true
+ENTITY_CISA_KEV_ENABLED=true
+ENTITY_GITHUB_ADVISORIES_ENABLED=true
+ENTITY_NOAA_SPACE_WEATHER_ENABLED=true
+# NASA FIRMS is opt-in and requires a free MAP_KEY.
+ENTITY_FIRMS_ENABLED=false
+ENTITY_FIRMS_MAP_KEY=
+ENTITY_WORLD_BANK_ENABLED=true
+ENTITY_WORLD_BANK_COUNTRIES=WLD
+ENTITY_WORLD_BANK_INDICATORS=FP.CPI.TOTL.ZG,NY.GDP.MKTP.KD.ZG,SL.UEM.TOTL.ZS
+ENTITY_FRED_ENABLED=false
+ENTITY_FRED_API_KEY=
+ENTITY_FRED_SERIES=
 ENTITY_NEWS_ENABLED=true
-ENTITY_NEWS_RSS_FEEDS=BBC News - World|https://feeds.bbci.co.uk/news/world/rss.xml|0.85||NPR - World|https://feeds.npr.org/1004/rss.xml|0.85
+ENTITY_NEWS_RSS_FEEDS=BBC News - World|https://feeds.bbci.co.uk/news/world/rss.xml|0.85||NPR - World|https://feeds.npr.org/1004/rss.xml|0.85||UN News|https://news.un.org/feed/subscribe/en/news/all/rss.xml|0.90||Deutsche Welle - World|https://rss.dw.com/rdf/rss-en-all|0.82||Al Jazeera|https://www.aljazeera.com/xml/rss/all.xml|0.78||France 24|https://www.france24.com/en/rss|0.80||The Guardian - World|https://www.theguardian.com/world/rss|0.80
 ENTITY_POLYMARKET_ENABLED=true
 # Optional lower-trust global news discovery; separate queries with ||.
 ENTITY_GDELT_ENABLED=false
@@ -186,16 +198,19 @@ voice runtime:
 
 ReliefWeb requires an approved application name. When none is configured, its
 connector remains registered but disabled. USGS, NASA EONET, GDACS, WHO Disease
-Outbreak News, and U.S. NWS alerts require no API key. GDELT is also free and
-global, but its results inherit the varying reliability of the publishers it
-indexes. The dashboard binds only to localhost by default.
+Outbreak News, U.S. NWS, CISA KEV, GitHub Security Advisories, NOAA Space
+Weather alerts, and selected World Bank indicators require no API key. NASA
+FIRMS and FRED require operator-provided keys and are disabled until supplied.
+GDELT is also free and global, but its results inherit the varying reliability
+of the publishers it indexes. The dashboard binds only to localhost by default.
 
 Direct news collection uses publisher-supplied RSS or Atom metadata rather than
 scraping full articles. `ENTITY_NEWS_RSS_FEEDS` entries use
 `Publisher name|feed URL|baseline credibility`, separated by `||`; an explicitly
-empty value disables all default feeds. BBC World and NPR World are configured
-by default, and each document retains its publisher, domain, feed URL, article
-link, byline, and feed categories.
+empty value disables all default feeds. BBC World, NPR World, UN News, Deutsche
+Welle, Al Jazeera, France 24, and The Guardian World are configured by default,
+and each document retains its publisher, domain, feed URL, article link, byline,
+and feed categories.
 
 Polymarket collection uses its public Gamma market-data API and needs no account,
 API key, wallet, or trading permissions. Entity polls active markets by 24-hour

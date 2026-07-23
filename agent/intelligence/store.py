@@ -593,6 +593,7 @@ class IntelligenceStore:
             documents = connection.execute(
                 """
                 SELECT documents.*, sources.name AS source_name,
+                       sources.kind AS source_kind,
                        sources.credibility AS source_credibility
                 FROM situation_documents
                 JOIN documents
