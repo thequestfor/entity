@@ -4,11 +4,17 @@ import re
 from dataclasses import dataclass
 
 
-FEATURE_VERSION = "event-features-v1"
+FEATURE_VERSION = "event-features-v2"
 FEATURE_STOP_WORDS = {
     "a", "an", "and", "as", "at", "by", "for", "from", "in", "is",
     "of", "on", "or", "the", "to", "update", "updates", "with", "new",
     "live", "breaking", "report", "reports", "reported", "says", "said"
+}
+GENERIC_ENTITY_KEYS = {
+    "breaking", "category", "depth", "earthquake", "green", "magnitude",
+    "media", "media-post", "notification", "population", "special-weather",
+    "special-weather-statement", "statement", "storm", "tropical-cyclone",
+    "weather", "world"
 }
 ENTITY_METADATA_KEYS = (
     "place", "places", "country", "countries", "region", "regions",
@@ -53,7 +59,18 @@ def extract_document_features(document):
     location_key = ""
     if latitude is not None and longitude is not None:
         location_key = f"{round(latitude, 1):.1f},{round(longitude, 1):.1f}"
-    fingerprint_text = _normalize_text(f"{title} {summary}")
+    fingerprint_text = " ".join(
+        re.findall(r"[a-z0-9]+", f"{title} {summary}".lower())
+    )
+    fingerprint_tokens = fingerprint_text.split()
+    generic_title = bool(re.match(
+        r"^(media post from|update from|breaking)", title.strip(), re.I
+    ))
+    fingerprint = ""
+    if len(fingerprint_tokens) >= 6 and not (generic_title and not summary.strip()):
+        fingerprint = hashlib.sha256(
+            fingerprint_text.encode("utf-8")
+        ).hexdigest()
     return DocumentFeatures(
         normalized_title=normalized_title,
         occurred_at=str(
@@ -62,9 +79,7 @@ def extract_document_features(document):
         entity_keys=tuple(sorted(entities))[:40],
         location_key=location_key,
         lexical_signature=signature,
-        content_fingerprint=hashlib.sha256(
-            fingerprint_text.encode("utf-8")
-        ).hexdigest(),
+        content_fingerprint=fingerprint,
         latitude=latitude,
         longitude=longitude
     )
@@ -112,7 +127,13 @@ def _named_phrases(title):
     )
     for phrase in phrases:
         normalized = _entity_key(phrase)
-        if normalized and normalized not in FEATURE_STOP_WORDS:
+        parts = set(normalized.split("-"))
+        if (
+            normalized
+            and normalized not in FEATURE_STOP_WORDS
+            and normalized not in GENERIC_ENTITY_KEYS
+            and not parts.issubset(GENERIC_ENTITY_KEYS | FEATURE_STOP_WORDS)
+        ):
             yield normalized
 
 

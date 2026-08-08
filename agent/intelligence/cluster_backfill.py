@@ -14,7 +14,7 @@ from agent.intelligence.features import extract_document_features
 from agent.intelligence.store import IntelligenceStore
 
 
-def dry_run(database_path, limit=0):
+def dry_run(database_path, limit=0, sample_limit=10):
     source_path = Path(database_path)
     # Applying schema migrations is safe and required for the running version;
     # all clustering evaluation after that happens on a disposable backup.
@@ -62,7 +62,8 @@ def dry_run(database_path, limit=0):
                 "proposed_auto_links": 0,
                 "review_candidates": 0,
                 "separate": 0,
-                "samples": []
+                "auto_link_samples": [],
+                "review_samples": []
             }
             for document in rows:
                 decision = clusterer.decide(connection, document)
@@ -71,13 +72,15 @@ def dry_run(database_path, limit=0):
                     continue
                 if decision.action == "link":
                     summary["proposed_auto_links"] += 1
+                    samples = summary["auto_link_samples"]
                 elif decision.action == "review":
                     summary["review_candidates"] += 1
+                    samples = summary["review_samples"]
                 else:
                     summary["separate"] += 1
                     continue
-                if len(summary["samples"]) < 50:
-                    summary["samples"].append({
+                if len(samples) < max(0, int(sample_limit)):
+                    samples.append({
                         "document_id": document["id"],
                         "title": document["title"],
                         "current_situation_id": document["situation_id"],
@@ -95,11 +98,16 @@ def main():
         description="Evaluate historical situation clustering without modifying it."
     )
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--sample-limit", type=int, default=10)
     args = parser.parse_args()
     load_dotenv(".env")
     config = IntelligenceConfig.from_env()
     print(json.dumps(
-        dry_run(config.database_path, limit=args.limit), indent=2
+        dry_run(
+            config.database_path,
+            limit=args.limit,
+            sample_limit=args.sample_limit
+        ), indent=2
     ))
 
 

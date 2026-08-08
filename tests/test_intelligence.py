@@ -380,6 +380,46 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual(1, len(candidates))
         self.assertEqual("review", candidates[0]["decision"])
 
+    def test_templated_hazards_without_verified_location_do_not_merge(self):
+        now = datetime.now(UTC).isoformat()
+        self.store.ingest_items("source-a", [
+            SourceItem(
+                external_id="quake-indonesia",
+                title="Green earthquake magnitude 5 in Indonesia",
+                url="https://a.test/indonesia", category="earthquake",
+                published_at=now
+            ),
+            SourceItem(
+                external_id="quake-japan",
+                title="Green earthquake magnitude 5 in Japan",
+                url="https://a.test/japan", category="earthquake",
+                published_at=now
+            )
+        ])
+
+        self.engine.analyze_pending()
+
+        self.assertEqual(2, len(self.store.list_situations()))
+
+    def test_generic_social_media_posts_do_not_merge_by_template(self):
+        now = datetime.now(UTC).isoformat()
+        self.store.ingest_items("source-a", [
+            SourceItem(
+                external_id="media-1", title="Media post from @Example",
+                url="https://social.test/1", category="social-signal",
+                published_at=now
+            ),
+            SourceItem(
+                external_id="media-2", title="Media post from @Example",
+                url="https://social.test/2", category="social-signal",
+                published_at=now
+            )
+        ])
+
+        self.engine.analyze_pending()
+
+        self.assertEqual(2, len(self.store.list_situations()))
+
     def test_thinking_model_synthesizes_all_cross_source_evidence(self):
         class ThinkingRouter:
             def __init__(self):

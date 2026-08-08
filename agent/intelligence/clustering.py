@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from agent.intelligence.features import (
     DocumentFeatures,
+    FEATURE_VERSION,
     entity_similarity,
     extract_document_features,
     token_similarity,
@@ -15,6 +16,9 @@ from agent.intelligence.embeddings import cosine_similarity
 
 
 CLUSTERING_METHOD = "provenance-event-cluster-v1"
+LOCATION_SENSITIVE_CATEGORIES = {
+    "earthquake", "eq", "weather-alert", "severe-storms", "tc"
+}
 
 
 @dataclass(frozen=True)
@@ -81,9 +85,10 @@ class EventClusterer:
                 LEFT JOIN document_features
                   ON document_features.document_id = documents.id
                 WHERE document_features.document_id IS NULL
+                   OR document_features.feature_version != ?
                 ORDER BY documents.retrieved_at DESC LIMIT ?
                 """,
-                (max(1, min(5000, int(limit))),)
+                (FEATURE_VERSION, max(1, min(5000, int(limit))))
             ).fetchall()
             for row in rows:
                 document = dict(row)
@@ -223,6 +228,7 @@ class EventClusterer:
                    documents.title AS document_title,
                    documents.publisher_key,
                    document_features.entity_keys,
+                   document_features.normalized_title,
                    document_features.lexical_signature,
                    document_features.content_fingerprint,
                    document_features.occurred_at,
@@ -277,7 +283,14 @@ class EventClusterer:
             features.content_fingerprint
             and features.content_fingerprint == candidate.get("content_fingerprint")
         )
-        near_copy = lexical >= 0.9
+        same_title = bool(
+            features.normalized_title
+            and features.normalized_title == candidate.get("normalized_title")
+        )
+        near_copy = (
+            document.get("category") == "traditional-news"
+            and lexical >= 0.92 and entities >= 0.5
+        )
         relationship = "copied" if exact_copy else (
             "syndicated" if near_copy else "independent"
         )
@@ -312,6 +325,25 @@ class EventClusterer:
             vetoes.append("different_nws_office")
         if distance is not None and distance > 1500 and entities < 0.5:
             vetoes.append("geographically_incompatible")
+        if (
+            document.get("category") == "social-signal"
+            and len(features.lexical_signature) < 5
+            and features.normalized_title == candidate.get("normalized_title")
+        ):
+            vetoes.append("generic_social_template")
+        if document.get("category") in LOCATION_SENSITIVE_CATEGORIES:
+            if (
+                distance is None and not exact_copy
+                and not (same_title and entities >= 0.5 and hours <= 2)
+            ):
+                vetoes.append("hazard_location_unverified")
+            elif distance is not None and distance > 250 and not exact_copy:
+                vetoes.append("distinct_hazard_location")
+        if document.get("category") in {"earthquake", "eq"} and not exact_copy:
+            if hours > 6:
+                vetoes.append("distinct_earthquake_time")
+            if distance is not None and distance > 75:
+                vetoes.append("distinct_earthquake_epicenter")
         if hours > self.lookback_days * 24:
             vetoes.append("temporally_incompatible")
         return ClusterDecision(
