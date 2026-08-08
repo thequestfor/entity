@@ -184,8 +184,7 @@ class GeospatialIntelligenceEngine:
                 cursor = 0
             else:
                 cursor = int(state["cursor_version_id"])
-            rows = connection.execute(
-                """SELECT versions.id version_id,versions.metadata version_metadata,
+            selection = """SELECT versions.id version_id,versions.metadata version_metadata,
                        versions.published_at version_published_at,versions.captured_at,
                        documents.id document_id,documents.source_id,documents.external_id,
                        documents.category,documents.latitude,documents.longitude,
@@ -198,23 +197,39 @@ class GeospatialIntelligenceEngine:
                    JOIN sources ON sources.id=documents.source_id
                    LEFT JOIN situation_documents ON situation_documents.document_id=documents.id
                    LEFT JOIN situations ON situations.id=situation_documents.situation_id
-                   WHERE versions.id>? AND (
+                   WHERE {condition} AND (
                      documents.source_id IN ('usgs_earthquakes','nasa_eonet','nasa_firms_wildfires','gdacs','nws_alerts')
-                     OR sources.kind IN ('natural_hazard','wildfire','weather_alert'))
-                   ORDER BY versions.id LIMIT ?""",
-                (cursor, self.batch_size)
+                     OR sources.kind IN ('natural_hazard','wildfire','weather_alert'))"""
+            recent_limit = min(20, max(1, self.batch_size // 5)) if self.batch_size > 1 else 0
+            historical_limit = self.batch_size - recent_limit
+            recent_rows = connection.execute(
+                selection.format(condition="NOT EXISTS (SELECT 1 FROM geo_feature_observations observations WHERE observations.document_version_id=versions.id)")
+                + " ORDER BY versions.id DESC LIMIT ?",
+                (recent_limit,)
+            ).fetchall() if recent_limit else []
+            historical_rows = connection.execute(
+                selection.format(condition="versions.id>?")
+                + " ORDER BY versions.id LIMIT ?",
+                (cursor, historical_limit)
             ).fetchall()
+            processed_rows = []
+            seen_versions = set()
+            for row in [*recent_rows, *historical_rows]:
+                if row["version_id"] in seen_versions:
+                    continue
+                seen_versions.add(row["version_id"])
+                processed_rows.append(row)
             features = observations = 0
-            for row in rows:
+            for row in processed_rows:
                 result = self._process(connection, dict(row), now)
                 features += int(result[0])
                 observations += int(result[1])
-            if rows:
+            if historical_rows:
                 connection.execute(
                     """UPDATE geospatial_backfill_state SET cursor_version_id=?,processed=processed+?,
                        features_created=features_created+?,observations_created=observations_created+?,
                        completed=0,last_error='',updated_at=? WHERE name=?""",
-                    (rows[-1]["version_id"], len(rows), features, observations, now, BACKFILL_NAME)
+                    (historical_rows[-1]["version_id"], len(processed_rows), features, observations, now, BACKFILL_NAME)
                 )
             else:
                 connection.execute(
@@ -223,7 +238,7 @@ class GeospatialIntelligenceEngine:
                 )
             self._refresh_cell_anomalies(connection, now)
             self._refresh_country_profiles(connection, now, limit=30)
-        return {"processed": len(rows), "features": features, "observations": observations}
+        return {"processed": len(processed_rows), "features": features, "observations": observations}
 
     def _process(self, connection, row, now):
         metadata = _json_load(row.get("version_metadata"), {})
@@ -275,7 +290,8 @@ class GeospatialIntelligenceEngine:
                country_name=COALESCE(NULLIF(excluded.country_name,''),geo_features.country_name),
                severity=excluded.severity,severity_label=excluded.severity_label,confidence=excluded.confidence,
                status=excluded.status,observed_at=excluded.observed_at,expires_at=excluded.expires_at,
-               properties=excluded.properties,updated_at=excluded.updated_at""",
+               properties=excluded.properties,updated_at=excluded.updated_at
+               WHERE excluded.observed_at>=geo_features.observed_at""",
             (feature_id,row["source_id"],external_id,row["document_id"],row.get("situation_id"),feature_type,
              geometry.get("type","Point"),json.dumps(geometry,separators=(",",":")),centroid[0],centroid[1],
              bbox[0],bbox[1],bbox[2],bbox[3],grid_key,country_code,country_name,severity,severity_label,
