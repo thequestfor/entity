@@ -1,5 +1,6 @@
 import threading
 import tempfile
+import os
 from collections import deque
 from queue import Queue, Empty
 import time
@@ -19,7 +20,12 @@ from vad import speech_event, reset_vad
 
 class Microphone:
 
-    def __init__(self, on_state=None):
+    def __init__(
+        self,
+        on_state=None,
+        no_speech_timeout=None,
+        max_command_seconds=None
+    ):
 
         self.samplerate = 16000
         self.blocksize = 512
@@ -28,6 +34,18 @@ class Microphone:
         self.thread = None
         self.error = None
         self.on_state = on_state
+        self.no_speech_timeout = self._duration_setting(
+            no_speech_timeout,
+            "ENTITY_AUDIO_NO_SPEECH_TIMEOUT_SECONDS",
+            5.0,
+            minimum=0.5
+        )
+        self.max_command_seconds = self._duration_setting(
+            max_command_seconds,
+            "ENTITY_AUDIO_MAX_COMMAND_SECONDS",
+            30.0,
+            minimum=1.0
+        )
 
         # Last ~1.5 seconds of audio
         self.preroll = deque(maxlen=50)
@@ -179,61 +197,63 @@ class Microphone:
             return ""
 
         speaking = False
-
         audio_chunks = []
-        started_at = time.time()
-        no_speech_timeout = 5
-        max_command_seconds = 30
+        started_at = time.monotonic()
+        no_speech_deadline = started_at + self.no_speech_timeout
+        command_deadline = started_at + self.max_command_seconds
 
-        while True:
-
-            if not self.running:
-                self.state = "idle"
-                return ""
-
-            try:
-                chunk = self.live_audio.get(timeout=0.5)
-            except Empty:
-                elapsed = time.time() - started_at
-
-                if not speaking and elapsed >= no_speech_timeout:
-                    self.state = "idle"
+        try:
+            while self.running:
+                now = time.monotonic()
+                if now >= command_deadline:
+                    self._emit_state(
+                        "capture_finished", reason="maximum_duration"
+                    )
+                    break
+                if not speaking and now >= no_speech_deadline:
+                    self._emit_state(
+                        "capture_finished", reason="no_speech_timeout"
+                    )
                     return ""
 
-                if elapsed >= max_command_seconds:
+                wait_for = min(
+                    0.5,
+                    command_deadline - now,
+                    (no_speech_deadline - now) if not speaking else 0.5
+                )
+                try:
+                    chunk = self.live_audio.get(timeout=max(0.01, wait_for))
+                except Empty:
+                    continue
+
+                # Deadlines are evaluated even when the callback continuously
+                # fills the queue with silence or ambient noise.
+                now = time.monotonic()
+                if now >= command_deadline:
+                    self._emit_state(
+                        "capture_finished", reason="maximum_duration"
+                    )
                     break
+                if not speaking and now >= no_speech_deadline:
+                    self._emit_state(
+                        "capture_finished", reason="no_speech_timeout"
+                    )
+                    return ""
 
-                continue
-
-            self.preroll.append(chunk)
-            event = speech_event(
-                torch.from_numpy(chunk)
-            )
-
-            if event:
-
-                print("VAD:", event)
-
-                if "start" in event:
-
-                    if not speaking:
-
+                self.preroll.append(chunk)
+                event = speech_event(torch.from_numpy(chunk))
+                if event:
+                    print("VAD:", event)
+                    if "start" in event and not speaking:
                         speaking = True
-
-                        # Include audio before speech started
-                        audio_chunks.extend(
-                            list(self.preroll)
-                        )
-
-                elif "end" in event:
-
-                    break
-
-            if speaking:
-
-                audio_chunks.append(chunk)
-
-        self.state = "idle"
+                        audio_chunks.extend(list(self.preroll))
+                    elif "end" in event:
+                        self._emit_state("capture_finished", reason="vad_end")
+                        break
+                if speaking:
+                    audio_chunks.append(chunk)
+        finally:
+            self.state = "idle"
 
         if not audio_chunks:
             return ""
@@ -309,3 +329,12 @@ class Microphone:
     def _emit_state(self, state, **details):
         if self.on_state:
             self.on_state(state, **details)
+
+    def _duration_setting(self, explicit, name, default, minimum):
+        try:
+            value = float(
+                explicit if explicit is not None else os.getenv(name, default)
+            )
+        except (TypeError, ValueError):
+            value = default
+        return max(float(minimum), value)

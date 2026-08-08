@@ -66,7 +66,10 @@ class AudioObserver:
 
         self._emit_state("wake_detected")
         self._emit_state("listening")
-        command = self.microphone.listen()
+        try:
+            command = self.microphone.listen()
+        finally:
+            self._emit_state("idle")
 
         if not command:
             return None

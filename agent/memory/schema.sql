@@ -94,6 +94,28 @@ ON planner_decisions(created_at);
 CREATE INDEX IF NOT EXISTS idx_planner_decisions_outcome
 ON planner_decisions(outcome);
 
+CREATE TABLE IF NOT EXISTS request_runs (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL DEFAULT '',
+    channel TEXT NOT NULL,
+    input_text TEXT NOT NULL,
+    stage TEXT NOT NULL DEFAULT 'received',
+    outcome TEXT NOT NULL DEFAULT 'running',
+    response TEXT NOT NULL DEFAULT '',
+    error_type TEXT NOT NULL DEFAULT '',
+    error_message TEXT NOT NULL DEFAULT '',
+    details TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    finished_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_request_runs_started
+ON request_runs(started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_request_runs_outcome
+ON request_runs(outcome, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS autonomous_goals (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

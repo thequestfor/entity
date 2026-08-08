@@ -10,6 +10,14 @@ DEFAULT_DB = Path("agent/entity_memory.db")
 SCHEMA = Path(__file__).with_name("schema.sql")
 
 
+class _ClosingConnection(sqlite3.Connection):
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class MemoryStore:
     def __init__(self, path=DEFAULT_DB):
         self.path = Path(path)
@@ -22,7 +30,9 @@ class MemoryStore:
             pass
 
     def _connect(self):
-        conn = sqlite3.connect(self.path, timeout=30)
+        conn = sqlite3.connect(
+            self.path, timeout=30, factory=_ClosingConnection
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 30000")
         return conn
@@ -207,6 +217,73 @@ class MemoryStore:
             )
 
         return decision_id
+
+    def begin_request_run(
+        self, request_id, event_id, channel, input_text, details=None
+    ):
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO request_runs (
+                    id, event_id, channel, input_text, stage, outcome,
+                    details, started_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'received', 'running', ?, ?, ?)
+                """,
+                (
+                    str(request_id), str(event_id or ""), str(channel),
+                    str(input_text)[:10000], self._json(details or {}),
+                    now, now
+                )
+            )
+        return request_id
+
+    def update_request_run(
+        self,
+        request_id,
+        stage=None,
+        outcome=None,
+        response=None,
+        error=None,
+        details=None
+    ):
+        updates = ["updated_at = ?"]
+        params = [utc_now()]
+        for column, value in (("stage", stage), ("outcome", outcome)):
+            if value is not None:
+                updates.append(f"{column} = ?")
+                params.append(str(value))
+        if response is not None:
+            updates.append("response = ?")
+            params.append(str(response)[:20000])
+        if error is not None:
+            updates.extend(["error_type = ?", "error_message = ?"])
+            params.extend([type(error).__name__, str(error)[:2000]])
+        if details is not None:
+            updates.append("details = ?")
+            params.append(self._json(details))
+        if outcome in {"succeeded", "failed", "timed_out", "cancelled"}:
+            updates.append("finished_at = ?")
+            params.append(utc_now())
+        params.append(str(request_id))
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE request_runs SET {', '.join(updates)} WHERE id = ?",
+                params
+            )
+
+    def recent_request_runs(self, limit=20):
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM request_runs ORDER BY started_at DESC LIMIT ?",
+                (max(1, min(500, int(limit))),)
+            ).fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = self._json_load(item.get("details"), {})
+            results.append(item)
+        return results
 
     def update_planner_decision(
         self,
@@ -756,6 +833,12 @@ class MemoryStore:
 
     def _json(self, value):
         return json.dumps(value, default=str)
+
+    def _json_load(self, value, default):
+        try:
+            return json.loads(value or "")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return default
 
     def _fts_query(self, query):
         terms = [

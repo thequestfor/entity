@@ -4,6 +4,7 @@ import threading
 import time
 from datetime import datetime, timedelta
 from queue import Empty
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from agent.actuators import (
@@ -132,6 +133,7 @@ class EntityRuntime:
             intelligence_store=getattr(self.intelligence_service, "store", None)
         )
         self._intelligence_lifecycle_sequence = None
+        self._active_request_id = None
         if hasattr(self.intelligence_service, "set_activity_callback"):
             self.intelligence_service.set_activity_callback(
                 self._handle_intelligence_activity
@@ -326,6 +328,13 @@ class EntityRuntime:
         if not command:
             return None
 
+        request_id = str(getattr(event, "id", "") or uuid4())
+        previous_request_id = self._active_request_id
+        self._active_request_id = request_id
+        self._begin_request_trace(
+            request_id, getattr(event, "id", ""), channel, command
+        )
+
         if channel == "remote":
             print("Remote:", command)
         else:
@@ -337,7 +346,10 @@ class EntityRuntime:
         )
 
         self.awareness.record_input(command)
-        self._emit_lifecycle("thinking", channel=channel)
+        self._emit_lifecycle(
+            "thinking", channel=channel, request_id=request_id
+        )
+        self._update_request_trace(request_id, stage="reasoning")
         try:
             runtime_response = self._handle_runtime_command(
                 command,
@@ -348,6 +360,12 @@ class EntityRuntime:
                 self.awareness.record_response(runtime_response)
                 self._record_response(runtime_response, source=channel)
                 self._reply(runtime_response, channel)
+                self._update_request_trace(
+                    request_id,
+                    stage="responded",
+                    outcome="succeeded",
+                    response=runtime_response
+                )
                 print(runtime_response)
                 return runtime_response
 
@@ -377,6 +395,12 @@ class EntityRuntime:
                 self._reply(response, channel)
             self.awareness.record_response(response)
             self._record_response(response, source=channel)
+            self._update_request_trace(
+                request_id,
+                stage="responded",
+                outcome="succeeded",
+                response=response
+            )
             print(response)
             return response
         except Exception as exc:
@@ -388,9 +412,17 @@ class EntityRuntime:
             self.awareness.record_response(response)
             self._record_response(response, source=channel)
             self._reply(response, channel)
+            self._update_request_trace(
+                request_id,
+                stage="failed",
+                outcome="failed",
+                response=response,
+                error=exc
+            )
             return response
         finally:
-            self._emit_lifecycle("idle")
+            self._emit_lifecycle("idle", request_id=request_id)
+            self._active_request_id = previous_request_id
 
     def handle_reminder(self, event):
         message = event.message
@@ -3480,7 +3512,35 @@ class EntityRuntime:
         return None
 
     def _emit_lifecycle(self, state, **details):
+        request_id = getattr(self, "_active_request_id", None)
+        if request_id and "request_id" not in details:
+            details["request_id"] = request_id
         return self.lifecycle.emit(state, **details)
+
+    def _begin_request_trace(
+        self, request_id, event_id, channel, command
+    ):
+        method = getattr(self.task_store, "begin_request_run", None)
+        if not callable(method):
+            return
+        try:
+            method(
+                request_id=request_id,
+                event_id=event_id,
+                channel=channel,
+                input_text=command
+            )
+        except Exception as exc:
+            print("Failed to begin request trace:", exc)
+
+    def _update_request_trace(self, request_id, **updates):
+        method = getattr(self.task_store, "update_request_run", None)
+        if not callable(method):
+            return
+        try:
+            method(request_id, **updates)
+        except Exception as exc:
+            print("Failed to update request trace:", exc)
 
     def _handle_intelligence_activity(self, state, **details):
         """Render background research only while it owns an idle display."""

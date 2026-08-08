@@ -16,6 +16,7 @@ from unittest.mock import patch
 import numpy as np
 
 from agent.audio.frames import WakeFrameBuffer
+from agent.audio.microphone import Microphone
 from agent.audio.activity import emit_speech_output_activity
 from agent.event_bus import EventBus
 from agent.health import StartupHealthCheck
@@ -40,6 +41,69 @@ from tts.playback import _speech_levels
 
 
 class ResilienceTests(unittest.TestCase):
+    def _capture_microphone(self, no_speech=0.05, maximum=0.1):
+        microphone = Microphone.__new__(Microphone)
+        microphone.running = True
+        microphone.state = "command"
+        microphone.live_audio = types.SimpleNamespace(
+            get=lambda timeout: np.zeros(512, dtype=np.float32)
+        )
+        microphone.preroll = __import__("collections").deque(maxlen=50)
+        microphone.no_speech_timeout = no_speech
+        microphone.max_command_seconds = maximum
+        microphone.on_state = None
+        return microphone
+
+    def test_microphone_no_speech_deadline_survives_continuous_audio(self):
+        microphone = self._capture_microphone()
+        clock = iter(value / 100 for value in range(100))
+
+        with patch(
+            "agent.audio.microphone.time.monotonic",
+            side_effect=lambda: next(clock)
+        ), patch("agent.audio.microphone.is_speaking", return_value=False), patch(
+            "agent.audio.microphone.speech_event", return_value=None
+        ):
+            result = microphone.listen()
+
+        self.assertEqual("", result)
+        self.assertEqual("idle", microphone.state)
+
+    def test_microphone_absolute_deadline_transcribes_bounded_speech(self):
+        microphone = self._capture_microphone(no_speech=1, maximum=0.08)
+        clock = iter(value / 100 for value in range(100))
+        events = iter([{"start": 0}, None, None, None, None])
+        microphone.transcribe = lambda audio: f"samples={len(audio)}"
+
+        with patch(
+            "agent.audio.microphone.time.monotonic",
+            side_effect=lambda: next(clock)
+        ), patch("agent.audio.microphone.is_speaking", return_value=False), patch(
+            "agent.audio.microphone.speech_event",
+            side_effect=lambda _: next(events, None)
+        ):
+            result = microphone.listen()
+
+        self.assertTrue(result.startswith("samples="))
+        self.assertEqual("idle", microphone.state)
+
+    def test_memory_request_trace_finishes_and_connection_closes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = MemoryStore(Path(temp) / "memory.db")
+            store.begin_request_run("request", "event", "voice", "hello")
+            store.update_request_run(
+                "request", stage="responded", outcome="succeeded",
+                response="hi"
+            )
+            run = store.recent_request_runs()[0]
+
+            self.assertEqual("succeeded", run["outcome"])
+            self.assertIsNotNone(run["finished_at"])
+            with store._connect() as connection:
+                connection.execute("SELECT 1")
+            with self.assertRaises(Exception):
+                connection.execute("SELECT 1")
+
     def test_playback_meter_tracks_speech_envelope(self):
         samplerate = 1000
         silence = np.zeros(200, dtype=np.float32)
