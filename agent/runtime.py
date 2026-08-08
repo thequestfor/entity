@@ -338,47 +338,59 @@ class EntityRuntime:
 
         self.awareness.record_input(command)
         self._emit_lifecycle("thinking", channel=channel)
-
-        runtime_response = self._handle_runtime_command(
-            command,
-            source=channel
-        )
-
-        if runtime_response:
-            self.awareness.record_response(runtime_response)
-            self._record_response(runtime_response, source=channel)
-            self._reply(runtime_response, channel)
-            print(runtime_response)
-            self._emit_lifecycle("idle")
-            return runtime_response
-
-        response_stream = self.brain.respond_stream(
-            command,
-            self._thinking_context(command),
-            on_escalation=lambda message: self._reply(message, channel)
-        )
-
-        if channel == "remote":
-            response = "".join(response_stream)
-            self._reply(response, channel)
-        else:
-            action = Action(
-                type="speak",
-                payload={
-                    "stream": response_stream,
-                    "phrased_stream": True
-                }
+        try:
+            runtime_response = self._handle_runtime_command(
+                command,
+                source=channel
             )
 
-            response = self.execute(action)
+            if runtime_response:
+                self.awareness.record_response(runtime_response)
+                self._record_response(runtime_response, source=channel)
+                self._reply(runtime_response, channel)
+                print(runtime_response)
+                return runtime_response
 
-        self.awareness.record_response(response)
-        self._record_response(response, source=channel)
+            response_stream = self.brain.respond_stream(
+                command,
+                self._thinking_context(command),
+                on_escalation=lambda message: self._reply(message, channel)
+            )
 
-        print(response)
-        self._emit_lifecycle("idle")
+            if channel == "remote":
+                response = "".join(response_stream)
+                self._reply(response, channel)
+            else:
+                action = Action(
+                    type="speak",
+                    payload={
+                        "stream": response_stream,
+                        "phrased_stream": True
+                    }
+                )
+                response = self.execute(action)
 
-        return response
+            if not response:
+                response = (
+                    "I couldn't produce a complete response. Please try again."
+                )
+                self._reply(response, channel)
+            self.awareness.record_response(response)
+            self._record_response(response, source=channel)
+            print(response)
+            return response
+        except Exception as exc:
+            print("Text request failed:", exc)
+            response = (
+                "I couldn't complete that request. The failure was recorded; "
+                "please try again."
+            )
+            self.awareness.record_response(response)
+            self._record_response(response, source=channel)
+            self._reply(response, channel)
+            return response
+        finally:
+            self._emit_lifecycle("idle")
 
     def handle_reminder(self, event):
         message = event.message
@@ -935,6 +947,23 @@ class EntityRuntime:
         return None
 
     def _handle_read_only_fast_path(self, command, source="voice"):
+        if self._is_time_query(command):
+            return self._record_read_only_fast_path(
+                command, source, "time", self._current_time_text()
+            )
+
+        if self._is_calendar_availability_question(command):
+            return self._execute_read_only_fast_path(
+                command, source, "calendar_availability",
+                lambda: self._calendar_availability(command)
+            )
+
+        if self._is_calendar_agenda_question(command):
+            return self._execute_read_only_fast_path(
+                command, source, "calendar_agenda",
+                lambda: self._calendar_agenda(command)
+            )
+
         if self._is_diagnostics_command(command):
             return self._execute_read_only_fast_path(
                 command,
@@ -1012,6 +1041,116 @@ class EntityRuntime:
             )
 
         return None
+
+    def _is_time_query(self, command):
+        return command.lower().strip().rstrip("?.!") in {
+            "what time is it", "what's the time", "what is the time",
+            "tell me the time", "current time"
+        }
+
+    def _current_time_text(self):
+        now = datetime.now(ZoneInfo(
+            os.getenv("ENTITY_TIMEZONE", "America/New_York")
+        ))
+        return (
+            f"It is {now.strftime('%-I:%M %p')} on "
+            f"{now.strftime('%A, %B %-d')}."
+        )
+
+    def _is_calendar_availability_question(self, command):
+        normalized = command.lower()
+        asks_availability = bool(re.search(
+            r"\b(?:when|what times?|how long)\b.*\b(?:free|available|open)\b"
+            r"|\b(?:free|available|open)\b.*\b(?:when|what times?|tomorrow|today)\b",
+            normalized
+        ))
+        return asks_availability and bool(re.search(
+            r"\b(?:calendar|schedule|tomorrow|today)\b", normalized
+        ))
+
+    def _is_calendar_agenda_question(self, command):
+        normalized = command.lower()
+        asks_agenda = bool(re.search(
+            r"\b(?:what am i doing|what(?:'s| is) on my calendar|"
+            r"what do i have|my schedule)\b", normalized
+        ))
+        return asks_agenda and bool(re.search(
+            r"\b(?:calendar|schedule|tomorrow|today)\b", normalized
+        ))
+
+    def _calendar_availability(self, command, args=None):
+        client = next(
+            (
+                getattr(actuator, "client", None)
+                for actuator in self.actuators
+                if getattr(actuator, "action_type", None) == "calendar"
+            ),
+            None
+        )
+        if client is None:
+            return "Calendar availability is not configured."
+        timezone = ZoneInfo(os.getenv("ENTITY_TIMEZONE", "America/New_York"))
+        today = datetime.now(timezone).date()
+        normalized = command.lower()
+        requested_date = str((args or {}).get("date") or "").lower().strip()
+        target_date = (
+            today + timedelta(days=1)
+            if requested_date == "tomorrow" or "tomorrow" in normalized
+            else today
+        )
+        try:
+            return client.availability_for_date(target_date, timezone.key)
+        except RuntimeError as exc:
+            return f"Calendar availability is unavailable: {exc}"
+        except Exception as exc:
+            print("Calendar availability lookup failed:", exc)
+            return "I couldn't retrieve your calendar availability right now."
+
+    def _calendar_agenda(self, command):
+        client = next(
+            (
+                getattr(actuator, "client", None)
+                for actuator in self.actuators
+                if getattr(actuator, "action_type", None) == "calendar"
+            ),
+            None
+        )
+        if client is None:
+            return "Calendar agenda is not configured."
+        timezone = ZoneInfo(os.getenv("ENTITY_TIMEZONE", "America/New_York"))
+        target_date = datetime.now(timezone).date()
+        if "tomorrow" in command.lower():
+            target_date += timedelta(days=1)
+        try:
+            return client.agenda_for_date(target_date, timezone.key)
+        except RuntimeError as exc:
+            return f"Calendar agenda is unavailable: {exc}"
+        except Exception as exc:
+            print("Calendar agenda lookup failed:", exc)
+            return "I couldn't retrieve your calendar agenda right now."
+
+    def _report_calendar_availability(self, command, observation):
+        if not observation or observation.startswith(
+            "Calendar availability is unavailable"
+        ):
+            return observation
+        summarize = getattr(
+            self.planner, "summarize_calendar_observation", None
+        )
+        if not callable(summarize):
+            return observation
+        result = {"text": ""}
+
+        def generate():
+            try:
+                result["text"] = summarize(command, observation)
+            except Exception:
+                result["text"] = ""
+
+        worker = threading.Thread(target=generate, daemon=True)
+        worker.start()
+        worker.join(timeout=8)
+        return result["text"] or observation
 
     def _handle_route_time_command(self, command, source="voice"):
         is_route_question = self._is_route_time_question(command)
@@ -1528,6 +1667,14 @@ class EntityRuntime:
                     "args.location is optional when a default location is "
                     "configured. args.question should preserve what the user "
                     "wants to know, such as whether to bring a jacket."
+                )
+            },
+            {
+                "name": "calendar_availability",
+                "description": (
+                    "Read Google Calendar availability for today or tomorrow. "
+                    "Use args.date as today or tomorrow. This tool is read-only "
+                    "and is required for questions about free time."
                 )
             },
             {
@@ -2070,6 +2217,12 @@ class EntityRuntime:
                     location=str(args.get("location", "")).strip(),
                     question=str(args.get("question", command)).strip()
                     or command
+                )
+
+            if tool == "calendar_availability":
+                observation = self._calendar_availability(command, args=args)
+                return self._report_calendar_availability(
+                    command, observation
                 )
 
             if tool == "notify":
@@ -2705,7 +2858,11 @@ class EntityRuntime:
             "tell me things the entity has learned",
             "what has it learned",
             "what do you know now",
-            "show me what you learned"
+            "show me what you learned",
+            "what do you remember",
+            "what did i tell you",
+            "do you remember",
+            "show me my memories"
         ))
 
     def _is_worldview_command(self, command):

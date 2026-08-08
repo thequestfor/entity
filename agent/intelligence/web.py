@@ -1,5 +1,6 @@
 import json
 import threading
+import webbrowser
 from functools import partial
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -48,6 +49,16 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
                     self.server.intelligence_store.list_publisher_reputations(
                         limit=_query_int(query, "limit", 200)
                     )
+                )
+            })
+            return
+
+        if parsed.path == "/api/intelligence/reputation-outcomes":
+            query = parse_qs(parsed.query)
+            self._send_json({
+                "outcomes": self.server.intelligence_store.list_publisher_outcomes(
+                    publisher_key=(query.get("publisher") or [None])[0],
+                    limit=_query_int(query, "limit", 100)
                 )
             })
             return
@@ -149,12 +160,14 @@ class IntelligenceDashboard:
         store,
         host="127.0.0.1",
         port=8770,
-        static_root=DASHBOARD_ROOT
+        static_root=DASHBOARD_ROOT,
+        open_browser=False
     ):
         self.store = store
         self.host = host
         self.port = int(port)
         self.static_root = Path(static_root)
+        self.open_browser = bool(open_browser)
         self._server = None
         self._thread = None
 
@@ -189,6 +202,8 @@ class IntelligenceDashboard:
         )
         self._thread.start()
         print(f"Entity intelligence dashboard: {self.url}")
+        if self.open_browser:
+            webbrowser.open(self.url, new=1)
 
     def stop(self):
         if self._server:

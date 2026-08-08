@@ -2,7 +2,7 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -435,6 +435,114 @@ class GoogleCalendarClient:
 
         return result.get("items", [])
 
+    def events_between(self, start, end):
+        """Return calendar events in a bounded, explicitly requested window."""
+        if not self.enabled:
+            raise RuntimeError("Google Calendar is disabled.")
+        if not self.credentials_path.exists() or not self.token_path.exists():
+            raise RuntimeError("Google Calendar authorization is not complete.")
+
+        service = self._service()
+        result = (
+            service.events()
+            .list(
+                calendarId=self.calendar_id,
+                timeMin=start.astimezone(timezone.utc).isoformat(),
+                timeMax=end.astimezone(timezone.utc).isoformat(),
+                singleEvents=True,
+                orderBy="startTime"
+            )
+            .execute()
+        )
+        return result.get("items", [])
+
+    def availability_for_date(self, target_date, timezone_name=None):
+        """Describe free intervals for one local calendar day without changing it."""
+        local_timezone = ZoneInfo(
+            timezone_name or os.getenv("ENTITY_TIMEZONE", "America/New_York")
+        )
+        if isinstance(target_date, datetime):
+            target_date = target_date.astimezone(local_timezone).date()
+        if not isinstance(target_date, date):
+            raise ValueError("A calendar date is required.")
+
+        day_start = datetime.combine(target_date, time.min, tzinfo=local_timezone)
+        day_end = day_start + timedelta(days=1)
+        intervals = []
+        for item in self.events_between(day_start, day_end):
+            if item.get("transparency") == "transparent":
+                continue
+            interval = self._event_interval(item, local_timezone)
+            if interval is None:
+                continue
+            start, end = interval
+            start = max(start, day_start)
+            end = min(end, day_end)
+            if end > start:
+                intervals.append((start, end))
+
+        return _format_availability(target_date, _merge_intervals(intervals))
+
+    def agenda_for_date(self, target_date, timezone_name=None):
+        """Return a concise, read-only agenda for one local calendar day."""
+        local_timezone = ZoneInfo(
+            timezone_name or os.getenv("ENTITY_TIMEZONE", "America/New_York")
+        )
+        if isinstance(target_date, datetime):
+            target_date = target_date.astimezone(local_timezone).date()
+        if not isinstance(target_date, date):
+            raise ValueError("A calendar date is required.")
+        day_start = datetime.combine(target_date, time.min, tzinfo=local_timezone)
+        day_end = day_start + timedelta(days=1)
+        events = []
+        for item in self.events_between(day_start, day_end):
+            interval = self._event_interval(item, local_timezone)
+            if interval is None:
+                continue
+            start, end = interval
+            if start < day_end and end > day_start:
+                events.append((max(start, day_start), item))
+        if not events:
+            return f"You have nothing scheduled on {target_date.strftime('%A, %B %-d')}."
+        lines = []
+        for start, item in sorted(events)[:8]:
+            summary = str(item.get("summary") or "Calendar event").strip()
+            lines.append(f"{summary} at {start.strftime('%-I:%M %p')}")
+        return (
+            f"Your schedule for {target_date.strftime('%A, %B %-d')}: "
+            + "; ".join(lines)
+            + ("." if len(events) <= 8 else "; plus additional events.")
+        )
+
+    def _event_interval(self, item, local_timezone):
+        start = self._event_time(item.get("start") or {}, local_timezone)
+        end = self._event_time(item.get("end") or {}, local_timezone)
+        if start is None or end is None or end <= start:
+            return None
+        return start, end
+
+    def _event_time(self, value, local_timezone):
+        date_time = value.get("dateTime")
+        if date_time:
+            try:
+                parsed = datetime.fromisoformat(str(date_time).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            return (
+                parsed.replace(tzinfo=local_timezone)
+                if parsed.tzinfo is None else parsed.astimezone(local_timezone)
+            )
+        date_value = value.get("date")
+        if date_value:
+            try:
+                return datetime.combine(
+                    date.fromisoformat(str(date_value)), time.min,
+                    tzinfo=local_timezone
+                )
+            except ValueError:
+                return None
+        return None
+
     def _service(self):
         try:
             from google.auth.transport.requests import Request
@@ -478,3 +586,42 @@ class GoogleCalendarClient:
             "yes",
             "on"
         }
+
+
+def _merge_intervals(intervals):
+    merged = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _format_availability(target_date, busy):
+    day_start = datetime.combine(target_date, time.min, tzinfo=busy[0][0].tzinfo) if busy else None
+    day_end = day_start + timedelta(days=1) if day_start else None
+    if not busy:
+        return f"You are free all day on {target_date.strftime('%A, %B %-d')}."
+
+    free = []
+    cursor = day_start
+    for start, end in busy:
+        if start > cursor:
+            free.append((cursor, start))
+        cursor = max(cursor, end)
+    if cursor < day_end:
+        free.append((cursor, day_end))
+
+    if not free:
+        return f"You have no open time on {target_date.strftime('%A, %B %-d')}."
+
+    def display(interval):
+        start, end = interval
+        return f"{start.strftime('%-I:%M %p')} to {end.strftime('%-I:%M %p')}"
+
+    return (
+        f"You are free on {target_date.strftime('%A, %B %-d')}: "
+        + "; ".join(display(interval) for interval in free[:8])
+        + ("." if len(free) <= 8 else "; plus additional open time.")
+    )

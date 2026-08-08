@@ -1,6 +1,8 @@
 import json
 import os
 import re
+import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -63,11 +65,25 @@ REMINDER_PLANNING_PATTERNS = [
     r"\bleave\b"
 ]
 
+DEBATE_PATTERNS = [
+    r"\bdebate\b",
+    r"\bargue\b",
+    r"\bdisagree\b",
+    r"\byour (?:view|opinion|worldview|assessment)\b",
+    r"\bwhy do you (?:think|believe)\b",
+    r"\bstrongest (?:case|argument|counterargument)\b",
+    r"\bweigh (?:the )?evidence\b",
+    r"\bdefend (?:that|your)\b"
+]
+
 
 class ModelRouter:
     def __init__(self, providers=None, unreal_probe=None):
         self._unreal_probe = unreal_probe
         self.last_provider_name = None
+        self._provider_failures = {}
+        self._provider_retry_at = {}
+        self._health_lock = threading.Lock()
 
         if providers is not None:
             self.providers = providers
@@ -96,7 +112,7 @@ class ModelRouter:
 
     def provider(self):
         for provider in self.providers:
-            if provider.available():
+            if not self._circuit_open(provider.name) and provider.available():
                 return provider
 
         return None
@@ -120,11 +136,14 @@ class ModelRouter:
                     response_format=response_format
                 )
                 self.last_provider_name = provider.name
+                self._record_provider_success(provider.name)
                 return response
             except ModelUnavailable as exc:
+                self._record_provider_failure(provider.name, exc)
                 errors.append(f"{provider.name}: {exc}")
                 continue
             except Exception as exc:
+                self._record_provider_failure(provider.name, exc)
                 errors.append(f"{provider.name}: {exc}")
                 continue
 
@@ -155,8 +174,10 @@ class ModelRouter:
                     self.last_provider_name = provider.name
                     yield token
 
+                self._record_provider_success(provider.name)
                 return
             except ModelUnavailable as exc:
+                self._record_provider_failure(provider.name, exc)
                 if yielded:
                     raise ModelUnavailable(
                         f"{provider.name} failed after streaming began: {exc}"
@@ -165,6 +186,7 @@ class ModelRouter:
                 errors.append(f"{provider.name}: {exc}")
                 continue
             except Exception as exc:
+                self._record_provider_failure(provider.name, exc)
                 if yielded:
                     raise ModelUnavailable(
                         f"{provider.name} failed after streaming began: {exc}"
@@ -259,12 +281,28 @@ class ModelRouter:
             )
 
         if routing == "world_understanding":
+            preferred = ["local_thinking", "cloud_openai", "local_fast"]
+            if self._env_bool("ENTITY_WORLD_UNDERSTANDING_CLOUD_FIRST"):
+                preferred = ["cloud_openai", "local_thinking", "local_fast"]
             return self._available_sequence(
-                preferred=["local_thinking", "cloud_openai", "local_fast"],
+                preferred=preferred,
                 on_escalation=on_escalation,
                 reason=(
                     "Cross-source worldview synthesis requires the reasoning "
                     "model."
+                )
+            )
+
+        if (
+            self._env_bool("ENTITY_DEBATE_CLOUD_FIRST")
+            and self._is_debate_request(user_input)
+        ):
+            return self._available_sequence(
+                preferred=["cloud_openai", "local_thinking", "local_fast"],
+                on_escalation=on_escalation,
+                reason=(
+                    "Evidence-heavy opinion and debate use the cloud reasoning "
+                    "model when configured."
                 )
             )
 
@@ -327,6 +365,12 @@ class ModelRouter:
             for pattern in REMINDER_PLANNING_PATTERNS
         )
 
+    def _is_debate_request(self, user_input):
+        if not user_input:
+            return False
+        normalized = user_input.lower()
+        return any(re.search(pattern, normalized) for pattern in DEBATE_PATTERNS)
+
     def _available_sequence(self, preferred, on_escalation, reason):
         cloud_preferred = self._cloud_preferred_for_unreal()
 
@@ -344,7 +388,11 @@ class ModelRouter:
         for index, name in enumerate(preferred):
             provider = providers.get(name)
 
-            if provider is None or not provider.available():
+            if (
+                provider is None
+                or self._circuit_open(name)
+                or not provider.available()
+            ):
                 continue
 
             if (
@@ -355,6 +403,46 @@ class ModelRouter:
                 self._notify_escalation(provider, on_escalation, reason)
 
             yield provider
+
+    def _circuit_open(self, provider_name):
+        with self._health_lock:
+            retry_at = self._provider_retry_at.get(provider_name, 0.0)
+        return time.monotonic() < retry_at
+
+    def _record_provider_success(self, provider_name):
+        with self._health_lock:
+            self._provider_failures.pop(provider_name, None)
+            self._provider_retry_at.pop(provider_name, None)
+
+    def _record_provider_failure(self, provider_name, error):
+        message = str(error).lower()
+        quota_failure = any(marker in message for marker in (
+            "insufficient_quota",
+            "credit_balance_exhausted",
+            "no credits remaining"
+        ))
+        threshold = self._env_int(
+            "ENTITY_MODEL_CIRCUIT_FAILURE_THRESHOLD", 3, minimum=1
+        )
+        with self._health_lock:
+            failures = self._provider_failures.get(provider_name, 0) + 1
+            self._provider_failures[provider_name] = failures
+            if failures < threshold and not quota_failure:
+                return
+            cooldown = self._env_int(
+                "ENTITY_MODEL_QUOTA_COOLDOWN_SECONDS" if quota_failure else
+                "ENTITY_MODEL_CIRCUIT_COOLDOWN_SECONDS",
+                3600 if quota_failure else 300,
+                minimum=30
+            )
+            self._provider_retry_at[provider_name] = time.monotonic() + cooldown
+
+    def _env_int(self, name, default, minimum=0):
+        try:
+            value = int(os.getenv(name, str(default)))
+        except ValueError:
+            value = default
+        return max(minimum, value)
 
     def _cloud_preferred_for_unreal(self):
         if not self._env_bool("ENTITY_PREFER_CLOUD_WHEN_UNREAL"):

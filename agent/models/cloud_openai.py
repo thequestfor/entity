@@ -16,6 +16,14 @@ class CloudOpenAIProvider(ModelProvider):
             "ENTITY_CLOUD_LLM_MODEL",
             "gpt-4.1-mini"
         )
+        effort = os.getenv(
+            "ENTITY_CLOUD_LLM_REASONING_EFFORT", "medium"
+        ).strip().lower()
+        self.reasoning_effort = (
+            effort if effort in {
+                "none", "low", "medium", "high", "xhigh", "max"
+            } else "medium"
+        )
 
     def available(self):
         return (
@@ -38,9 +46,13 @@ class CloudOpenAIProvider(ModelProvider):
                         "role": "user",
                         "content": prompt
                     }
-                ],
-                "temperature": temperature
+                ]
             }
+
+            if self.model.startswith("gpt-5"):
+                request["reasoning_effort"] = self.reasoning_effort
+            else:
+                request["temperature"] = temperature
 
             if response_format == "json":
                 request["response_format"] = {
@@ -64,17 +76,21 @@ class CloudOpenAIProvider(ModelProvider):
             )
 
         try:
-            response = self._client().chat.completions.create(
-                model=self.model,
-                messages=[
+            request = {
+                "model": self.model,
+                "messages": [
                     {
                         "role": "user",
                         "content": prompt
                     }
                 ],
-                temperature=temperature,
-                stream=True
-            )
+                "stream": True
+            }
+            if self.model.startswith("gpt-5"):
+                request["reasoning_effort"] = self.reasoning_effort
+            else:
+                request["temperature"] = temperature
+            response = self._client().chat.completions.create(**request)
 
             for chunk in response:
                 token = chunk.choices[0].delta.content or ""

@@ -1035,6 +1035,60 @@ class ResilienceTests(unittest.TestCase):
         self.assertEqual({"answer": True}, payload)
         self.assertEqual("json", provider.response_format)
 
+    def test_public_unauthenticated_ntfy_can_be_explicitly_accepted(self):
+        env = {
+            "ENTITY_NOTIFY_PROVIDER": "ntfy",
+            "ENTITY_NTFY_URL": "https://ntfy.sh",
+            "ENTITY_NTFY_IN_TOPIC": "private-in",
+            "ENTITY_NTFY_OUT_TOPIC": "private-out",
+            "ENTITY_NTFY_TOKEN": "",
+            "ENTITY_NTFY_ALLOW_PUBLIC_UNAUTHENTICATED": "true"
+        }
+
+        with patch.dict(os.environ, env, clear=False):
+            issues = StartupHealthCheck()._notification_issues()
+
+        self.assertEqual([], issues)
+
+    def test_model_router_opens_circuit_after_repeated_failures(self):
+        class Provider:
+            name = "local_fast"
+
+            def __init__(self):
+                self.calls = 0
+
+            def available(self):
+                return True
+
+            def generate(self, prompt, temperature=0, response_format=None):
+                self.calls += 1
+                raise ModelUnavailable("timed out")
+
+        provider = Provider()
+        router = ModelRouter(providers=[provider])
+        with patch.dict(os.environ, {
+            "ENTITY_MODEL_CIRCUIT_FAILURE_THRESHOLD": "2",
+            "ENTITY_MODEL_CIRCUIT_COOLDOWN_SECONDS": "300"
+        }, clear=False):
+            with self.assertRaises(ModelUnavailable):
+                router.generate("one")
+            with self.assertRaises(ModelUnavailable):
+                router.generate("two")
+            with self.assertRaises(ModelUnavailable):
+                router.generate("three")
+
+        self.assertEqual(2, provider.calls)
+
+    def test_calendar_recognizes_revoked_authorization_as_permanent(self):
+        observer = CalendarObserver.__new__(CalendarObserver)
+
+        self.assertTrue(observer._is_permanent_auth_error(
+            RuntimeError("invalid_grant: Token has been expired or revoked")
+        ))
+        self.assertFalse(observer._is_permanent_auth_error(
+            RuntimeError("temporary DNS failure")
+        ))
+
     def test_weather_uses_deterministic_fast_path_without_planner(self):
         class Weather:
             def lookup(self, location="", question=""):

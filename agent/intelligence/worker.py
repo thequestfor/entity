@@ -1,4 +1,5 @@
 import threading
+import time
 from dataclasses import dataclass
 
 from agent.connectors import (
@@ -47,6 +48,9 @@ class IntelligenceWorker:
         forecasting=None,
         forecast_max_active=12,
         forecast_per_cycle=2,
+        analysis_poll_seconds=300,
+        forecast_poll_seconds=900,
+        source_backoff_max_seconds=21600,
         on_activity=None
     ):
         self.store = store
@@ -65,6 +69,15 @@ class IntelligenceWorker:
             max_active=forecast_max_active, per_cycle=forecast_per_cycle
         )
         self.last_forecast_result = {"created": 0, "resolved": 0}
+        self.analysis_poll_seconds = max(30, int(analysis_poll_seconds))
+        self.forecast_poll_seconds = max(60, int(forecast_poll_seconds))
+        self.source_backoff_max_seconds = max(
+            60, int(source_backoff_max_seconds)
+        )
+        self._next_analysis_at = 0.0
+        self._next_forecast_at = 0.0
+        self._source_failures = {}
+        self._source_retry_at = {}
         self.on_activity = on_activity
         self._stop = threading.Event()
         self._thread = None
@@ -219,15 +232,27 @@ class IntelligenceWorker:
             store,
             enabled=config.reputation_enabled,
             maturity_hours=config.reputation_maturity_hours,
-            max_adjustment=config.reputation_max_adjustment
+            max_adjustment=config.reputation_max_adjustment,
+            prior_strength=config.reputation_prior_strength
+        )
+        understanding = UnderstandingEngine(
+            store,
+            synthesis_per_cycle=config.worldview_synthesis_per_cycle,
+            synthesis_batch_size=config.worldview_batch_size,
+            max_candidate_age_days=config.worldview_max_age_days,
+            maintenance_enabled=config.worldview_maintenance_enabled
         )
         return cls(
             store=store,
             connectors=connectors,
             loop_seconds=config.worker_poll_seconds,
+            understanding=understanding,
             reputation=reputation,
             forecast_max_active=config.forecast_max_active,
-            forecast_per_cycle=config.forecast_per_cycle
+            forecast_per_cycle=config.forecast_per_cycle,
+            analysis_poll_seconds=config.analysis_poll_seconds,
+            forecast_poll_seconds=config.forecast_poll_seconds,
+            source_backoff_max_seconds=config.source_backoff_max_seconds
         )
 
     @property
@@ -255,11 +280,13 @@ class IntelligenceWorker:
         self._thread = None
 
     def run_once(self, force=False):
+        now = time.monotonic()
         outcomes = []
         due = [
             connector for connector in self.connectors
             if connector.enabled
             and (force or self.store.source_due(connector.source_id))
+            and (force or self._source_ready(connector.source_id, now))
         ]
         if due:
             self._emit_activity(
@@ -268,7 +295,9 @@ class IntelligenceWorker:
                 sources=[connector.source_id for connector in due]
             )
         for connector in due:
-            outcomes.append(self._poll_connector(connector))
+            outcome = self._poll_connector(connector)
+            outcomes.append(outcome)
+            self._record_source_outcome(connector, outcome, now)
 
         if due:
             self._emit_activity(
@@ -277,16 +306,22 @@ class IntelligenceWorker:
             )
         self.last_analysis_result = AnalysisResult()
         self.last_reputation_result = ReputationResult()
+        self.last_forecast_result = {"created": 0, "resolved": 0}
+        changed = sum(outcome.result.changed for outcome in outcomes)
+        analysis_due = changed or force or now >= self._next_analysis_at
         try:
-            self.last_analysis_result = self.understanding.analyze_pending()
-            self.last_forecast_result = self.forecasting.run_cycle()
-            if due:
+            if analysis_due:
+                self.last_analysis_result = self.understanding.analyze_pending()
+                self._next_analysis_at = now + self.analysis_poll_seconds
+            if force or now >= self._next_forecast_at:
+                self.last_forecast_result = self.forecasting.run_cycle()
+                self._next_forecast_at = now + self.forecast_poll_seconds
+            if analysis_due:
                 self.last_reputation_result = self.reputation.evaluate()
         except Exception as exc:
             print("Intelligence understanding cycle failed:", exc)
         finally:
             if due:
-                changed = sum(outcome.result.changed for outcome in outcomes)
                 self._emit_activity(
                     "intelligence_finished",
                     message=self._cycle_message(changed, outcomes),
@@ -306,6 +341,27 @@ class IntelligenceWorker:
                 )
 
         return outcomes
+
+    def _source_ready(self, source_id, now=None):
+        now = time.monotonic() if now is None else now
+        return now >= self._source_retry_at.get(source_id, 0.0)
+
+    def _record_source_outcome(self, connector, outcome, now=None):
+        source_id = connector.source_id
+        if not outcome.error:
+            self._source_failures.pop(source_id, None)
+            self._source_retry_at.pop(source_id, None)
+            return
+
+        failures = self._source_failures.get(source_id, 0) + 1
+        self._source_failures[source_id] = failures
+        base_delay = max(60, int(connector.poll_seconds))
+        delay = min(
+            self.source_backoff_max_seconds,
+            base_delay * (2 ** min(failures - 1, 10))
+        )
+        now = time.monotonic() if now is None else now
+        self._source_retry_at[source_id] = now + delay
 
     def _cycle_message(self, changed, outcomes):
         errors = sum(bool(outcome.error) for outcome in outcomes)

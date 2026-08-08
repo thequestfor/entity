@@ -55,8 +55,15 @@ class StartupHealthCheck:
 
         base_url = os.getenv("ENTITY_NTFY_URL", "https://ntfy.sh")
         token = os.getenv("ENTITY_NTFY_TOKEN", "")
+        accepted_public_topic_risk = self._env_bool(
+            "ENTITY_NTFY_ALLOW_PUBLIC_UNAUTHENTICATED"
+        )
 
-        if base_url.rstrip("/") == "https://ntfy.sh" and not token:
+        if (
+            base_url.rstrip("/") == "https://ntfy.sh"
+            and not token
+            and not accepted_public_topic_risk
+        ):
             issues.append(
                 "Ntfy inbound commands use the public server without an "
                 "authentication token and rely only on topic secrecy."

@@ -44,7 +44,8 @@ class IntelligenceService:
             self.dashboard = self.dashboard or IntelligenceDashboard(
                 store=self.store,
                 host=self.config.dashboard_host,
-                port=self.config.dashboard_port
+                port=self.config.dashboard_port,
+                open_browser=self.config.dashboard_open_browser
             )
 
     @classmethod

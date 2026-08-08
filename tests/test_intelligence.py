@@ -1,9 +1,13 @@
 import json
 import base64
+import re
+import sqlite3
 import tempfile
 import unittest
 import urllib.request
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 from agent.connectors.cisa import CisaKevConnector
 from agent.connectors.eonet import EonetConnector
@@ -52,6 +56,13 @@ class IntelligenceStoreTests(unittest.TestCase):
     def tearDown(self):
         self.temporary_directory.cleanup()
 
+    def test_connection_context_releases_database_descriptor(self):
+        with self.store._connect() as connection:
+            connection.execute("SELECT 1").fetchone()
+
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+
     def test_store_applies_versioned_migration_and_private_permissions(self):
         with self.store._connect() as connection:
             version = connection.execute(
@@ -59,7 +70,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(5, version)
+        self.assertEqual(6, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -332,7 +343,9 @@ class UnderstandingEngineTests(unittest.TestCase):
         situation = self.store.list_situations()[0]
         detail = self.store.get_situation(situation["id"])
 
-        self.assertEqual(["world_understanding"], router.routes)
+        self.assertEqual(
+            ["world_understanding", "world_understanding"], router.routes
+        )
         self.assertEqual(1, result.syntheses_created)
         self.assertEqual(
             "The fire is active but containment is disputed; independent reports agree on the location.",
@@ -340,6 +353,104 @@ class UnderstandingEngineTests(unittest.TestCase):
         )
         self.assertEqual("local_thinking", detail["worldview_syntheses"][0]["model"])
         self.assertEqual(2, len(detail["worldview_syntheses"][0]["evidence"]))
+
+    def test_invalid_worldview_output_gets_conservative_fallback(self):
+        class InvalidRouter:
+            last_provider_name = "cloud_openai"
+
+            def generate_json(self, prompt, **kwargs):
+                raise ValueError("invalid model JSON")
+
+            def provider_name(self):
+                return "cloud_openai"
+
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="fallback", title="Unconfirmed port disruption",
+            url="https://a.test/port", summary="A port disruption was reported.",
+            category="traditional-news",
+            published_at=datetime.now(UTC).isoformat()
+        )])
+
+        result = UnderstandingEngine(
+            self.store, router=InvalidRouter()
+        ).analyze_pending()
+        situation = self.store.list_situations()[0]
+
+        self.assertEqual(1, result.syntheses_created)
+        self.assertEqual("uncertain", situation["worldview_stance"])
+        self.assertIn("Available evidence reports", situation["worldview"])
+
+    def test_worldview_batches_multiple_situations(self):
+        class BatchRouter:
+            last_provider_name = "cloud_openai"
+
+            def __init__(self):
+                self.calls = 0
+
+            def generate_json(self, prompt, **kwargs):
+                self.calls += 1
+                ids = re.findall(
+                    r'"situation": \{"id": "([^"]+)"', prompt
+                )
+                return {"assessments": [{
+                    "situation_id": situation_id,
+                    "conclusion": "Evidence remains preliminary.",
+                    "confidence": 0.55,
+                    "stance": "uncertain",
+                    "implications": [],
+                    "contradictions": [],
+                    "open_questions": []
+                } for situation_id in dict.fromkeys(ids)]}
+
+            def provider_name(self):
+                return "cloud_openai"
+
+        now = datetime.now(UTC).isoformat()
+        self.store.ingest_items("source-a", [
+            SourceItem(
+                external_id="batch-a", title="Election update in Northland",
+                url="https://a.test/northland", category="traditional-news",
+                published_at=now
+            ),
+            SourceItem(
+                external_id="batch-b", title="Shipping update in Southport",
+                url="https://a.test/southport", category="traditional-news",
+                published_at=now
+            )
+        ])
+        router = BatchRouter()
+
+        result = UnderstandingEngine(
+            self.store, router=router, synthesis_batch_size=4
+        ).analyze_pending()
+
+        self.assertEqual(2, result.syntheses_created)
+        self.assertEqual(2, router.calls)  # one synthesis and one challenge batch
+
+    def test_lifecycle_expires_transient_situations_without_deleting_evidence(self):
+        class UnavailableRouter:
+            providers = []
+
+        old = (datetime.now(UTC) - timedelta(days=10)).isoformat()
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="old-alert", title="Old weather warning",
+            url="https://a.test/old-alert", category="weather-alert",
+            published_at=old
+        )])
+        initial = UnderstandingEngine(
+            self.store, router=UnavailableRouter()
+        ).analyze_pending()
+        self.assertEqual(1, initial.documents_analyzed)
+
+        engine = UnderstandingEngine(
+            self.store, router=UnavailableRouter(), maintenance_enabled=True
+        )
+        lifecycle = engine._maintain_situation_lifecycle()
+        situation = self.store.list_situations(limit=10)[0]
+
+        self.assertEqual(1, lifecycle["expired"])
+        self.assertEqual("expired", situation["status"])
+        self.assertEqual(1, len(self.store.list_documents()))
 
     def test_forecasts_are_falsifiable_and_scored_after_resolution(self):
         from datetime import UTC, datetime, timedelta
@@ -359,6 +470,13 @@ class UnderstandingEngineTests(unittest.TestCase):
                         "contradictions": [], "open_questions": []
                     }
                 if self.calls == 2:
+                    return {
+                        "conclusion": "The fire is probably active after challenge.",
+                        "confidence": 0.72, "stance": "probable",
+                        "implications": [], "contradictions": [],
+                        "open_questions": ["Will officials confirm the status?"]
+                    }
+                if self.calls == 3:
                     return {
                         "question": "Will the fire remain active?",
                         "predicted_outcome": "The fire will remain active.",
@@ -526,6 +644,35 @@ class ReputationEngineTests(unittest.TestCase):
         self.assertLess(reputation["learned_credibility"], 0.3)
         self.assertGreaterEqual(reputation["learned_credibility"], 0.15)
 
+    def test_later_authoritative_contradiction_lowers_publisher_trust(self):
+        self.store.ingest_items("telegram", [SourceItem(
+            external_id="wrong", title="Earthquake near Conflict City",
+            summary="The earthquake had magnitude 7.8.",
+            url="https://t.me/noisywire/3", category="earthquake",
+            published_at="2026-07-20T10:00:00Z",
+            metadata={
+                "platform": "telegram", "channel_username": "noisywire",
+                "magnitude": 7.8
+            }
+        )])
+        self.store.ingest_items("official", [SourceItem(
+            external_id="correct", title="Earthquake near Conflict City",
+            summary="Reviewed magnitude is 4.2.",
+            url="https://official.test/conflict-quake", category="earthquake",
+            published_at="2026-07-20T11:00:00Z",
+            metadata={"magnitude": 4.2}
+        )])
+        UnderstandingEngine(self.store).analyze_pending()
+
+        ReputationEngine(self.store, maturity_hours=0).evaluate()
+        reputation = {
+            row["publisher_key"]: row
+            for row in self.store.list_publisher_reputations()
+        }["telegram:noisywire"]
+
+        self.assertEqual(1, reputation["contradicted_count"])
+        self.assertLess(reputation["learned_credibility"], 0.3)
+
     def test_publisher_with_no_outcome_keeps_exact_baseline(self):
         self.store.ingest_items("official", [SourceItem(
             external_id="unresolved", title="Unresolved official notice",
@@ -540,6 +687,41 @@ class ReputationEngineTests(unittest.TestCase):
         self.assertEqual(0, result.publishers_updated)
         self.assertEqual(0.95, reputation["baseline_credibility"])
         self.assertEqual(0.95, reputation["learned_credibility"])
+
+    def test_repeated_confirmations_can_overcome_social_source_baseline(self):
+        for index in range(8):
+            city = f"ExampleCity{index}"
+            self.store.ingest_items("telegram", [SourceItem(
+                external_id=f"early-{index}",
+                title=f"Earthquake reported near {city}",
+                summary=f"A magnitude event was reported near {city}.",
+                url=f"https://t.me/osint613/{index}",
+                category="earthquake",
+                published_at=f"2026-07-{10 + index:02d}T10:00:00Z",
+                metadata={
+                    "platform": "telegram", "channel_username": "osint613"
+                }
+            )])
+            self.store.ingest_items("official", [SourceItem(
+                external_id=f"official-{index}",
+                title=f"Earthquake reported near {city}",
+                summary=f"A magnitude event was reported near {city}.",
+                url=f"https://official.test/quake/{index}",
+                category="earthquake",
+                published_at=f"2026-07-{10 + index:02d}T11:00:00Z"
+            )])
+        UnderstandingEngine(self.store).analyze_pending()
+
+        ReputationEngine(self.store, maturity_hours=0).evaluate()
+        reputation = {
+            row["publisher_key"]: row
+            for row in self.store.list_publisher_reputations()
+        }["telegram:osint613"]
+
+        self.assertEqual(8, reputation["confirmed_count"])
+        self.assertEqual(8, reputation["early_confirmation_count"])
+        self.assertGreater(reputation["learned_credibility"], 0.45)
+        self.assertGreater(reputation["reliability_lower_bound"], 0.3)
 
     def test_every_public_publisher_gets_a_profile_before_maturity(self):
         from datetime import UTC, datetime
@@ -601,6 +783,25 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual("tag:example,1", item.external_id)
         self.assertEqual("https://atom.example/report", item.url)
         self.assertEqual(["Politics"], item.metadata["feed_categories"])
+
+    def test_news_connector_tolerates_gzip_bom_and_invalid_control_byte(self):
+        import gzip
+
+        xml = (
+            b"\xef\xbb\xbf<?xml version='1.0'?><rss><channel><item>"
+            b"<guid>tolerant-1</guid><title>Feed\x08 update</title>"
+            b"<link>https://news.example/tolerant</link>"
+            b"</item></channel></rss>"
+        )
+        connector = NewsFeedConnector(
+            "Tolerant News", "https://news.example/feed",
+            fetch_xml=lambda _: gzip.compress(xml)
+        )
+
+        item = connector.poll().items[0]
+
+        self.assertEqual("Feed update", item.title)
+        self.assertEqual("https://news.example/tolerant", item.url)
 
     def test_polymarket_connector_labels_prices_as_nonfactual_signal(self):
         connector = PolymarketConnector(fetch_json=lambda _: [{
@@ -1158,6 +1359,60 @@ class ConnectorTests(unittest.TestCase):
 
 
 class IntelligenceWorkerTests(unittest.TestCase):
+    def test_worker_throttles_maintenance_cognition_without_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = IntelligenceStore(Path(directory) / "cadence.db")
+
+            class Understanding:
+                calls = 0
+
+                def analyze_pending(self):
+                    self.calls += 1
+                    return type("Result", (), {
+                        "documents_analyzed": 0,
+                        "situations_created": 0,
+                        "claims_created": 0,
+                        "syntheses_created": 0
+                    })()
+
+            class Forecasting:
+                calls = 0
+
+                def run_cycle(self):
+                    self.calls += 1
+                    return {"created": 0, "resolved": 0}
+
+            understanding = Understanding()
+            forecasting = Forecasting()
+            worker = IntelligenceWorker(
+                store, [], understanding=understanding,
+                forecasting=forecasting,
+                analysis_poll_seconds=300,
+                forecast_poll_seconds=900
+            )
+
+            worker.run_once()
+            worker.run_once()
+
+            self.assertEqual(1, understanding.calls)
+            self.assertEqual(1, forecasting.calls)
+
+    def test_worker_backs_off_a_failing_source(self):
+        class Connector:
+            source_id = "failing"
+            poll_seconds = 60
+
+        outcome = type("Outcome", (), {"error": "temporary failure"})()
+        worker = IntelligenceWorker.__new__(IntelligenceWorker)
+        worker.source_backoff_max_seconds = 3600
+        worker._source_failures = {}
+        worker._source_retry_at = {}
+
+        worker._record_source_outcome(Connector(), outcome, now=100.0)
+
+        self.assertFalse(worker._source_ready("failing", now=159.0))
+        self.assertTrue(worker._source_ready("failing", now=160.0))
+
     def test_worker_advances_cursor_and_does_not_duplicate_on_restart(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             store = IntelligenceStore(Path(temporary_directory) / "world.db")
@@ -1265,6 +1520,30 @@ class IntelligenceWorkerTests(unittest.TestCase):
 
 
 class IntelligenceDashboardTests(unittest.TestCase):
+    def test_dashboard_opens_browser_when_enabled(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary = Path(temporary_directory)
+            static_root = temporary / "dashboard"
+            static_root.mkdir()
+            (static_root / "index.html").write_text(
+                "<!doctype html><title>Intelligence test</title>",
+                encoding="utf-8"
+            )
+            store = IntelligenceStore(temporary / "world.db")
+            dashboard = IntelligenceDashboard(
+                store, host="127.0.0.1", port=0,
+                static_root=static_root, open_browser=True
+            )
+
+            try:
+                with patch(
+                    "agent.intelligence.web.webbrowser.open"
+                ) as browser_open:
+                    dashboard.start()
+                browser_open.assert_called_once_with(dashboard.url, new=1)
+            finally:
+                dashboard.stop()
+
     def test_dashboard_serves_static_page_and_json_api(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary = Path(temporary_directory)
@@ -1326,6 +1605,11 @@ class IntelligenceDashboardTests(unittest.TestCase):
                     timeout=2
                 ) as response:
                     reputations = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/reputation-outcomes",
+                    timeout=2
+                ) as response:
+                    reputation_outcomes = json.loads(response.read())
 
                 self.assertIn("Intelligence test", page)
                 self.assertEqual(
@@ -1336,6 +1620,7 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertGreater(len(situation_detail["claims"]), 0)
                 self.assertEqual(1, briefing["situation_count"])
                 self.assertIn("reputations", reputations)
+                self.assertIn("outcomes", reputation_outcomes)
             finally:
                 dashboard.stop()
 

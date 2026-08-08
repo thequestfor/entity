@@ -27,12 +27,21 @@ class IntelligenceConfig:
     dashboard_host: str = "127.0.0.1"
     dashboard_port: int = 8770
     dashboard_enabled: bool = True
+    dashboard_open_browser: bool = False
     worker_poll_seconds: int = 30
+    analysis_poll_seconds: int = 300
+    forecast_poll_seconds: int = 900
+    worldview_synthesis_per_cycle: int = 12
+    worldview_batch_size: int = 4
+    worldview_max_age_days: int = 30
+    worldview_maintenance_enabled: bool = True
+    source_backoff_max_seconds: int = 21600
     request_timeout_seconds: int = 15
     max_items_per_source: int = 50
     reputation_enabled: bool = True
     reputation_maturity_hours: float = 6.0
     reputation_max_adjustment: float = 0.15
+    reputation_prior_strength: float = 8.0
     forecast_max_active: int = 12
     forecast_per_cycle: int = 2
     reliefweb_appname: str = ""
@@ -111,10 +120,44 @@ class IntelligenceConfig:
                 "ENTITY_INTELLIGENCE_DASHBOARD_ENABLED",
                 True
             ),
+            dashboard_open_browser=_env_bool(
+                "ENTITY_INTELLIGENCE_DASHBOARD_OPEN_BROWSER",
+                False
+            ),
             worker_poll_seconds=_env_int(
                 "ENTITY_INTELLIGENCE_WORKER_POLL_SECONDS",
                 30,
                 minimum=5
+            ),
+            analysis_poll_seconds=_env_int(
+                "ENTITY_INTELLIGENCE_ANALYSIS_POLL_SECONDS",
+                300,
+                minimum=30
+            ),
+            forecast_poll_seconds=_env_int(
+                "ENTITY_INTELLIGENCE_FORECAST_POLL_SECONDS",
+                900,
+                minimum=60
+            ),
+            worldview_synthesis_per_cycle=_env_int(
+                "ENTITY_WORLDVIEW_SYNTHESIS_PER_CYCLE", 12,
+                minimum=1, maximum=50
+            ),
+            worldview_batch_size=_env_int(
+                "ENTITY_WORLDVIEW_BATCH_SIZE", 4,
+                minimum=1, maximum=10
+            ),
+            worldview_max_age_days=_env_int(
+                "ENTITY_WORLDVIEW_MAX_AGE_DAYS", 30,
+                minimum=1, maximum=365
+            ),
+            worldview_maintenance_enabled=_env_bool(
+                "ENTITY_WORLDVIEW_MAINTENANCE_ENABLED", True
+            ),
+            source_backoff_max_seconds=_env_int(
+                "ENTITY_INTELLIGENCE_SOURCE_BACKOFF_MAX_SECONDS",
+                21600,
+                minimum=60
             ),
             request_timeout_seconds=_env_int(
                 "ENTITY_INTELLIGENCE_REQUEST_TIMEOUT_SECONDS",
@@ -135,6 +178,10 @@ class IntelligenceConfig:
             reputation_max_adjustment=_env_float(
                 "ENTITY_REPUTATION_MAX_ADJUSTMENT", 0.15,
                 minimum=0.0, maximum=0.3
+            ),
+            reputation_prior_strength=_env_float(
+                "ENTITY_REPUTATION_PRIOR_STRENGTH", 8.0,
+                minimum=2.0, maximum=100.0
             ),
             forecast_max_active=_env_int(
                 "ENTITY_FORECAST_MAX_ACTIVE", 12, minimum=1
@@ -289,13 +336,14 @@ def _env_bool(name, default=False):
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_int(name, default, minimum=0):
+def _env_int(name, default, minimum=0, maximum=None):
     try:
         value = int(os.getenv(name, str(default)))
     except ValueError:
         value = default
 
-    return max(minimum, value)
+    value = max(minimum, value)
+    return min(maximum, value) if maximum is not None else value
 
 
 def _env_float(name, default, minimum=0.0, maximum=None):

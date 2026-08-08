@@ -1,18 +1,24 @@
 import os
 import tempfile
+import threading
 import unittest
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from time import monotonic
 from unittest.mock import patch
 
 from agent.confirmations import ConfirmationStore
 from agent.brain.brain import Brain
 from agent.brain.prompts import entity_prompt
+from agent.calendar import GoogleCalendarClient
 from agent.briefing import TodayBriefing
 from agent.math_tools import ArithmeticHandler
 from agent.memory.store import MemoryStore
 from agent.memory.research import ResearchMemoryIngestor
 from agent.models.router import ModelRouter
 from agent.models.base import ModelUnavailable
+from agent.models.cloud_openai import CloudOpenAIProvider
 from agent.planner import AgentPlan, AgentPlanner, PlanStep
 from agent.runtime import EntityRuntime
 from agent.goals import AutonomousGoalPolicy
@@ -23,6 +29,133 @@ from agent.speech.buffer import SentenceBuffer
 
 
 class CoreBehaviorTests(unittest.TestCase):
+    def test_gpt5_cloud_provider_uses_configured_reasoning_effort(self):
+        captured = {}
+
+        class Completions:
+            def create(self, **kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(choices=[SimpleNamespace(
+                    message=SimpleNamespace(content="answer")
+                )])
+
+        client = SimpleNamespace(
+            chat=SimpleNamespace(completions=Completions())
+        )
+        with patch.dict(os.environ, {
+            "ENTITY_CLOUD_LLM_ENABLED": "true",
+            "ENTITY_CLOUD_LLM_MODEL": "gpt-5.6-luna",
+            "ENTITY_CLOUD_LLM_REASONING_EFFORT": "medium",
+            "OPENAI_API_KEY": "test"
+        }, clear=False):
+            provider = CloudOpenAIProvider()
+            provider._client = lambda: client
+            response = provider.generate("test", temperature=0)
+
+        self.assertEqual("answer", response)
+        self.assertEqual("medium", captured["reasoning_effort"])
+        self.assertNotIn("temperature", captured)
+
+    def test_calendar_availability_merges_events_and_reports_free_blocks(self):
+        client = GoogleCalendarClient()
+        client.events_between = lambda start, end: [
+            {
+                "start": {"dateTime": "2026-07-24T09:00:00-04:00"},
+                "end": {"dateTime": "2026-07-24T10:00:00-04:00"}
+            },
+            {
+                "start": {"dateTime": "2026-07-24T09:30:00-04:00"},
+                "end": {"dateTime": "2026-07-24T11:00:00-04:00"}
+            },
+            {
+                "start": {"dateTime": "2026-07-24T14:00:00-04:00"},
+                "end": {"dateTime": "2026-07-24T15:00:00-04:00"}
+            },
+            {
+                "transparency": "transparent",
+                "start": {"dateTime": "2026-07-24T16:00:00-04:00"},
+                "end": {"dateTime": "2026-07-24T17:00:00-04:00"}
+            }
+        ]
+
+        response = client.availability_for_date(
+            date(2026, 7, 24), "America/New_York"
+        )
+
+        self.assertIn("12:00 AM to 9:00 AM", response)
+        self.assertIn("11:00 AM to 2:00 PM", response)
+        self.assertIn("3:00 PM to 12:00 AM", response)
+
+    def test_calendar_agenda_reports_requested_day(self):
+        client = GoogleCalendarClient()
+        client.events_between = lambda start, end: [{
+            "summary": "Dentist appointment",
+            "start": {"dateTime": "2026-07-24T09:30:00-04:00"},
+            "end": {"dateTime": "2026-07-24T10:00:00-04:00"}
+        }]
+
+        response = client.agenda_for_date(
+            date(2026, 7, 24), "America/New_York"
+        )
+
+        self.assertIn("Dentist appointment at 9:30 AM", response)
+
+    def test_calendar_availability_observation_is_available_to_planner(self):
+        class Client:
+            def availability_for_date(self, target_date, timezone_name):
+                return "Availability response."
+
+        runtime = SimpleNamespace(actuators=[
+            SimpleNamespace(action_type="calendar", client=Client())
+        ])
+
+        self.assertTrue(EntityRuntime._is_calendar_availability_question(
+            runtime, "Check my calendar, when am I free tomorrow?"
+        ))
+        self.assertEqual(
+            "Availability response.",
+            EntityRuntime._calendar_availability(
+                runtime, "Check my calendar, when am I free tomorrow?"
+            )
+        )
+
+    def test_planner_requires_read_only_availability_observation(self):
+        class Router:
+            def generate_json(self, *args, **kwargs):
+                return {
+                    "intent": "calendar_question",
+                    "confidence": 0.9,
+                    "steps": [{"tool": "answer", "args": {}}]
+                }
+
+            def generate(self, *args, **kwargs):
+                return "You have open time after your appointments."
+
+        planner = AgentPlanner(router=Router(), store=self.store)
+        plan = planner.plan("Check my calendar, when am I free tomorrow?")
+
+        self.assertEqual(["calendar_availability"], [
+            step.tool for step in plan.steps
+        ])
+        self.assertEqual("tomorrow", plan.steps[0].args["date"])
+        self.assertEqual(
+            "You have open time after your appointments.",
+            planner.summarize_calendar_observation(
+                "When am I free tomorrow?", "You are free after 3:00 PM."
+            )
+        )
+
+    def test_planner_returns_when_model_exceeds_timeout(self):
+        class SlowRouter:
+            def generate_json(self, *args, **kwargs):
+                threading.Event().wait(5)
+
+        planner = AgentPlanner(router=SlowRouter(), store=self.store)
+        with patch.dict("os.environ", {"ENTITY_PLANNER_TIMEOUT_SECONDS": "1"}):
+            started = monotonic()
+            self.assertIsNone(planner.plan("Schedule a reminder tomorrow."))
+        self.assertLess(monotonic() - started, 1.5)
+
     def test_sentence_buffer_releases_long_natural_phrase(self):
         buffer = SentenceBuffer(soft_limit=40, hard_limit=70)
 
@@ -271,12 +404,39 @@ class CoreBehaviorTests(unittest.TestCase):
             Provider("cloud_openai")
         ])
 
-        providers = list(router._providers_for(
-            "world event", None, "world_understanding"
-        ))
+        with patch.dict(os.environ, {
+            "ENTITY_WORLD_UNDERSTANDING_CLOUD_FIRST": "false"
+        }, clear=False):
+            providers = list(router._providers_for(
+                "world event", None, "world_understanding"
+            ))
 
         self.assertEqual(
             ["local_thinking", "cloud_openai", "local_fast"],
+            [provider.name for provider in providers]
+        )
+
+    def test_router_can_prefer_cloud_for_worldview_synthesis(self):
+        class Provider:
+            def __init__(self, name):
+                self.name = name
+
+            def available(self):
+                return True
+
+        router = ModelRouter(providers=[
+            Provider("local_fast"), Provider("local_thinking"),
+            Provider("cloud_openai")
+        ])
+        with patch.dict(os.environ, {
+            "ENTITY_WORLD_UNDERSTANDING_CLOUD_FIRST": "true"
+        }, clear=False):
+            providers = list(router._providers_for(
+                "world event", None, "world_understanding"
+            ))
+
+        self.assertEqual(
+            ["cloud_openai", "local_thinking", "local_fast"],
             [provider.name for provider in providers]
         )
 

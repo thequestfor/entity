@@ -30,6 +30,13 @@ class CalendarObserver:
         )
         self.seen_instances = set()
         self.route_cache = {}
+        self.consecutive_failures = 0
+        self.suspended_reason = ""
+        self.backoff_max_seconds = self._env_int(
+            "ENTITY_CALENDAR_BACKOFF_MAX_SECONDS",
+            default=3600,
+            minimum=self.poll_seconds
+        )
         self.route_refresh_seconds = self._env_int(
             "ENTITY_ROUTE_REFRESH_SECONDS",
             default=900,
@@ -62,12 +69,32 @@ class CalendarObserver:
 
     def _run(self):
         while self.running:
+            delay = self.poll_seconds
             try:
                 self._poll()
+                self.consecutive_failures = 0
             except Exception as exc:
-                print("Calendar observer error:", exc)
+                if self._is_permanent_auth_error(exc):
+                    self.suspended_reason = (
+                        "Google Calendar authorization expired or was revoked; "
+                        "reauthorization and a service restart are required."
+                    )
+                    print("Calendar observer suspended:", self.suspended_reason)
+                    self.running = False
+                    break
+                self.consecutive_failures += 1
+                delay = min(
+                    self.backoff_max_seconds,
+                    self.poll_seconds * (
+                        2 ** min(self.consecutive_failures - 1, 8)
+                    )
+                )
+                print(
+                    "Calendar observer temporarily unavailable; "
+                    f"retrying in {delay} seconds:", exc
+                )
 
-            self._sleep()
+            self._sleep(delay)
 
     def _poll(self):
         for item in self.client.upcoming_events(hours=self.lookahead_hours):
@@ -188,8 +215,19 @@ class CalendarObserver:
 
         return f"Upcoming calendar event: {summary} at {when}."
 
-    def _sleep(self):
-        deadline = time.time() + self.poll_seconds
+    def _is_permanent_auth_error(self, exc):
+        message = str(exc).lower()
+        return any(marker in message for marker in (
+            "invalid_grant",
+            "token has been expired or revoked",
+            "authorization expired",
+            "invalid credentials"
+        ))
+
+    def _sleep(self, seconds=None):
+        deadline = time.time() + (
+            self.poll_seconds if seconds is None else max(0, seconds)
+        )
 
         while self.running and time.time() < deadline:
             time.sleep(min(1, deadline - time.time()))

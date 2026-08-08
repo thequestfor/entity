@@ -126,6 +126,15 @@ class AutonomyObserver:
                 reflection_due=self.reflection.due()
             )
 
+        if goal.name == "stay_idle":
+            self._set_last_signature("")
+            return
+
+        signature = self._signature(goal, pending_confirmation)
+
+        if not self._should_publish(signature):
+            return
+
         goal_id = self.store.add_autonomous_goal(
             name=goal.name,
             priority=goal.priority,
@@ -139,15 +148,6 @@ class AutonomyObserver:
                 "store_reflection": goal.store_reflection
             }
         )
-
-        if goal.name == "stay_idle":
-            self._set_last_signature("")
-            return
-
-        signature = self._signature(goal, pending_confirmation)
-
-        if not self._should_publish(signature):
-            return
 
         if not scheduled_briefing:
             self._set_last_signature(signature)

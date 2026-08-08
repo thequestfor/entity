@@ -299,15 +299,36 @@ function renderReputations(reputations) {
     const title = document.createElement("strong");
     title.textContent = reputation.publisher_label;
     const score = document.createElement("span");
+    const evaluated = Number(reputation.evaluated_count ?? 0);
+    const learned = Number(reputation.learned_credibility ?? 0);
+    const salt = evaluated < 3
+      ? "unproven — large grain of salt"
+      : learned >= 0.8
+        ? "strong track record — small grain of salt"
+        : learned >= 0.6
+          ? "mixed-positive track record — moderate grain of salt"
+          : "weak or mixed track record — large grain of salt";
     score.textContent =
       `${Math.round(reputation.baseline_credibility * 100)}% baseline → ` +
-      `${Math.round(reputation.learned_credibility * 100)}% learned`;
+      `${Math.round(learned * 100)}% learned · ` +
+      `${Math.round(reputation.reliability_lower_bound * 100)}–` +
+      `${Math.round(reputation.reliability_upper_bound * 100)}% range`;
     const outcomes = document.createElement("small");
     outcomes.textContent =
       `${reputation.confirmed_count} confirmed · ` +
       `${reputation.contradicted_count} contradicted · ` +
-      `${reputation.deleted_unverified_count} deleted/unverified`;
+      `${reputation.deleted_unverified_count} deleted/unverified · ` +
+      `${reputation.early_confirmation_count} reported early · ${salt}`;
+    outcomes.title = reputation.latest_outcome_reason ||
+      "Reliability changes only after delayed independent evidence.";
     card.append(title, score, outcomes);
+    if (reputation.latest_outcome) {
+      const audit = document.createElement("small");
+      audit.textContent =
+        `Latest check: ${reputation.latest_outcome} — ` +
+        `${reputation.latest_outcome_reason}`;
+      card.append(audit);
+    }
     elements.reputationList.append(card);
   }
 }

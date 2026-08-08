@@ -38,6 +38,16 @@ def utc_now():
     )
 
 
+class _ClosingConnection(sqlite3.Connection):
+    """Commit or roll back, then always release the database descriptor."""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class IntelligenceStore:
     def __init__(self, path=DEFAULT_DB, migrations=MIGRATIONS):
         self.path = Path(path)
@@ -51,7 +61,9 @@ class IntelligenceStore:
             pass
 
     def _connect(self):
-        connection = sqlite3.connect(self.path, timeout=30)
+        connection = sqlite3.connect(
+            self.path, timeout=30, factory=_ClosingConnection
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 30000")
         connection.execute("PRAGMA foreign_keys = ON")
@@ -531,7 +543,17 @@ class IntelligenceStore:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT * FROM publisher_reputation
+                SELECT publisher_reputation.*,
+                       (SELECT outcome FROM publisher_outcomes
+                        WHERE publisher_key = publisher_reputation.publisher_key
+                        ORDER BY evaluated_at DESC LIMIT 1) AS latest_outcome,
+                       (SELECT reason FROM publisher_outcomes
+                        WHERE publisher_key = publisher_reputation.publisher_key
+                        ORDER BY evaluated_at DESC LIMIT 1) AS latest_outcome_reason,
+                       (SELECT evaluated_at FROM publisher_outcomes
+                        WHERE publisher_key = publisher_reputation.publisher_key
+                        ORDER BY evaluated_at DESC LIMIT 1) AS latest_outcome_at
+                FROM publisher_reputation
                 ORDER BY evaluated_count DESC, learned_credibility DESC,
                          publisher_label
                 LIMIT ?
@@ -539,6 +561,34 @@ class IntelligenceStore:
                 (max(1, min(1000, int(limit))),)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_publisher_outcomes(self, publisher_key=None, limit=100):
+        query = """
+            SELECT publisher_outcomes.*, documents.title, documents.url,
+                   documents.publisher_label
+            FROM publisher_outcomes
+            JOIN documents ON documents.id = publisher_outcomes.document_id
+        """
+        params = []
+        if publisher_key:
+            query += " WHERE publisher_outcomes.publisher_key = ?"
+            params.append(str(publisher_key))
+        query += " ORDER BY publisher_outcomes.evaluated_at DESC LIMIT ?"
+        params.append(max(1, min(1000, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        outcomes = []
+        for row in rows:
+            item = dict(row)
+            item["corroborating_publishers"] = self._json_load(
+                item.get("corroborating_publishers"), []
+            )
+            item["evidence_document_ids"] = self._json_load(
+                item.get("evidence_document_ids"), []
+            )
+            item["was_early"] = bool(item.get("was_early"))
+            outcomes.append(item)
+        return outcomes
 
     def list_situations(self, limit=50, category=None, status=None):
         limit = max(1, min(200, int(limit)))
@@ -594,11 +644,15 @@ class IntelligenceStore:
                 """
                 SELECT documents.*, sources.name AS source_name,
                        sources.kind AS source_kind,
-                       sources.credibility AS source_credibility
+                       sources.credibility AS baseline_credibility,
+                       COALESCE(publisher_reputation.learned_credibility,
+                                sources.credibility) AS source_credibility
                 FROM situation_documents
                 JOIN documents
                   ON documents.id = situation_documents.document_id
                 JOIN sources ON sources.id = documents.source_id
+                LEFT JOIN publisher_reputation
+                  ON publisher_reputation.publisher_key = documents.publisher_key
                 WHERE situation_documents.situation_id = ?
                 ORDER BY COALESCE(documents.published_at,
                                   documents.retrieved_at) DESC

@@ -1,4 +1,5 @@
 import hashlib
+import gzip
 import re
 import urllib.parse
 import urllib.request
@@ -41,7 +42,7 @@ class NewsFeedConnector:
         if not self.enabled:
             return ConnectorBatch(cursor=cursor or {})
 
-        root = ElementTree.fromstring(self._fetch_xml())
+        root = _parse_feed_xml(self._fetch_xml())
         nodes = root.findall("./channel/item")
         if not nodes:
             nodes = [node for node in root.iter() if _local_name(node.tag) == "entry"]
@@ -103,6 +104,29 @@ class NewsFeedConnector:
 
 def _local_name(tag):
     return str(tag).rsplit("}", 1)[-1]
+
+
+def _parse_feed_xml(payload):
+    if isinstance(payload, str):
+        text = payload
+    else:
+        raw = bytes(payload or b"")
+        if raw.startswith(b"\x1f\x8b"):
+            raw = gzip.decompress(raw)
+        text = raw.decode("utf-8-sig", errors="replace")
+    start = text.find("<")
+    if start < 0:
+        raise ValueError("News feed response did not contain XML.")
+    text = text[start:]
+    # XML 1.0 rejects most control characters. A single publisher-side bad
+    # byte should not disable an otherwise valid feed.
+    text = re.sub(
+        "[\\x00-\\x08\\x0B\\x0C\\x0E-\\x1F\\uFFFE\\uFFFF]", "", text
+    )
+    root = ElementTree.fromstring(text)
+    if _local_name(root.tag).lower() not in {"rss", "feed", "rdf"}:
+        raise ValueError("News endpoint did not return an RSS or Atom feed.")
+    return root
 
 
 def _child_text(node, name):
