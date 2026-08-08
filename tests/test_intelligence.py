@@ -2649,6 +2649,19 @@ class IntelligenceDashboardTests(unittest.TestCase):
             finally:
                 dashboard.stop()
 
+    def test_dashboard_pins_leaflet_assets_with_verified_integrity(self):
+        dashboard_html = Path("intelligence_dashboard/index.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=",
+            dashboard_html
+        )
+        self.assertIn(
+            "sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=",
+            dashboard_html
+        )
+
     def test_disabled_service_does_not_create_database(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             path = Path(temporary_directory) / "disabled.db"
