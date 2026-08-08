@@ -505,7 +505,9 @@ class IntelligenceStore:
                     (SELECT COUNT(*) FROM claims
                      WHERE truth_status IN ('disputed','refuted')) AS disputed_truth_claims,
                     (SELECT COUNT(*) FROM claim_verification_tasks
-                     WHERE status = 'pending') AS verification_tasks
+                     WHERE status = 'pending') AS verification_tasks,
+                    (SELECT COUNT(*) FROM intelligence_gaps
+                     WHERE status = 'open') AS intelligence_gaps
                 """
             ).fetchone()
             categories = connection.execute(
@@ -844,7 +846,9 @@ class IntelligenceStore:
                     **dict(row),
                     "supporting_claim_ids": self._json_load(row["supporting_claim_ids"], []),
                     "contradicting_claim_ids": self._json_load(row["contradicting_claim_ids"], []),
-                    "falsifiers": self._json_load(row["falsifiers"], [])
+                    "falsifiers": self._json_load(row["falsifiers"], []),
+                    "assumptions": self._json_load(row["assumptions"], []),
+                    "open_questions": self._json_load(row["open_questions"], [])
                 }
                 for row in hypotheses
             ]
@@ -886,6 +890,18 @@ class IntelligenceStore:
         params.append(max(1, min(500, int(limit))))
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_intelligence_gaps(self, status="open", limit=100):
+        query = "SELECT gaps.*,situations.title AS situation_title FROM " \
+                "intelligence_gaps gaps JOIN situations ON situations.id=gaps.situation_id"
+        params=[]
+        if status:
+            query += " WHERE gaps.status=?"; params.append(status)
+        query += " ORDER BY gaps.priority DESC,gaps.updated_at LIMIT ?"
+        params.append(max(1,min(500,int(limit))))
+        with self._connect() as connection:
+            rows=connection.execute(query,params).fetchall()
         return [dict(row) for row in rows]
 
     def add_forecast(self, forecast):

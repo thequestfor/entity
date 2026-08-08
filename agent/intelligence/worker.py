@@ -30,6 +30,7 @@ from agent.intelligence.forecasting import ForecastEngine
 from agent.intelligence.clustering import EventClusterer
 from agent.intelligence.embeddings import OllamaEmbeddingProvider
 from agent.intelligence.belief_revision import BeliefRevisionEngine
+from agent.intelligence.hypotheses import HypothesisCompetitionEngine
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class IntelligenceWorker:
         understanding=None,
         reputation=None,
         belief_revision=None,
+        hypothesis_competition=None,
         forecasting=None,
         forecast_max_active=12,
         forecast_per_cycle=2,
@@ -69,6 +71,9 @@ class IntelligenceWorker:
         self.last_analysis_result = AnalysisResult()
         self.reputation = reputation or ReputationEngine(store)
         self.belief_revision = belief_revision or BeliefRevisionEngine(store)
+        self.hypothesis_competition = (
+            hypothesis_competition or HypothesisCompetitionEngine(store)
+        )
         self.last_reputation_result = ReputationResult()
         self.forecasting = forecasting or ForecastEngine(
             store, router=self.understanding.router,
@@ -286,6 +291,11 @@ class IntelligenceWorker:
             prior_strength=config.reputation_prior_strength,
             min_positive_outcomes=config.reputation_min_evaluated_outcomes
         )
+        hypothesis_competition = HypothesisCompetitionEngine(
+            store, enabled=config.hypothesis_competition_enabled,
+            batch_size=config.hypothesis_batch_size,
+            max_hypotheses=config.max_hypotheses_per_situation
+        )
         return cls(
             store=store,
             connectors=connectors,
@@ -293,6 +303,7 @@ class IntelligenceWorker:
             understanding=understanding,
             reputation=reputation,
             belief_revision=belief_revision,
+            hypothesis_competition=hypothesis_competition,
             forecast_max_active=config.forecast_max_active,
             forecast_per_cycle=config.forecast_per_cycle,
             analysis_poll_seconds=config.analysis_poll_seconds,
@@ -357,6 +368,10 @@ class IntelligenceWorker:
             self.belief_revision.run_batch()
         except Exception as exc:
             print("Intelligence belief revision cycle failed:", exc)
+        try:
+            self.hypothesis_competition.run_batch()
+        except Exception as exc:
+            print("Intelligence hypothesis competition cycle failed:", exc)
         if not analysis_due:
             try:
                 backfill = getattr(

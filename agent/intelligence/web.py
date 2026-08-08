@@ -79,6 +79,14 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             )})
             return
 
+        if parsed.path == "/api/intelligence/gaps":
+            query=parse_qs(parsed.query)
+            self._send_json({"gaps": self.server.intelligence_store.list_intelligence_gaps(
+                status=(query.get("status") or ["open"])[0],
+                limit=_query_int(query,"limit",100)
+            )})
+            return
+
         if parsed.path == "/api/intelligence/forecasts":
             query = parse_qs(parsed.query)
             self._send_json({

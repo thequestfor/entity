@@ -34,6 +34,7 @@ from agent.intelligence.config import IntelligenceConfig
 from agent.intelligence.claim_extraction import HybridClaimExtractor
 from agent.intelligence.epistemic_backfill import EpistemicBackfill, dry_run as epistemic_dry_run
 from agent.intelligence.belief_revision import BeliefRevisionEngine
+from agent.intelligence.hypotheses import HypothesisCompetitionEngine
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
 from agent.intelligence.service import IntelligenceService
@@ -93,7 +94,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(12, version)
+            self.assertEqual(13, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -390,6 +391,27 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual("corroborated", status_claim["truth_status"])
         self.assertEqual(2, status_claim["source_count"])
         self.assertTrue(self.store.list_reliability_cells())
+
+    def test_hypotheses_compete_on_linked_claims_and_create_information_gaps(self):
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="hypothesis-event", title="Unconfirmed port disruption",
+            summary="A report says Port Alpha may close.",
+            url="https://a.test/hypothesis", category="traditional-news"
+        )])
+        self.engine.analyze_pending()
+        BeliefRevisionEngine(self.store, batch_size=100).run_batch()
+        result = HypothesisCompetitionEngine(
+            self.store, batch_size=10
+        ).run_batch()
+        situation = self.store.get_situation(self.store.list_situations()[0]["id"])
+        competing = [
+            item for item in situation["hypotheses"]
+            if item["method"] == "evidence-competition-v1"
+        ]
+
+        self.assertEqual(5, result.hypotheses_created)
+        self.assertAlmostEqual(1.0, sum(item["probability"] for item in competing), places=3)
+        self.assertTrue(self.store.list_intelligence_gaps())
 
     def test_private_mail_never_enters_public_world_model(self):
         self.store.register_source(

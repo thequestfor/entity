@@ -44,6 +44,10 @@ class IntelligenceConfig:
     belief_revision_enabled: bool = True
     belief_revision_batch_size: int = 50
     topic_reliability_enabled: bool = True
+    hypothesis_competition_enabled: bool = True
+    hypothesis_batch_size: int = 20
+    max_hypotheses_per_situation: int = 5
+    model_hypothesis_generation_enabled: bool = False
     cluster_auto_link_threshold: float = 0.82
     cluster_review_threshold: float = 0.65
     cluster_lookback_days: int = 14
@@ -201,6 +205,19 @@ class IntelligenceConfig:
             ),
             topic_reliability_enabled=_env_bool(
                 "ENTITY_TOPIC_RELIABILITY_ENABLED", True
+            ),
+            hypothesis_competition_enabled=_env_bool(
+                "ENTITY_HYPOTHESIS_COMPETITION_ENABLED", True
+            ),
+            hypothesis_batch_size=_env_int(
+                "ENTITY_HYPOTHESIS_BATCH_SIZE", 20, minimum=1, maximum=100
+            ),
+            max_hypotheses_per_situation=_env_int(
+                "ENTITY_MAX_HYPOTHESES_PER_SITUATION", 5,
+                minimum=3, maximum=8
+            ),
+            model_hypothesis_generation_enabled=_env_bool(
+                "ENTITY_MODEL_HYPOTHESIS_GENERATION_ENABLED", False
             ),
             cluster_auto_link_threshold=_env_float(
                 "ENTITY_CLUSTER_AUTO_LINK_THRESHOLD", 0.82,

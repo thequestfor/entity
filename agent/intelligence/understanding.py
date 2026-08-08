@@ -400,10 +400,24 @@ class UnderstandingEngine:
                 "object": claim.get("object"),
                 "status": claim.get("status"),
                 "confidence": claim.get("confidence"),
+                "truth_status": claim.get("truth_status", "unverified"),
+                "resolution_confidence": claim.get("resolution_confidence", 0),
+                "claim_type": claim.get("claim_type", "reported_fact"),
+                "topic": claim.get("topic", "general"),
                 "evidence_count": claim.get("evidence_count"),
                 "source_count": claim.get("source_count")
             }
             for claim in detail["claims"]
+        ]
+        hypotheses = [
+            {
+                "id": hypothesis["id"], "title": hypothesis["title"],
+                "probability": hypothesis["probability"],
+                "supporting_claim_ids": hypothesis["supporting_claim_ids"],
+                "contradicting_claim_ids": hypothesis["contradicting_claim_ids"],
+                "falsifiers": hypothesis["falsifiers"]
+            }
+            for hypothesis in detail.get("hypotheses", [])
         ]
         return {
             "situation": {
@@ -416,6 +430,7 @@ class UnderstandingEngine:
             },
             "documents": documents,
             "claims": claims,
+            "hypotheses": hypotheses,
             "source_count": len({
                 item["independence_key"] for item in documents
             })
