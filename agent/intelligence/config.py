@@ -36,6 +36,11 @@ class IntelligenceConfig:
     worldview_batch_size: int = 4
     worldview_max_age_days: int = 30
     worldview_maintenance_enabled: bool = True
+    prose_claim_extraction_enabled: bool = True
+    model_claim_extraction_enabled: bool = False
+    claim_extraction_max_claims: int = 20
+    epistemic_backfill_enabled: bool = True
+    epistemic_backfill_batch_size: int = 25
     cluster_auto_link_threshold: float = 0.82
     cluster_review_threshold: float = 0.65
     cluster_lookback_days: int = 14
@@ -166,6 +171,23 @@ class IntelligenceConfig:
             ),
             worldview_maintenance_enabled=_env_bool(
                 "ENTITY_WORLDVIEW_MAINTENANCE_ENABLED", True
+            ),
+            prose_claim_extraction_enabled=_env_bool(
+                "ENTITY_PROSE_CLAIM_EXTRACTION_ENABLED", True
+            ),
+            model_claim_extraction_enabled=_env_bool(
+                "ENTITY_MODEL_CLAIM_EXTRACTION_ENABLED", False
+            ),
+            claim_extraction_max_claims=_env_int(
+                "ENTITY_CLAIM_EXTRACTION_MAX_CLAIMS", 20,
+                minimum=2, maximum=50
+            ),
+            epistemic_backfill_enabled=_env_bool(
+                "ENTITY_EPISTEMIC_BACKFILL_ENABLED", True
+            ),
+            epistemic_backfill_batch_size=_env_int(
+                "ENTITY_EPISTEMIC_BACKFILL_BATCH_SIZE", 25,
+                minimum=1, maximum=100
             ),
             cluster_auto_link_threshold=_env_float(
                 "ENTITY_CLUSTER_AUTO_LINK_THRESHOLD", 0.82,

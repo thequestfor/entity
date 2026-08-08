@@ -260,7 +260,18 @@ class IntelligenceWorker:
             synthesis_batch_size=config.worldview_batch_size,
             max_candidate_age_days=config.worldview_max_age_days,
             maintenance_enabled=config.worldview_maintenance_enabled,
-            clusterer=clusterer
+            clusterer=clusterer,
+            prose_claim_extraction_enabled=(
+                config.prose_claim_extraction_enabled
+            ),
+            model_claim_extraction_enabled=(
+                config.model_claim_extraction_enabled
+            ),
+            claim_extraction_max_claims=config.claim_extraction_max_claims,
+            epistemic_backfill_enabled=config.epistemic_backfill_enabled,
+            epistemic_backfill_batch_size=(
+                config.epistemic_backfill_batch_size
+            )
         )
         return cls(
             store=store,

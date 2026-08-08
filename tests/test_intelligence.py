@@ -30,6 +30,8 @@ from agent.connectors.who import WhoOutbreakConnector
 from agent.connectors.world_bank import WorldBankIndicatorsConnector
 from agent.connectors.x import XConnector
 from agent.intelligence.config import IntelligenceConfig
+from agent.intelligence.claim_extraction import HybridClaimExtractor
+from agent.intelligence.epistemic_backfill import EpistemicBackfill, dry_run as epistemic_dry_run
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
 from agent.intelligence.service import IntelligenceService
@@ -89,7 +91,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(8, version)
+            self.assertEqual(9, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -197,6 +199,107 @@ class UnderstandingEngineTests(unittest.TestCase):
 
     def tearDown(self):
         self.temporary_directory.cleanup()
+
+    def test_prose_extraction_attributes_quotes_without_endorsing_them(self):
+        claims = HybridClaimExtractor().extract({
+            "title": "Minister comments on incident",
+            "summary": "Minister Rao said that the bridge was destroyed.",
+            "category": "conflict",
+            "metadata": {}
+        })
+        attributed = [
+            claim for claim in claims
+            if claim.predicate == "statement.attributed"
+        ]
+
+        self.assertEqual(1, len(attributed))
+        self.assertEqual("attributed_assertion", attributed[0].claim_type)
+        self.assertEqual("attributes", attributed[0].endorsement)
+        self.assertNotIn(
+            "direct_fact",
+            [claim.claim_type for claim in claims if "destroyed" in claim.value]
+        )
+
+    def test_prose_extraction_keeps_causal_and_predictive_claims_uncertain(self):
+        claims = HybridClaimExtractor().extract({
+            "title": "Storm outlook",
+            "summary": (
+                "Flooding resulted in road closures. Water levels may rise tomorrow."
+            ),
+            "category": "floods",
+            "metadata": {}
+        })
+        by_type = {claim.claim_type: claim for claim in claims}
+
+        self.assertEqual("unknown", by_type["causal_claim"].verifiability)
+        self.assertLessEqual(by_type["causal_claim"].extraction_confidence, 0.55)
+        self.assertEqual("uncertain", by_type["prediction"].endorsement)
+
+    def test_malformed_model_claims_fall_back_to_deterministic_extraction(self):
+        class InvalidRouter:
+            def generate_json(self, *args, **kwargs):
+                return {"claims": [{"predicate": "DROP TABLE claims"}]}
+
+        claims = HybridClaimExtractor(
+            router=InvalidRouter(), model_enabled=True
+        ).extract({"title": "Safe report", "category": "test", "metadata": {}})
+
+        self.assertEqual(
+            {"event.category", "event.reported"},
+            {claim.predicate for claim in claims}
+        )
+
+    def test_epistemic_backfill_is_resumable_and_dry_run_isolated(self):
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="legacy", title="Legacy event",
+            url="https://a.test/legacy", category="earthquake",
+            metadata={"magnitude": 5.2}
+        )])
+        self.engine.analyze_pending()
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE claims SET extraction_version = 'legacy-v1', "
+                "extraction_method = 'legacy'"
+            )
+            before = connection.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+
+        first = EpistemicBackfill(self.store, batch_size=1).run_batch()
+        second = EpistemicBackfill(self.store, batch_size=1).run_batch()
+        report = epistemic_dry_run(self.store.path, limit=2)
+        with self.store._connect() as connection:
+            live_count = connection.execute("SELECT COUNT(*) FROM claims").fetchone()[0]
+
+        self.assertEqual(1, first.processed)
+        self.assertEqual(1, second.processed)
+        self.assertEqual(before, live_count)
+        self.assertFalse(report["live_database_modified"])
+
+    def test_historical_backfill_extracts_prose_from_exact_stored_version(self):
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="historical-speech", title="Minister briefing",
+            summary="Minister Rao said that the bridge was destroyed.",
+            url="https://a.test/historical-speech", category="conflict"
+        )])
+        self.engine.analyze_pending()
+        with self.store._connect() as connection:
+            connection.execute(
+                "DELETE FROM claims WHERE predicate = 'statement.attributed'"
+            )
+            connection.execute("DELETE FROM claim_extraction_attempts")
+
+        result = EpistemicBackfill(self.store, batch_size=10).run_batch()
+        with self.store._connect() as connection:
+            claim = connection.execute(
+                "SELECT * FROM claims WHERE predicate = 'statement.attributed'"
+            ).fetchone()
+            evidence = connection.execute(
+                "SELECT excerpt FROM claim_evidence WHERE claim_id = ?",
+                (claim["id"],)
+            ).fetchone()
+
+        self.assertEqual(1, result.updated)
+        self.assertEqual("Minister Rao", claim["attributed_to"])
+        self.assertIn("bridge was destroyed", evidence["excerpt"])
 
     def test_private_mail_never_enters_public_world_model(self):
         self.store.register_source(

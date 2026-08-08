@@ -8,6 +8,12 @@ from uuid import uuid4
 
 from agent.intelligence.store import utc_now
 from agent.intelligence.clustering import EventClusterer
+from agent.intelligence.claim_extraction import (
+    EXTRACTION_VERSION,
+    ClaimCandidate,
+    HybridClaimExtractor
+)
+from agent.intelligence.epistemic_backfill import EpistemicBackfill
 from agent.models.router import ModelRouter
 
 
@@ -48,17 +54,6 @@ CATEGORY_PRIORITY = {
 
 
 @dataclass(frozen=True)
-class ClaimCandidate:
-    predicate: str
-    value: str
-    excerpt: str = ""
-    claim_type: str = "reported_fact"
-    verifiability: str = "unknown"
-    attribution: str = "source_report"
-    topic: str = "general"
-
-
-@dataclass(frozen=True)
 class AnalysisResult:
     documents_analyzed: int = 0
     situations_created: int = 0
@@ -80,7 +75,12 @@ class UnderstandingEngine:
         synthesis_batch_size=1,
         max_candidate_age_days=30,
         maintenance_enabled=False,
-        clusterer=None
+        clusterer=None,
+        prose_claim_extraction_enabled=True,
+        model_claim_extraction_enabled=False,
+        claim_extraction_max_claims=20,
+        epistemic_backfill_enabled=True,
+        epistemic_backfill_batch_size=25
     ):
         self.store = store
         self.router = router or ModelRouter()
@@ -91,8 +91,32 @@ class UnderstandingEngine:
         )
         self.maintenance_enabled = bool(maintenance_enabled)
         self.clusterer = clusterer or EventClusterer()
+        self.claim_extractor = HybridClaimExtractor(
+            router=self.router,
+            model_enabled=model_claim_extraction_enabled,
+            max_claims=(
+                claim_extraction_max_claims
+                if prose_claim_extraction_enabled else 2
+            )
+        )
+        self.prose_claim_extraction_enabled = bool(
+            prose_claim_extraction_enabled
+        )
+        self.epistemic_backfill = EpistemicBackfill(
+            store, enabled=epistemic_backfill_enabled,
+            batch_size=epistemic_backfill_batch_size
+        )
+        self.last_backfill_result = None
 
     def analyze_pending(self, limit=250):
+        try:
+            self.last_backfill_result = self.epistemic_backfill.run_batch(
+                refresh=lambda connection, situation_id: self._refresh_situation(
+                    connection, situation_id
+                )
+            )
+        except Exception as exc:
+            print(f"Epistemic backfill batch failed: {exc}")
         if self.maintenance_enabled:
             self._maintain_situation_lifecycle()
         self.clusterer.backfill_features(self.store, limit=500)
@@ -944,7 +968,13 @@ class UnderstandingEngine:
         return best if best_score >= 0.55 else None
 
     def _record_claims(self, connection, situation_id, document):
-        candidates = extract_claims(document)
+        candidates = self.claim_extractor.extract(document)
+        if not self.prose_claim_extraction_enabled:
+            candidates = [
+                candidate for candidate in candidates
+                if candidate.extraction_method != "deterministic"
+                or candidate.attribution in {"source_metadata", "source_report"}
+            ]
         now = utc_now()
         created = 0
 
@@ -962,8 +992,38 @@ class UnderstandingEngine:
             if existing:
                 claim_id = existing["id"]
                 connection.execute(
-                    "UPDATE claims SET last_seen_at = ?, updated_at = ? WHERE id = ?",
-                    (document["published_at"] or document["retrieved_at"], now, claim_id)
+                    """
+                    UPDATE claims SET last_seen_at = ?, updated_at = ?,
+                      claim_type = CASE WHEN extraction_version = 'legacy-v1'
+                                        THEN ? ELSE claim_type END,
+                      verifiability = CASE WHEN extraction_version = 'legacy-v1'
+                                           THEN ? ELSE verifiability END,
+                      attribution = CASE WHEN extraction_version = 'legacy-v1'
+                                         THEN ? ELSE attribution END,
+                      topic = CASE WHEN extraction_version = 'legacy-v1'
+                                   THEN ? ELSE topic END,
+                      attributed_to = CASE WHEN extraction_version = 'legacy-v1'
+                                           THEN ? ELSE attributed_to END,
+                      endorsement = CASE WHEN extraction_version = 'legacy-v1'
+                                         THEN ? ELSE endorsement END,
+                      extraction_confidence = MAX(extraction_confidence, ?),
+                      extraction_method = CASE WHEN extraction_version = 'legacy-v1'
+                                               THEN ? ELSE extraction_method END,
+                      extraction_version = ?, precision = CASE
+                        WHEN precision = 'unknown' THEN ? ELSE precision END,
+                      evidence_role = CASE WHEN extraction_version = 'legacy-v1'
+                                           THEN ? ELSE evidence_role END
+                    WHERE id = ?
+                    """,
+                    (
+                        document["published_at"] or document["retrieved_at"], now,
+                        candidate.claim_type, candidate.verifiability,
+                        candidate.attribution, candidate.topic,
+                        candidate.attributed_to, candidate.endorsement,
+                        candidate.extraction_confidence,
+                        candidate.extraction_method, candidate.extraction_version,
+                        candidate.precision, candidate.evidence_role, claim_id
+                    )
                 )
             else:
                 claim_id = str(uuid4())
@@ -974,8 +1034,14 @@ class UnderstandingEngine:
                         id, situation_id, subject, predicate, object,
                         normalized_object, first_seen_at, last_seen_at,
                         created_at, updated_at, claim_type, verifiability,
-                        attribution, topic
-                    ) VALUES (?, ?, 'situation', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        attribution, topic, attributed_to, endorsement,
+                        extraction_confidence, extraction_method,
+                        extraction_version, precision, evidence_role
+                    ) VALUES (
+                        ?, ?, 'situation', ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?, ?
+                    )
                     """,
                     (
                         claim_id,
@@ -990,7 +1056,14 @@ class UnderstandingEngine:
                         candidate.claim_type,
                         candidate.verifiability,
                         candidate.attribution,
-                        candidate.topic
+                        candidate.topic,
+                        candidate.attributed_to,
+                        candidate.endorsement,
+                        candidate.extraction_confidence,
+                        candidate.extraction_method,
+                        candidate.extraction_version,
+                        candidate.precision,
+                        candidate.evidence_role
                     )
                 )
                 created += 1
@@ -1010,6 +1083,19 @@ class UnderstandingEngine:
                     document["published_at"] or document["retrieved_at"]
                 )
             )
+
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO claim_extraction_attempts (
+              document_version_id, method, version, outcome,
+              claims_extracted, created_at
+            ) VALUES (?, ?, ?, 'success', ?, ?)
+            """,
+            (
+                document["document_version_id"], "hybrid",
+                EXTRACTION_VERSION, len(candidates), now
+            )
+        )
 
         return created
 
@@ -1379,46 +1465,7 @@ class UnderstandingEngine:
 
 
 def extract_claims(document):
-    metadata = document.get("metadata") or {}
-    excerpt = document.get("summary") or document.get("title") or ""
-    topic = str(document.get("category") or "general")
-    claims = [
-        ClaimCandidate("event.category", topic, excerpt, "classification", "checkable", "source_metadata", topic),
-        ClaimCandidate("event.reported", "yes", excerpt, "reported_fact", "unknown", "source_report", topic)
-    ]
-    scalar_fields = {
-        "magnitude": "seismic.magnitude",
-        "place": "event.location",
-        "status": "event.status",
-        "tsunami": "seismic.tsunami",
-        "alert": "event.alert_level",
-        "closed_at": "event.closed"
-    }
-    for field, predicate in scalar_fields.items():
-        value = metadata.get(field)
-        if value in (None, ""):
-            continue
-        if field == "closed_at":
-            value = "true"
-        claim_type = "quantitative_fact" if field == "magnitude" else "direct_fact"
-        claims.append(ClaimCandidate(predicate, _value_text(value), excerpt, claim_type, "checkable", "source_metadata", topic))
-
-    for field, predicate in (
-        ("countries", "event.affected_country"),
-        ("disasters", "event.disaster"),
-        ("categories", "event.category")
-    ):
-        values = metadata.get(field) or []
-        if not isinstance(values, (list, tuple, set)):
-            values = [values]
-        for value in values:
-            if value not in (None, ""):
-                claims.append(ClaimCandidate(predicate, _value_text(value), excerpt, "direct_fact", "checkable", "source_metadata", topic))
-
-    unique = {}
-    for claim in claims:
-        unique[(claim.predicate, normalize_claim_value(claim.value))] = claim
-    return list(unique.values())
+    return HybridClaimExtractor(model_enabled=False).extract(document)
 
 
 def normalize_claim_value(value):

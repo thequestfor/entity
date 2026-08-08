@@ -21,6 +21,9 @@ const elements = {
   forecastList: document.querySelector("#forecast-list"),
   clusterReviewCount: document.querySelector("#cluster-review-count"),
   dependentReportCount: document.querySelector("#dependent-report-count"),
+  typedClaimCount: document.querySelector("#typed-claim-count"),
+  integrityReviewCount: document.querySelector("#integrity-review-count"),
+  epistemicBackfillStatus: document.querySelector("#epistemic-backfill-status"),
   documentTemplate: document.querySelector("#document-template"),
   situationTemplate: document.querySelector("#situation-template")
 };
@@ -73,6 +76,12 @@ function renderOverview(overview) {
   elements.issueCount.textContent = overview.unhealthy ?? 0;
   elements.clusterReviewCount.textContent = overview.cluster_reviews ?? 0;
   elements.dependentReportCount.textContent = overview.dependent_reports ?? 0;
+  elements.typedClaimCount.textContent = overview.epistemically_typed_claims ?? 0;
+  elements.integrityReviewCount.textContent = overview.integrity_reviews ?? 0;
+  const processed = overview.epistemic_backfill_processed ?? 0;
+  elements.epistemicBackfillStatus.textContent = overview.epistemic_backfill_complete
+    ? `Historical epistemic backfill complete · ${processed} records reviewed`
+    : `Historical epistemic backfill in progress · ${processed} records reviewed`;
   elements.lastRetrieval.textContent = formatTime(overview.latest_retrieved_at);
 
   const current = elements.categoryFilter.value;

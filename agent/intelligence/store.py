@@ -483,7 +483,23 @@ class IntelligenceStore:
                      WHERE decision = 'review') AS cluster_reviews,
                     (SELECT COUNT(*) FROM document_relationships
                      WHERE relationship IN ('copied','syndicated'))
-                     AS dependent_reports
+                     AS dependent_reports,
+                    (SELECT COUNT(*) FROM claims
+                     WHERE extraction_version = 'hybrid-claims-v1')
+                     AS epistemically_typed_claims,
+                    (SELECT COALESCE(SUM(processed), 0)
+                     FROM epistemic_backfill_state
+                     WHERE name IN ('historical-claim-epistemics',
+                                    'historical-prose-claims'))
+                     AS epistemic_backfill_processed,
+                    (SELECT CASE WHEN COUNT(*) = 2 AND MIN(completed) = 1
+                                 THEN 1 ELSE 0 END
+                     FROM epistemic_backfill_state
+                     WHERE name IN ('historical-claim-epistemics',
+                                    'historical-prose-claims'))
+                     AS epistemic_backfill_complete,
+                    (SELECT COUNT(*) FROM situation_integrity_flags
+                     WHERE status = 'review') AS integrity_reviews
                 """
             ).fetchone()
             categories = connection.execute(
@@ -498,8 +514,15 @@ class IntelligenceStore:
                 "SELECT MAX(retrieved_at) AS latest FROM documents"
             ).fetchone()["latest"]
 
+        result = dict(counts)
+        result["epistemic_backfill_processed"] = (
+            result["epistemic_backfill_processed"] or 0
+        )
+        result["epistemic_backfill_complete"] = (
+            result["epistemic_backfill_complete"] or 0
+        )
         return {
-            **dict(counts),
+            **result,
             "latest_retrieved_at": latest,
             "categories": [dict(row) for row in categories]
         }
