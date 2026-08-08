@@ -31,6 +31,7 @@ from agent.intelligence.clustering import EventClusterer
 from agent.intelligence.embeddings import OllamaEmbeddingProvider
 from agent.intelligence.belief_revision import BeliefRevisionEngine
 from agent.intelligence.hypotheses import HypothesisCompetitionEngine
+from agent.intelligence.evaluation import IntelligenceEvaluationEngine
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,7 @@ class IntelligenceWorker:
         reputation=None,
         belief_revision=None,
         hypothesis_competition=None,
+        evaluation=None,
         forecasting=None,
         forecast_max_active=12,
         forecast_per_cycle=2,
@@ -75,6 +77,7 @@ class IntelligenceWorker:
         self.hypothesis_competition = (
             hypothesis_competition or HypothesisCompetitionEngine(store)
         )
+        self.evaluation = evaluation
         self.last_reputation_result = ReputationResult()
         self.forecasting = forecasting or ForecastEngine(
             store, router=self.understanding.router,
@@ -298,6 +301,10 @@ class IntelligenceWorker:
             batch_size=config.hypothesis_batch_size,
             max_hypotheses=config.max_hypotheses_per_situation
         )
+        evaluation = (
+            IntelligenceEvaluationEngine(store)
+            if config.intelligence_evaluations_enabled else None
+        )
         return cls(
             store=store,
             connectors=connectors,
@@ -306,6 +313,7 @@ class IntelligenceWorker:
             reputation=reputation,
             belief_revision=belief_revision,
             hypothesis_competition=hypothesis_competition,
+            evaluation=evaluation,
             forecast_max_active=config.forecast_max_active,
             forecast_per_cycle=config.forecast_per_cycle,
             forecast_v2_mode=config.forecast_v2_mode,
@@ -409,6 +417,8 @@ class IntelligenceWorker:
         try:
             if force or now >= self._next_forecast_at:
                 self.last_forecast_result = self.forecasting.run_cycle()
+                if self.evaluation is not None:
+                    self.evaluation.run()
                 self._next_forecast_at = now + self.forecast_poll_seconds
         except Exception as exc:
             print("Intelligence forecasting cycle failed:", exc)

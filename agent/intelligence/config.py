@@ -48,6 +48,7 @@ class IntelligenceConfig:
     hypothesis_batch_size: int = 20
     max_hypotheses_per_situation: int = 5
     model_hypothesis_generation_enabled: bool = False
+    intelligence_evaluations_enabled: bool = True
     cluster_auto_link_threshold: float = 0.82
     cluster_review_threshold: float = 0.65
     cluster_lookback_days: int = 14
@@ -219,6 +220,9 @@ class IntelligenceConfig:
             ),
             model_hypothesis_generation_enabled=_env_bool(
                 "ENTITY_MODEL_HYPOTHESIS_GENERATION_ENABLED", False
+            ),
+            intelligence_evaluations_enabled=_env_bool(
+                "ENTITY_INTELLIGENCE_EVALUATIONS_ENABLED", True
             ),
             cluster_auto_link_threshold=_env_float(
                 "ENTITY_CLUSTER_AUTO_LINK_THRESHOLD", 0.82,

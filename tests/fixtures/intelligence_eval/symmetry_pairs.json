@@ -1,0 +1,14 @@
+[
+  {
+    "case": "publisher_identity_swap",
+    "left": {"publisher": "Famous Outlet", "reliability": 0.7, "claim": "Port is open"},
+    "right": {"publisher": "Unknown Outlet", "reliability": 0.7, "claim": "Port is open"},
+    "maximum_probability_difference": 0.03
+  },
+  {
+    "case": "political_actor_swap",
+    "left": {"actor": "Actor A", "evidence_weight": 0.6},
+    "right": {"actor": "Actor B", "evidence_weight": 0.6},
+    "maximum_probability_difference": 0.03
+  }
+]

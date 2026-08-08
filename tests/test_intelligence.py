@@ -35,6 +35,7 @@ from agent.intelligence.claim_extraction import HybridClaimExtractor
 from agent.intelligence.epistemic_backfill import EpistemicBackfill, dry_run as epistemic_dry_run
 from agent.intelligence.belief_revision import BeliefRevisionEngine
 from agent.intelligence.hypotheses import HypothesisCompetitionEngine
+from agent.intelligence.evaluation import IntelligenceEvaluationEngine, anonymize_evidence
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
 from agent.intelligence.service import IntelligenceService
@@ -94,7 +95,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(14, version)
+            self.assertEqual(15, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -412,6 +413,28 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual(5, result.hypotheses_created)
         self.assertAlmostEqual(1.0, sum(item["probability"] for item in competing), places=3)
         self.assertTrue(self.store.list_intelligence_gaps())
+
+    def test_blinded_evaluations_are_symmetric_and_gate_model_features(self):
+        left = anonymize_evidence([
+            {"publisher": "Famous", "independence_key": "family-a", "weight": .7}
+        ])
+        right = anonymize_evidence([
+            {"publisher": "Unknown", "independence_key": "family-a", "weight": .7}
+        ])
+        result = IntelligenceEvaluationEngine(self.store).run()
+        report = self.store.intelligence_evaluations()
+
+        self.assertEqual(left, right)
+        self.assertEqual(0, result["critical_failures"])
+        self.assertEqual(0, result["failed"])
+        self.assertEqual("active", next(
+            gate["status"] for gate in report["gates"]
+            if gate["feature"] == "hypothesis_competition"
+        ))
+        self.assertEqual("shadow", next(
+            gate["status"] for gate in report["gates"]
+            if gate["feature"] == "forecast_v2"
+        ))
 
     def test_private_mail_never_enters_public_world_model(self):
         self.store.register_source(

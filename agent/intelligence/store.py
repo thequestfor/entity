@@ -507,7 +507,9 @@ class IntelligenceStore:
                     (SELECT COUNT(*) FROM claim_verification_tasks
                      WHERE status = 'pending') AS verification_tasks,
                     (SELECT COUNT(*) FROM intelligence_gaps
-                     WHERE status = 'open') AS intelligence_gaps
+                     WHERE status = 'open') AS intelligence_gaps,
+                    (SELECT COUNT(*) FROM intelligence_feature_gates
+                     WHERE status = 'blocked') AS blocked_feature_gates
                 """
             ).fetchone()
             categories = connection.execute(
@@ -903,6 +905,18 @@ class IntelligenceStore:
         with self._connect() as connection:
             rows=connection.execute(query,params).fetchall()
         return [dict(row) for row in rows]
+
+    def intelligence_evaluations(self, limit=20):
+        with self._connect() as connection:
+            runs=connection.execute(
+                "SELECT * FROM intelligence_evaluation_runs ORDER BY id DESC LIMIT ?",
+                (max(1,min(100,int(limit))),)
+            ).fetchall()
+            gates=connection.execute(
+                "SELECT * FROM intelligence_feature_gates ORDER BY feature"
+            ).fetchall()
+        return {"runs":[{**dict(row),"metrics":self._json_load(row["metrics"],{})} for row in runs],
+                "gates":[dict(row) for row in gates]}
 
     def add_forecast(self, forecast):
         with self._connect() as connection:

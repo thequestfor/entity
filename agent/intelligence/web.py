@@ -87,6 +87,13 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             )})
             return
 
+        if parsed.path == "/api/intelligence/evaluations":
+            query=parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.intelligence_evaluations(
+                limit=_query_int(query,"limit",20)
+            ))
+            return
+
         if parsed.path == "/api/intelligence/forecasts":
             query = parse_qs(parsed.query)
             self._send_json({
