@@ -11,9 +11,10 @@ from agent.intelligence.config import IntelligenceConfig
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.intelligence.store import IntelligenceStore, utc_now
 from agent.intelligence.verification import VerificationEngine
+from agent.intelligence.authoritative_verification import compare_observation
 
 
-SUITE_VERSION="blinded-intelligence-v2"
+SUITE_VERSION="blinded-intelligence-v3"
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,15 @@ class IntelligenceEvaluationEngine:
         inverse,_=ensemble.combine({
             "base_rate":.6,"hypothesis":.3,"reasoning":.45
         })
+        missing_outcome,_,_,_=compare_observation(
+            {"predicate":"event.reported","value":"true"},
+            {"found":False},closed_world=True
+        )
+        revision_outcome,_,_,_=compare_observation(
+            {"predicate":"seismic.magnitude","value":"4.8",
+             "normalized_value":"4.8"},
+            {"found":True,"magnitude":4.9},closed_world=True
+        )
         return [
             EvaluationCase("component-order-symmetry","symmetry",abs(left-right)<=.03,True,abs(left-right)),
             EvaluationCase("publisher-label-blinding","bias",masked==swapped,True,0,{"masked":masked}),
@@ -101,7 +111,9 @@ class IntelligenceEvaluationEngine:
             EvaluationCase("probability-bounds","calibration",.05<=left<=.95,False),
             EvaluationCase("duplicate-family-not-independent","independence",duplicate_family is None,True),
             EvaluationCase("authority-id-is-allowlisted","provenance",forged_authority is None,True),
-            EvaluationCase("directional-complement-symmetry","symmetry",abs((left+inverse)-1)<=.03,True,abs((left+inverse)-1))
+            EvaluationCase("directional-complement-symmetry","symmetry",abs((left+inverse)-1)<=.03,True,abs((left+inverse)-1)),
+            EvaluationCase("absence-is-not-generic-refutation","truth-maintenance",missing_outcome=="inconclusive",True),
+            EvaluationCase("authoritative-revision-is-not-refutation","truth-maintenance",revision_outcome=="revises",True)
         ]
 
     def _update_gates(self,c,run_id,critical,failed,now):

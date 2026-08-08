@@ -46,6 +46,7 @@ class IntelligenceConfig:
     verification_execution_enabled: bool = True
     verification_batch_size: int = 20
     verification_max_attempts: int = 8
+    verification_remote_per_cycle: int = 3
     topic_reliability_enabled: bool = True
     hypothesis_competition_enabled: bool = True
     hypothesis_batch_size: int = 20
@@ -55,6 +56,10 @@ class IntelligenceConfig:
     reasoning_hourly_model_calls: int = 24
     reasoning_daily_model_calls: int = 200
     reasoning_job_lease_seconds: int = 120
+    reasoning_forecast_hourly_reserve: int = 2
+    reasoning_forecast_daily_reserve: int = 12
+    reasoning_forecast_hourly_calls: int = 4
+    reasoning_forecast_daily_calls: int = 30
     active_acquisition_enabled: bool = False
     active_acquisition_per_cycle: int = 5
     cluster_auto_link_threshold: float = 0.82
@@ -224,6 +229,10 @@ class IntelligenceConfig:
                 "ENTITY_VERIFICATION_MAX_ATTEMPTS", 8,
                 minimum=1, maximum=20
             ),
+            verification_remote_per_cycle=_env_int(
+                "ENTITY_VERIFICATION_REMOTE_PER_CYCLE", 3,
+                minimum=0, maximum=10
+            ),
             topic_reliability_enabled=_env_bool(
                 "ENTITY_TOPIC_RELIABILITY_ENABLED", True
             ),
@@ -251,6 +260,22 @@ class IntelligenceConfig:
             ),
             reasoning_job_lease_seconds=_env_int(
                 "ENTITY_REASONING_JOB_LEASE_SECONDS",120,minimum=30,maximum=900
+            ),
+            reasoning_forecast_hourly_reserve=_env_int(
+                "ENTITY_REASONING_FORECAST_HOURLY_RESERVE",2,
+                minimum=0,maximum=100
+            ),
+            reasoning_forecast_daily_reserve=_env_int(
+                "ENTITY_REASONING_FORECAST_DAILY_RESERVE",12,
+                minimum=0,maximum=1000
+            ),
+            reasoning_forecast_hourly_calls=_env_int(
+                "ENTITY_REASONING_FORECAST_HOURLY_CALLS",4,
+                minimum=1,maximum=100
+            ),
+            reasoning_forecast_daily_calls=_env_int(
+                "ENTITY_REASONING_FORECAST_DAILY_CALLS",30,
+                minimum=1,maximum=1000
             ),
             active_acquisition_enabled=_env_bool(
                 "ENTITY_ACTIVE_ACQUISITION_ENABLED",False

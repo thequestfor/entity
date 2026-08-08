@@ -11,6 +11,7 @@ from agent.intelligence.base_rates import BaseRateEngine, horizon_bucket
 from agent.intelligence.temporal_features import TemporalFeatureExtractor
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.intelligence.forecast_resolution import BlindedForecastResolver
+from agent.intelligence.reasoning_jobs import ReasoningJobQueue
 
 
 class ForecastEngine:
@@ -19,7 +20,7 @@ class ForecastEngine:
     method = "thinking-forecast-v1"
 
     def __init__(self, store, router, max_active=12, per_cycle=2,
-                 mode="legacy"):
+                 mode="legacy", queue=None, durable_jobs=False):
         self.store = store
         self.router = router
         self.max_active = max(1, int(max_active))
@@ -29,12 +30,115 @@ class ForecastEngine:
         self.features = TemporalFeatureExtractor(store)
         self.ensemble = PredictionEnsemble()
         self.resolver = BlindedForecastResolver(router)
+        self.queue = queue or ReasoningJobQueue(store)
+        self.durable_jobs = bool(durable_jobs)
+        self.last_generation_error = ""
 
     def run_cycle(self):
         self.base_rates.refresh()
         resolved = self.resolve_due()
-        created = self.create_forecasts()
-        return {"created": created, "resolved": resolved}
+        if self.durable_jobs:
+            enqueued = self.enqueue_forecasts()
+            created = self.dispatch_forecast_jobs()
+        else:
+            enqueued = 0
+            created = self.create_forecasts()
+        return {"created": created, "resolved": resolved,
+                "enqueued": enqueued}
+
+    def enqueue_forecasts(self):
+        calibration = self.store.forecast_calibration()
+        shadow = self.mode == "shadow"
+        active_count = calibration.get(
+            "active_shadow" if shadow else "active_live", 0
+        )
+        with self.store._connect() as connection:
+            pending = connection.execute(
+                "SELECT COUNT(*) FROM intelligence_reasoning_jobs "
+                "WHERE job_type='forecast_generation' AND lane='forecast' "
+                "AND status IN ('pending','leased')"
+            ).fetchone()[0]
+            pending_situations = {
+                row[0] for row in connection.execute(
+                    "SELECT subject_id FROM intelligence_reasoning_jobs "
+                    "WHERE job_type='forecast_generation' AND lane='forecast' "
+                    "AND status IN ('pending','leased')"
+                )
+            }
+        remaining = self.max_active - int(active_count) - int(pending)
+        if remaining <= 0:
+            return 0
+        active_situations = self.store.active_forecast_situation_ids(shadow=shadow)
+        candidates = [
+            item for item in self.store.list_situations(limit=200)
+            if item.get("worldview") and item.get("status") != "resolved"
+            and item["id"] not in active_situations
+            and item["id"] not in pending_situations
+        ]
+        created = 0
+        expiry = (datetime.now(UTC)+timedelta(hours=12)).isoformat(
+            timespec="seconds"
+        ).replace("+00:00","Z")
+        for situation in candidates[:min(remaining,self.per_cycle)]:
+            snapshot = hashlib.sha256(json.dumps({
+                "situation_id":situation["id"],
+                "updated_at":situation.get("updated_at"),
+                "worldview":situation.get("worldview"),"mode":self.mode
+            },sort_keys=True,default=str).encode()).hexdigest()
+            created += int(self.queue.enqueue(
+                "forecast_generation","situation",situation["id"],
+                f"forecast:{self.mode}:{situation['id']}:{snapshot}",
+                priority=float(situation.get("confidence") or .5),
+                snapshot_hash=snapshot,lane="forecast",expires_at=expiry
+            ))
+        return created
+
+    def dispatch_forecast_jobs(self):
+        created = 0
+        for _ in range(self.per_cycle):
+            job = self.queue.lease(
+                job_types=["forecast_generation"], lanes=["forecast"]
+            )
+            if not job:
+                break
+            forecast = None
+            error = ""
+            try:
+                with self.store._connect() as connection:
+                    row = connection.execute(
+                        "SELECT * FROM situations WHERE id=?",
+                        (job["subject_id"],)
+                    ).fetchone()
+                if not row:
+                    raise ValueError("Forecast situation no longer exists")
+                forecast = self._propose(
+                    dict(row), self.store.forecast_calibration()
+                )
+                if not forecast:
+                    raise ValueError(
+                        self.last_generation_error
+                        or "No valid evidence-grounded forecast was produced"
+                    )
+                forecast["generation_job_id"] = job["id"]
+                self.store.add_forecast(forecast)
+                self.queue.complete(job["id"],{"forecast_id":forecast["id"]})
+                created += 1
+            except Exception as exc:
+                error = str(exc)[:500]
+                self.queue.fail(job["id"],exc)
+            with self.store._connect() as connection:
+                connection.execute(
+                    """
+                    INSERT INTO forecast_generation_attempts (
+                      job_id,situation_id,evidence_snapshot_hash,outcome,
+                      forecast_id,error,created_at
+                    ) VALUES (?,?,?,?,?,?,?)
+                    """,
+                    (job["id"],job["subject_id"],job["input_snapshot_hash"],
+                     "created" if forecast else "failed",
+                     forecast["id"] if forecast else None,error,utc_now())
+                )
+        return created
 
     def create_forecasts(self):
         calibration = self.store.forecast_calibration()
@@ -188,12 +292,14 @@ class ForecastEngine:
                 "snapshot_hash": payload.get("snapshot_hash","")}
 
     def _generate_json(self, prompt, user_input):
+        self.last_generation_error = ""
         try:
             return self.router.generate_json(prompt, user_input=user_input, routing="world_understanding")
         except (
             ModelUnavailable, ValueError, TypeError, KeyError,
             json.JSONDecodeError, Exception
         ) as exc:
+            self.last_generation_error = str(exc)[:500]
             print("Forecast thinking unavailable:", exc)
             return None
 

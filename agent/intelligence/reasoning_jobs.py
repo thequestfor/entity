@@ -9,31 +9,64 @@ class ReasoningJobQueue:
     def __init__(self,store,lease_seconds=120,max_attempts=3):
         self.store=store; self.lease_seconds=max(30,int(lease_seconds)); self.max_attempts=max(1,int(max_attempts))
 
-    def enqueue(self,job_type,subject_type,subject_id,dedupe_key,priority=.5,snapshot_hash=""):
+    def enqueue(self,job_type,subject_type,subject_id,dedupe_key,priority=.5,
+                snapshot_hash="",lane="general",expires_at=None):
         now=utc_now()
         with self.store._connect() as c:
             cursor=c.execute("""
               INSERT OR IGNORE INTO intelligence_reasoning_jobs
-              (job_type,subject_type,subject_id,priority,dedupe_key,input_snapshot_hash,not_before,created_at,updated_at)
-              VALUES (?,?,?,?,?,?,?,?,?)
-            """,(job_type,subject_type,subject_id,max(0,min(1,float(priority))),dedupe_key,snapshot_hash,now,now,now))
+              (job_type,subject_type,subject_id,priority,dedupe_key,
+               input_snapshot_hash,not_before,created_at,updated_at,lane,expires_at)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """,(job_type,subject_type,subject_id,max(0,min(1,float(priority))),
+                   dedupe_key,snapshot_hash,now,now,now,str(lane or "general"),
+                   expires_at))
         return cursor.rowcount>0
 
-    def lease(self,job_types=None):
+    def lease(self,job_types=None,lanes=None):
         now=datetime.now(UTC); now_text=now.isoformat(timespec="seconds").replace("+00:00","Z")
         expiry=(now+timedelta(seconds=self.lease_seconds)).isoformat(timespec="seconds").replace("+00:00","Z")
         with self.store._connect() as c:
             c.execute("BEGIN IMMEDIATE")
             c.execute("UPDATE intelligence_reasoning_jobs SET status='pending',lease_expires_at=NULL,updated_at=? WHERE status='leased' AND lease_expires_at<?",(now_text,now_text))
+            c.execute("UPDATE intelligence_reasoning_jobs SET status='expired',"
+                      "lease_expires_at=NULL,updated_at=? WHERE status='pending' "
+                      "AND expires_at IS NOT NULL AND expires_at<=?",(now_text,now_text))
             query="SELECT * FROM intelligence_reasoning_jobs WHERE status='pending' AND not_before<=?"
             params=[now_text]
             if job_types:
                 query += " AND job_type IN (%s)" % ",".join("?" for _ in job_types); params.extend(job_types)
-            query += " ORDER BY priority DESC,created_at LIMIT 1"
+            if lanes:
+                query += " AND lane IN (%s)" % ",".join("?" for _ in lanes); params.extend(lanes)
+            query += (
+                " ORDER BY (priority + MIN(0.5,MAX(0.0,"
+                "julianday(?) - julianday(created_at))*0.03)) DESC,created_at LIMIT 1"
+            )
+            params.append(now_text)
             row=c.execute(query,params).fetchone()
             if not row: return None
             c.execute("UPDATE intelligence_reasoning_jobs SET status='leased',lease_expires_at=?,attempt_count=attempt_count+1,updated_at=? WHERE id=?",(expiry,now_text,row["id"]))
             return dict(c.execute("SELECT * FROM intelligence_reasoning_jobs WHERE id=?",(row["id"],)).fetchone())
+
+    def lease_weighted(self,scheduler,lanes,job_types=None):
+        """Lease from a persisted weighted rotation without starving a lane."""
+        sequence=tuple(str(lane) for lane in lanes if str(lane))
+        if not sequence: return self.lease(job_types=job_types)
+        with self.store._connect() as c:
+            row=c.execute("SELECT cursor FROM intelligence_lane_scheduler WHERE scheduler=?",(scheduler,)).fetchone()
+            start=int(row[0] or 0) if row else 0
+        for offset in range(len(sequence)):
+            index=(start+offset)%len(sequence)
+            job=self.lease(job_types=job_types,lanes=[sequence[index]])
+            if not job: continue
+            with self.store._connect() as c:
+                c.execute("""
+                  INSERT INTO intelligence_lane_scheduler(scheduler,cursor,updated_at)
+                  VALUES (?,?,?) ON CONFLICT(scheduler) DO UPDATE SET
+                    cursor=excluded.cursor,updated_at=excluded.updated_at
+                """,(scheduler,(index+1)%len(sequence),utc_now()))
+            return job
+        return None
 
     def complete(self,job_id,output=None,schema_version="v1",provider=""):
         now=utc_now()

@@ -296,7 +296,11 @@ class IntelligenceWorker:
         )
         budget = ReasoningBudget(
             store, hourly_calls=config.reasoning_hourly_model_calls,
-            daily_calls=config.reasoning_daily_model_calls
+            daily_calls=config.reasoning_daily_model_calls,
+            forecast_hourly_reserve=config.reasoning_forecast_hourly_reserve,
+            forecast_daily_reserve=config.reasoning_forecast_daily_reserve,
+            forecast_hourly_calls=config.reasoning_forecast_hourly_calls,
+            forecast_daily_calls=config.reasoning_forecast_daily_calls
         )
         bounded_router = BudgetedModelRouter(understanding.router, budget)
         understanding.router = bounded_router
@@ -314,7 +318,9 @@ class IntelligenceWorker:
         verification = VerificationEngine(
             store, enabled=config.verification_execution_enabled,
             batch_size=config.verification_batch_size,
-            max_attempts=config.verification_max_attempts
+            max_attempts=config.verification_max_attempts,
+            connectors=connectors,
+            remote_per_cycle=config.verification_remote_per_cycle
         )
         hypothesis_competition = HypothesisCompetitionEngine(
             store, enabled=config.hypothesis_competition_enabled,
@@ -327,6 +333,12 @@ class IntelligenceWorker:
         )
         queue = ReasoningJobQueue(
             store, lease_seconds=config.reasoning_job_lease_seconds
+        )
+        forecasting = ForecastEngine(
+            store, router=bounded_router.for_lane("forecast"),
+            max_active=config.forecast_max_active,
+            per_cycle=config.forecast_per_cycle,
+            mode=config.forecast_v2_mode,queue=queue,durable_jobs=True
         )
         acquisition = ActiveAcquisitionEngine(
             store, enabled=config.active_acquisition_enabled,
@@ -343,6 +355,7 @@ class IntelligenceWorker:
             hypothesis_competition=hypothesis_competition,
             evaluation=evaluation,
             acquisition=acquisition,
+            forecasting=forecasting,
             forecast_max_active=config.forecast_max_active,
             forecast_per_cycle=config.forecast_per_cycle,
             forecast_v2_mode=config.forecast_v2_mode,

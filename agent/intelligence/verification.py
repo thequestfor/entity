@@ -4,12 +4,19 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from agent.intelligence.store import utc_now
+from agent.intelligence.authoritative_verification import (
+    AuthoritativeVerificationRegistry
+)
+from agent.intelligence.verification_targets import VerificationTargetPlanner
 
 
 SOURCE_KIND_BY_TOPIC = {
     "earthquake": "usgs", "seismic": "usgs",
     "weather": "nws-alerts", "weather-alert": "nws-alerts",
+    "severe-storms": "nws-alerts", "floods": "nws-alerts",
     "cybersecurity": "cisa-kev", "cyber": "cisa-kev",
+    "known-exploited-vulnerability": "cisa-kev",
+    "software-vulnerability": "github-advisories",
     "public-health": "who-outbreaks", "health": "who-outbreaks",
     "wildfire": "firms", "economics": "world-bank",
     "economic-indicator": "world-bank", "humanitarian": "reliefweb",
@@ -109,13 +116,17 @@ class VerificationEngine:
 
     method = "deterministic-verification-v1"
 
-    def __init__(self, store, enabled=True, batch_size=20, max_attempts=8):
+    def __init__(self, store, enabled=True, batch_size=20, max_attempts=8,
+                 connectors=(), remote_per_cycle=3):
         self.store = store
         self.enabled = bool(enabled)
         self.batch_size = max(1, min(100, int(batch_size)))
         self.planner = VerificationPlanner(
             store, batch_size=batch_size, max_attempts=max_attempts
         )
+        self.targets = VerificationTargetPlanner(store)
+        self.registry = AuthoritativeVerificationRegistry(connectors)
+        self.remote_per_cycle = max(0, min(10, int(remote_per_cycle)))
 
     def run_batch(self):
         if not self.enabled:
@@ -127,15 +138,55 @@ class VerificationEngine:
                 FROM claim_verification_tasks tasks
                 JOIN claims ON claims.id=tasks.claim_id
                 WHERE tasks.status='pending' AND tasks.next_attempt_at<=?
-                ORDER BY tasks.priority DESC,tasks.created_at
+                ORDER BY (tasks.desired_source_kind!='independent-public') DESC,
+                         tasks.priority DESC,tasks.created_at
                 LIMIT ?
                 """,
                 (utc_now(), self.batch_size)
             ).fetchall()
-        recorded = postponed = 0
+        recorded = postponed = remote_used = 0
+        queried_sources = set()
         for task in tasks:
             with self.store._connect() as connection:
-                decision = self._decide(connection, task)
+                target = self.targets.ensure(connection, task)
+            decision = None
+            if (
+                target and target["target_status"] == "ready"
+                and remote_used < self.remote_per_cycle
+                and self.registry.available(target["adapter"])
+            ):
+                source_key = target["adapter"]
+                if source_key not in queried_sources:
+                    remote_used += 1
+                    queried_sources.add(source_key)
+                    try:
+                        observation = self.registry.query(target)
+                        if observation:
+                            self._record_observation(target, observation)
+                            if observation["outcome"] != "inconclusive":
+                                decision = {
+                                    "result": observation["outcome"],
+                                    "confidence": observation["confidence"],
+                                    "authority_level": "primary",
+                                    "document_version_id": None,
+                                    "reason": observation["reason"],
+                                    "basis": observation["basis"],
+                                    "observed_value": observation["observed_value"],
+                                    "expected_value": target["expected_value"],
+                                    "response_hash": observation["response_hash"],
+                                    "revision_kind": observation["revision_kind"],
+                                    "closed_world": observation["closed_world"]
+                                }
+                    except Exception as exc:
+                        with self.store._connect() as connection:
+                            self.planner.postpone(
+                                connection, task["id"],
+                                self.registry.safe_error(exc)
+                            )
+                        postponed += 1
+                        continue
+            with self.store._connect() as connection:
+                decision = decision or self._decide(connection, task)
                 if decision is None:
                     self.planner.postpone(connection, task["id"])
                     postponed += 1
@@ -145,13 +196,20 @@ class VerificationEngine:
                     """
                     INSERT OR IGNORE INTO claim_verification_results (
                       task_id,claim_id,result,confidence,authority_level,
-                      document_version_id,reason,method,created_at
-                    ) VALUES (?,?,?,?,?,?,?,?,?)
+                      document_version_id,reason,method,created_at,basis,
+                      observed_value,expected_value,response_hash,revision_kind,
+                      closed_world
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (task["id"], task["claim_id"], decision["result"],
                      decision["confidence"], decision["authority_level"],
                      decision.get("document_version_id"), decision["reason"],
-                     self.method, now)
+                     self.method, now, decision.get("basis","corroboration"),
+                     self.store._json(decision.get("observed_value",{})),
+                     self.store._json(decision.get("expected_value",{})),
+                     decision.get("response_hash",""),
+                     decision.get("revision_kind",""),
+                     int(bool(decision.get("closed_world"))))
                 )
                 connection.execute(
                     "UPDATE claim_verification_tasks SET status='completed',"
@@ -161,6 +219,27 @@ class VerificationEngine:
                 )
                 recorded += int(cursor.rowcount > 0)
         return VerificationExecutionResult(len(tasks), recorded, postponed)
+
+    def _record_observation(self, target, observation):
+        with self.store._connect() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO verification_observations (
+                  target_id,task_id,source_id,outcome,observed_value,
+                  confidence,basis,revision_kind,closed_world,response_hash,
+                  response_snapshot,reason,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (target["id"],target["task_id"],observation["source_id"],
+                 observation["outcome"],
+                 self.store._json(observation["observed_value"]),
+                 observation["confidence"],observation["basis"],
+                 observation["revision_kind"],
+                 int(bool(observation["closed_world"])),
+                 observation["response_hash"],
+                 self.store._json(observation["response_snapshot"]),
+                 observation["reason"],utc_now())
+            )
 
     def _decide(self, connection, task):
         support = self._claim_evidence(connection, task["claim_id"])
@@ -188,6 +267,11 @@ class VerificationEngine:
             signal, result = contrary_signal, "refutes"
         return {
             **signal, "result": result,
+            "basis": (
+                "authoritative-ingested-evidence"
+                if signal["authority_level"] == "primary"
+                else "independent-family-corroboration"
+            ),
             "reason": (
                 "Matched an allowlisted authoritative source."
                 if signal["authority_level"] == "primary"

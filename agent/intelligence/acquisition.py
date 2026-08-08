@@ -58,7 +58,10 @@ class ActiveAcquisitionEngine:
                 break
             adapter=self._adapter(row["desired_source_kind"],row["category"],row["target_predicate"])
             if not adapter: continue
-            created += int(self.queue.enqueue("active_acquisition","gap",row["id"],f"gap:{row['id']}:{adapter}",row["priority"]))
+            created += int(self.queue.enqueue(
+                "active_acquisition","gap",row["id"],
+                f"gap:{row['id']}:{adapter}",row["priority"],lane="gap"
+            ))
         return created
 
     def enqueue_verifications(self):
@@ -86,13 +89,16 @@ class ActiveAcquisitionEngine:
             )
             created += int(self.queue.enqueue(
                 "active_acquisition","verification_task",str(row["id"]),
-                dedupe,row["priority"]
+                dedupe,row["priority"],lane="verification"
             ))
         return created
 
     def dispatch_one(self):
         if not self.enabled: return None
-        job=self.queue.lease(["active_acquisition"])
+        job=self.queue.lease_weighted(
+            "acquisition",("verification","verification","verification","gap"),
+            ["active_acquisition"]
+        )
         if not job: return None
         try:
             with self.store._connect() as c:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from uuid import uuid4
 
 from agent.intelligence.store import utc_now
 from agent.intelligence.topic_taxonomy import normalize_topic, TOPIC_ALIASES
@@ -16,7 +17,8 @@ SINGLE_VALUE = {
 }
 AUTHORITATIVE_KINDS = {
     "earthquake", "weather", "cybersecurity", "public-health",
-    "government", "official", "economic-indicator"
+    "government", "official", "economic-indicator", "natural_hazard",
+    "weather_alert", "public_health", "economic_indicator", "space_weather"
 }
 
 
@@ -126,7 +128,8 @@ class BeliefRevisionEngine:
                 status = {
                     "supports": "corroborated",
                     "refutes": "refuted",
-                    "mixed": "disputed"
+                    "mixed": "disputed",
+                    "revises": "superseded"
                 }.get(result["result"], "unverified")
                 confidence = max(0.0, min(.99, float(result["confidence"] or 0)))
                 previous = claim["truth_status"]
@@ -143,11 +146,17 @@ class BeliefRevisionEngine:
                         f"verification-result:{result['id']}".encode()
                     ).hexdigest()
                     connection.execute(
-                        "UPDATE claims SET truth_status=?,resolution_confidence=?,"
-                        "last_resolved_at=?,resolver_version=?,updated_at=? WHERE id=?",
-                        (status, round(confidence, 4), now,
+                        "UPDATE claims SET truth_status=?,status=CASE WHEN ?="
+                        "'superseded' THEN 'superseded' ELSE status END,"
+                        "resolution_confidence=?,last_resolved_at=?,"
+                        "resolver_version=?,updated_at=? WHERE id=?",
+                        (status, status, round(confidence, 4), now,
                          "verification-result-v1", now, claim["id"])
                     )
+                    if status == "superseded":
+                        self._materialize_revision(
+                            connection, claim, result, confidence, now
+                        )
                     connection.execute(
                         """
                         INSERT INTO claim_resolution_history (
@@ -180,6 +189,43 @@ class BeliefRevisionEngine:
             if applied:
                 self._recalculate_reliability(connection, now)
         return applied
+
+    def _materialize_revision(self, connection, claim, result, confidence, now):
+        try:
+            observed = json.loads(result["observed_value"] or "{}")
+        except (TypeError, ValueError):
+            observed = {}
+        key = {
+            "seismic.magnitude":"magnitude", "event.status":"status",
+            "event.alert_level":"alert_level", "economic.value":"value",
+            "cyber.known_exploited":"known_exploited"
+        }.get(claim["predicate"])
+        value = observed.get(key) if key else None
+        if value is None:
+            return
+        object_value = str(value)
+        normalized = object_value.strip().lower()
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO claims (
+              id,situation_id,subject,predicate,object,normalized_object,status,
+              confidence,first_seen_at,last_seen_at,created_at,updated_at,
+              claim_type,verifiability,attribution,topic,attributed_to,
+              endorsement,extraction_confidence,extraction_method,
+              extraction_version,precision,evidence_role,truth_status,
+              resolution_confidence,core_importance,last_resolved_at,
+              resolver_version
+            ) VALUES (?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            (str(uuid4()),claim["situation_id"],claim["subject"],
+             claim["predicate"],object_value,normalized,round(confidence,4),
+             now,now,now,now,claim["claim_type"],claim["verifiability"],
+             "authoritative_revision",claim["topic"],claim["attributed_to"],
+             "asserts",round(confidence,4),"authoritative-verification",
+             "typed-verification-v1",claim["precision"],"primary",
+             "corroborated",round(confidence,4),claim["core_importance"],now,
+             "verification-result-v1")
+        )
 
     def _record_verified_publisher_outcomes(self, connection, claim, result,
                                             status, confidence, now):
@@ -402,7 +448,7 @@ class BeliefRevisionEngine:
             # Leave-one-family-out: a positive result needs another independent
             # family or an authoritative verifier.
             others = families - {item["family_key"]}
-            if status == "corroborated" and not others and item["source_kind"] not in AUTHORITATIVE_KINDS:
+            if status == "corroborated" and not others:
                 continue
             outcome = "confirmed" if status == "corroborated" else "refuted"
             connection.execute(

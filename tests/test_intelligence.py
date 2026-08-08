@@ -40,6 +40,7 @@ from agent.intelligence.reasoning_jobs import ReasoningJobQueue
 from agent.intelligence.reasoning_budget import ReasoningBudget, BudgetedModelRouter
 from agent.intelligence.acquisition import ActiveAcquisitionEngine
 from agent.intelligence.verification import VerificationEngine
+from agent.intelligence.authoritative_verification import compare_observation
 from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
@@ -100,7 +101,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(17, version)
+            self.assertEqual(18, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -532,6 +533,230 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertTrue(bounded.generate_json("two")["ok"])
         with self.assertRaises(ModelUnavailable):
             bounded.generate_json("three")
+
+    def test_weighted_job_lanes_prevent_gap_starvation(self):
+        queue=ReasoningJobQueue(self.store,lease_seconds=30)
+        for index in range(4):
+            queue.enqueue("active_acquisition","gap",f"gap-{index}",
+                          f"gap-job-{index}",priority=1,lane="gap")
+        for index in range(3):
+            queue.enqueue("active_acquisition","verification_task",str(index),
+                          f"verify-job-{index}",priority=.2,lane="verification")
+        leased=[]
+        for _ in range(4):
+            job=queue.lease_weighted(
+                "test",("verification","verification","verification","gap"),
+                ["active_acquisition"]
+            )
+            leased.append(job["lane"])
+            queue.complete(job["id"])
+
+        self.assertEqual(
+            ["verification","verification","verification","gap"],leased
+        )
+
+    def test_forecast_budget_is_reserved_from_worldview_calls(self):
+        class Router:
+            def generate_json(self,*args,**kwargs): return {"ok":True}
+
+        budget=ReasoningBudget(
+            self.store,hourly_calls=4,daily_calls=10,
+            forecast_hourly_reserve=2,forecast_daily_reserve=2,
+            forecast_hourly_calls=2,forecast_daily_calls=4
+        )
+        worldview=BudgetedModelRouter(Router(),budget)
+        forecast=worldview.for_lane("forecast")
+        worldview.generate_json("world one")
+        worldview.generate_json("world two")
+        with self.assertRaises(ModelUnavailable):
+            worldview.generate_json("world three")
+        forecast.generate_json("forecast one")
+        forecast.generate_json("forecast two")
+        with self.assertRaises(ModelUnavailable):
+            forecast.generate_json("forecast three")
+
+    def test_authority_absence_is_not_generic_refutation(self):
+        outcome,_,confidence,_=compare_observation(
+            {"predicate":"event.reported","value":"true"},
+            {"found":False},closed_world=True
+        )
+        cisa_outcome,_,_,_=compare_observation(
+            {"predicate":"cyber.known_exploited","value":"true"},
+            {"found":False},closed_world=True
+        )
+
+        self.assertEqual("inconclusive",outcome)
+        self.assertLess(confidence,.5)
+        self.assertEqual("refutes",cisa_outcome)
+
+    def test_typed_authority_revision_supersedes_without_refuting_publisher(self):
+        class FakeUsgs:
+            source_id="usgs_earthquakes"
+            enabled=True
+
+            def fetch_json(self,url):
+                self.url=url
+                return {"features":[{
+                    "id":"test-event","properties":{
+                        "mag":4.9,"status":"reviewed","alert":None,
+                        "tsunami":0,"place":"near Test City","updated":1
+                    },"geometry":{"coordinates":[-110,35,5]}
+                }]}
+
+        self.store.register_source(
+            "usgs_earthquakes","USGS","natural_hazard",credibility=1
+        )
+        now=datetime.now(UTC).isoformat()
+        self.store.ingest_items("source-a",[SourceItem(
+            external_id="news-quake",title="M 4.8 near Test City",
+            summary="A magnitude 4.8 earthquake occurred near Test City.",
+            url="https://news.test/revision",category="earthquake",
+            latitude=35,longitude=-110,published_at=now,
+            metadata={"magnitude":4.8}
+        )])
+        self.engine.analyze_pending()
+        beliefs=BeliefRevisionEngine(self.store,batch_size=100)
+        beliefs.run_batch()
+        with self.store._connect() as connection:
+            magnitude=connection.execute(
+                "SELECT * FROM claims WHERE predicate='seismic.magnitude'"
+            ).fetchone()
+            connection.execute(
+                "UPDATE claim_verification_tasks SET status='deferred' "
+                "WHERE claim_id!=?",(magnitude["id"],)
+            )
+
+        fake_usgs=FakeUsgs()
+        result=VerificationEngine(
+            self.store,batch_size=10,connectors=[fake_usgs],
+            remote_per_cycle=1
+        ).run_batch()
+        beliefs.apply_verification_results()
+        with self.store._connect() as connection:
+            old=connection.execute(
+                "SELECT * FROM claims WHERE id=?",(magnitude["id"],)
+            ).fetchone()
+            revised=connection.execute(
+                "SELECT * FROM claims WHERE situation_id=? AND predicate="
+                "'seismic.magnitude' AND status='active'",
+                (magnitude["situation_id"],)
+            ).fetchone()
+            outcome_count=connection.execute(
+                "SELECT COUNT(*) FROM publisher_claim_outcomes WHERE claim_id=?",
+                (magnitude["id"],)
+            ).fetchone()[0]
+            observation=connection.execute(
+                "SELECT * FROM verification_observations"
+            ).fetchone()
+
+        self.assertEqual(1,result.results_recorded)
+        self.assertEqual("superseded",old["truth_status"])
+        self.assertEqual("4.9",revised["normalized_object"])
+        self.assertEqual("corroborated",revised["truth_status"])
+        self.assertEqual(0,outcome_count)
+        self.assertEqual("revises",observation["outcome"])
+        self.assertIn("earthquake.usgs.gov/fdsnws/event",fake_usgs.url)
+
+    def test_verifier_prioritizes_queryable_authority_tasks(self):
+        now=datetime.now(UTC).isoformat()
+        self.store.ingest_items("source-a",[
+            SourceItem(
+                external_id="generic-first",title="Unconfirmed generic report",
+                url="https://a.test/generic",category="traditional-news"
+            ),
+            SourceItem(
+                external_id="queryable-quake",title="M 3.2 near Test City",
+                url="https://a.test/queryable",category="earthquake",
+                latitude=35,longitude=-110,published_at=now,
+                metadata={"magnitude":3.2}
+            )
+        ])
+        self.engine.analyze_pending()
+        BeliefRevisionEngine(self.store,batch_size=100).run_batch()
+
+        VerificationEngine(
+            self.store,batch_size=1,remote_per_cycle=0
+        ).run_batch()
+        with self.store._connect() as connection:
+            target=connection.execute(
+                "SELECT * FROM verification_targets ORDER BY id LIMIT 1"
+            ).fetchone()
+
+        self.assertEqual("usgs",target["adapter"])
+        self.assertEqual("ready",target["target_status"])
+
+    def test_authority_can_establish_fact_without_self_awarding_reliability(self):
+        self.store.register_source(
+            "usgs_earthquakes","USGS","natural_hazard",credibility=1
+        )
+        self.store.ingest_items("usgs_earthquakes",[SourceItem(
+            external_id="official-quake",title="M 3.7 near Test City",
+            url="https://earthquake.usgs.gov/official-quake",
+            category="earthquake",metadata={"magnitude":3.7}
+        )])
+        self.engine.analyze_pending()
+        BeliefRevisionEngine(self.store,batch_size=100).run_batch()
+        with self.store._connect() as connection:
+            claim=connection.execute(
+                "SELECT truth_status FROM claims "
+                "WHERE predicate='seismic.magnitude'"
+            ).fetchone()
+            outcomes=connection.execute(
+                "SELECT COUNT(*) FROM publisher_claim_outcomes"
+            ).fetchone()[0]
+
+        self.assertEqual("corroborated",claim["truth_status"])
+        self.assertEqual(0,outcomes)
+
+    def test_durable_shadow_forecast_job_records_attempt_and_artifact(self):
+        class ForecastRouter:
+            last_provider_name="fixture"
+            def provider_name(self): return "fixture"
+            def generate_json(self,prompt,**kwargs):
+                return {
+                    "question":"Will an authority confirm the report?",
+                    "predicted_outcome":"An authority will confirm it.",
+                    "probability":.6,
+                    "target_at":(datetime.now(UTC)+timedelta(hours=12)).isoformat(),
+                    "resolution_criteria":"A later primary source confirms it.",
+                    "rationale":"The report is provisional."
+                }
+
+        self.store.ingest_items("source-a",[SourceItem(
+            external_id="durable-forecast",title="Port Beta disruption",
+            summary="A provisional disruption was reported.",
+            url="https://a.test/durable",category="traditional-news"
+        )])
+        self.engine.analyze_pending()
+        HypothesisCompetitionEngine(self.store,batch_size=10).run_batch()
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE situations SET worldview='Provisional disruption.'"
+            )
+        queue=ReasoningJobQueue(self.store,lease_seconds=30)
+        forecaster=ForecastEngine(
+            self.store,ForecastRouter(),max_active=2,per_cycle=1,
+            mode="shadow",queue=queue,durable_jobs=True
+        )
+
+        outcome=forecaster.run_cycle()
+        with self.store._connect() as connection:
+            job=connection.execute(
+                "SELECT * FROM intelligence_reasoning_jobs "
+                "WHERE job_type='forecast_generation'"
+            ).fetchone()
+            attempt=connection.execute(
+                "SELECT * FROM forecast_generation_attempts"
+            ).fetchone()
+        forecast=next(item for item in self.store.list_forecasts()
+                      if item["method"]=="hypothesis-forecast-v2")
+
+        self.assertEqual(1,outcome["enqueued"])
+        self.assertEqual(1,outcome["created"])
+        self.assertEqual("forecast",job["lane"])
+        self.assertEqual("completed",job["status"])
+        self.assertEqual("created",attempt["outcome"])
+        self.assertEqual(job["id"],forecast["generation_job_id"])
 
     def test_active_acquisition_only_schedules_allowlisted_configured_source(self):
         self.store.register_source(

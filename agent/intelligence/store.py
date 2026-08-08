@@ -510,6 +510,10 @@ class IntelligenceStore:
                      WHERE status = 'deferred') AS deferred_verification_tasks,
                     (SELECT COUNT(*) FROM claim_verification_results)
                      AS verification_results,
+                    (SELECT COUNT(*) FROM verification_targets
+                     WHERE target_status='ready') AS ready_verification_targets,
+                    (SELECT COUNT(*) FROM verification_observations)
+                     AS verification_observations,
                     (SELECT COUNT(*) FROM intelligence_gaps
                      WHERE status = 'open') AS intelligence_gaps,
                     ((SELECT COUNT(*) FROM active_acquisition_attempts) +
@@ -951,9 +955,20 @@ class IntelligenceStore:
             budget=connection.execute(
                 "SELECT * FROM intelligence_budget_usage ORDER BY bucket_start DESC LIMIT 10"
             ).fetchall()
+            lanes=connection.execute(
+                "SELECT lane,status,COUNT(*) count,MIN(created_at) oldest "
+                "FROM intelligence_reasoning_jobs GROUP BY lane,status "
+                "ORDER BY lane,status"
+            ).fetchall()
+            lane_budget=connection.execute(
+                "SELECT * FROM intelligence_budget_lane_usage "
+                "ORDER BY bucket_start DESC,lane LIMIT 30"
+            ).fetchall()
         return {"counts":{row["status"]:row["count"] for row in counts},
                 "jobs":[dict(row) for row in jobs],
-                "budget":[dict(row) for row in budget]}
+                "budget":[dict(row) for row in budget],
+                "lanes":[dict(row) for row in lanes],
+                "lane_budget":[dict(row) for row in lane_budget]}
 
     def add_forecast(self, forecast):
         with self._connect() as connection:
@@ -964,8 +979,9 @@ class IntelligenceStore:
                     target_at, resolution_criteria, rationale, evidence, model,
                     method, status, created_at,hypothesis_id,forecast_kind,
                     category,horizon_bucket,evidence_cutoff_at,evidence_snapshot_hash,
-                    base_rate,base_rate_source,model_probability,ensemble_probability,shadow
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?,?,?,?,?,?,?,?,?,?,?,?)
+                    base_rate,base_rate_source,model_probability,ensemble_probability,
+                    shadow,generation_job_id
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     forecast["id"], forecast["situation_id"], forecast["question"],
@@ -981,7 +997,8 @@ class IntelligenceStore:
                     forecast.get("evidence_snapshot_hash",""),
                     forecast.get("base_rate"),forecast.get("base_rate_source",""),
                     forecast.get("model_probability"),
-                    forecast.get("ensemble_probability"),int(bool(forecast.get("shadow")))
+                    forecast.get("ensemble_probability"),int(bool(forecast.get("shadow"))),
+                    forecast.get("generation_job_id")
                 )
             )
             now=forecast["created_at"]
