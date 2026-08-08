@@ -14,7 +14,7 @@ BACKFILL_NAME = "native-geospatial-v1"
 FEATURE_VERSION = "geospatial-prediction-v1"
 AUTHORITATIVE_SOURCES = {
     "usgs_earthquakes", "nasa_eonet", "nasa_firms_wildfires",
-    "gdacs", "nws_alerts"
+    "gdacs", "nws_alerts", "copernicus_ems"
 }
 FEATURE_TYPES = {
     "earthquake": "earthquake", "eq": "earthquake",
@@ -198,8 +198,8 @@ class GeospatialIntelligenceEngine:
                    LEFT JOIN situation_documents ON situation_documents.document_id=documents.id
                    LEFT JOIN situations ON situations.id=situation_documents.situation_id
                    WHERE {condition} AND (
-                     documents.source_id IN ('usgs_earthquakes','nasa_eonet','nasa_firms_wildfires','gdacs','nws_alerts')
-                     OR sources.kind IN ('natural_hazard','wildfire','weather_alert'))"""
+                     documents.source_id IN ('usgs_earthquakes','nasa_eonet','nasa_firms_wildfires','gdacs','nws_alerts','copernicus_ems')
+                     OR sources.kind IN ('natural_hazard','wildfire','weather_alert','emergency_mapping'))"""
             recent_limit = min(20, max(1, self.batch_size // 5)) if self.batch_size > 1 else 0
             historical_limit = self.batch_size - recent_limit
             recent_rows = connection.execute(

@@ -46,6 +46,27 @@ class ConnectorContractError(ValueError):
 
 
 POLICIES = {
+    "acled_conflict": SourcePolicy(
+        "authenticated","aggregator","report","acled",
+        ("acleddata.com",),"ACLED Terms of Use",
+        "https://acleddata.com/terms-of-use","ACLED",
+        "terms-governed",True,"global","days",
+        ("ACLED records curated reported events; fatality figures can be revised.",)
+    ),
+    "hdx_hapi": SourcePolicy(
+        "authenticated","intergovernmental","measurement","hdx-hapi",
+        ("hapi.humdata.org",),"HDX Terms of Service",
+        "https://data.humdata.org/about/terms","HDX HAPI and original provider",
+        "dataset-specific-attribution",True,"configured humanitarian operations","varies",
+        ("Coverage and update cadence vary by country, theme, and provider dataset.",)
+    ),
+    "copernicus_ems": SourcePolicy(
+        "public","official","observation","copernicus-ems",
+        ("mapping.emergency.copernicus.eu",),"Copernicus data policy",
+        "https://www.copernicus.eu/en/access-data/copernicus-data-and-information-access-services",
+        "European Union, Copernicus EMS","attribution-required",False,"global activations","hours",
+        ("An activation indicates emergency mapping work, not a complete global event census.",)
+    ),
     "usgs_earthquakes": SourcePolicy(
         "public","official","observation","usgs-earthquakes",
         ("earthquake.usgs.gov",),"U.S. Government work",

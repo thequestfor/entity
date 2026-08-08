@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from agent.connectors.cisa import CisaKevConnector
+from agent.connectors.acled import AcledConnector
+from agent.connectors.copernicus_ems import CopernicusEmsConnector
 from agent.connectors.eonet import EonetConnector
 from agent.connectors.firms import FirmsConnector
 from agent.connectors.fred import FredConnector
@@ -18,6 +20,7 @@ from agent.connectors.gdacs import GdacsConnector
 from agent.connectors.gdelt import GdeltConnector
 from agent.connectors.gmail import GmailConnector
 from agent.connectors.github_advisories import GitHubAdvisoriesConnector
+from agent.connectors.hdx_hapi import HdxHapiConnector
 from agent.connectors.mail_common import secure_write
 from agent.connectors.nws import NwsAlertsConnector
 from agent.connectors.noaa_swpc import NoaaSpaceWeatherConnector
@@ -1863,6 +1866,80 @@ class ReputationEngineTests(unittest.TestCase):
 
 
 class ConnectorTests(unittest.TestCase):
+    def test_acled_connector_normalizes_curated_reported_event(self):
+        payload = {"success":True,"data":[{
+            "event_id_cnty":"TST1","event_date":"2026-08-07",
+            "disorder_type":"Political violence","event_type":"Battles",
+            "sub_event_type":"Armed clash","actor1":"Group A","actor2":"Group B",
+            "country":"Testland","iso":"TST","admin1":"North",
+            "location":"Example City","latitude":"12.5","longitude":"24.5",
+            "geo_precision":"1","time_precision":"1","source":"Outlet A; Outlet B",
+            "source_scale":"National","notes":"An armed clash was reported.",
+            "fatalities":"2","timestamp":"1786123456"
+        }]}
+        connector = AcledConnector(
+            username="account@example.test",password="secret",
+            fetch_json=lambda _:payload,enabled=True,max_items=5
+        )
+        item = connector.poll().items[0]
+        self.assertEqual("TST1", item.external_id)
+        self.assertEqual("conflict", item.category)
+        self.assertEqual(12.5, item.latitude)
+        self.assertEqual(2, item.metadata["fatalities"])
+        self.assertEqual("reported-conservative-estimate", item.metadata["fatalities_status"])
+        self.assertEqual(["Outlet A","Outlet B"], item.metadata["reporting_sources"])
+        self.assertIn("event_id_cnty=TST1", item.url)
+
+    def test_hdx_hapi_connector_is_bounded_and_preserves_dataset_provenance(self):
+        calls = []
+        def fetch(url):
+            calls.append(url)
+            return {"data":[{
+                "resource_hdx_id":"resource-1","dataset_hdx_id":"dataset-1",
+                "dataset_hdx_stub":"testland-humanitarian-needs",
+                "location_code":"TST","location_name":"Testland",
+                "admin1_code":"TST-1","admin1_name":"North",
+                "sector_name":"Health","population_status":"INN",
+                "population":12000,"reference_period_end":"2026-07-31",
+                "provider_name":"OCHA Testland"
+            }]}
+        connector = HdxHapiConnector(
+            app_identifier="entity-test",locations=("TST",),
+            themes=("affected-people/humanitarian-needs",),
+            fetch_json=fetch,enabled=True,max_items=1
+        )
+        batch = connector.poll()
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, len(batch.items))
+        self.assertEqual("humanitarian-needs", batch.items[0].category)
+        self.assertEqual("resource-1", batch.items[0].metadata["resource_hdx_id"])
+        self.assertEqual(12000, batch.items[0].metadata["population"])
+        self.assertIn("hapi_record=", batch.items[0].url)
+
+    def test_hdx_hapi_failure_never_exposes_app_identifier(self):
+        connector = HdxHapiConnector(
+            app_identifier="sensitive-app-id",locations=("TST",),
+            themes=("affected-people/humanitarian-needs",),enabled=True,
+            fetch_json=lambda _: (_ for _ in ()).throw(RuntimeError("network failed"))
+        )
+        with self.assertRaisesRegex(RuntimeError, "HDX HAPI request failed") as raised:
+            connector.poll()
+        self.assertNotIn("sensitive-app-id", str(raised.exception))
+
+    def test_copernicus_ems_connector_normalizes_activation_geometry(self):
+        connector = CopernicusEmsConnector(fetch_json=lambda _:{"results":[{
+            "code":"EMSR999","countries":["Testland"],
+            "eventTime":"2026-08-07T12:00:00","activationTime":"2026-08-07T13:00:00",
+            "name":"Flood in Testland","centroid":"POINT (24.5 12.5)",
+            "category":"Flood","lastUpdate":"2026-08-08T10:00:00",
+            "closed":False,"gdacsId":"FL123","n_aois":2,"n_products":4
+        }]},enabled=True)
+        item = connector.poll().items[0]
+        self.assertEqual("EMSR999", item.external_id)
+        self.assertEqual("flood", item.category)
+        self.assertEqual((12.5,24.5), (item.latitude,item.longitude))
+        self.assertEqual("Point", item.metadata["geometry"]["type"])
+
     def test_news_connector_normalizes_rss_with_publisher_provenance(self):
         xml = b"""<?xml version='1.0'?>
         <rss xmlns:dc='http://purl.org/dc/elements/1.1/' version='2.0'>
@@ -2481,6 +2558,25 @@ class ConnectorTests(unittest.TestCase):
 
 
 class IntelligenceWorkerTests(unittest.TestCase):
+    def test_worker_registers_new_global_feed_contracts_without_credentials(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = IntelligenceStore(Path(directory) / "contracts.db")
+            worker = IntelligenceWorker.from_config(
+                store, IntelligenceConfig(enabled=True)
+            )
+            policies = {
+                item["source_id"]:item for item in store.list_source_policies()
+            }
+            self.assertIn("acled_conflict", policies)
+            self.assertIn("hdx_hapi", policies)
+            self.assertIn("copernicus_ems", policies)
+            self.assertTrue(policies["acled_conflict"]["credentials_required"])
+            self.assertEqual("observation", policies["copernicus_ems"]["evidence_role"])
+            self.assertFalse(next(
+                connector.enabled for connector in worker.connectors
+                if connector.source_id == "acled_conflict"
+            ))
+
     def test_worker_throttles_maintenance_cognition_without_changes(self):
         with tempfile.TemporaryDirectory() as directory:
             store = IntelligenceStore(Path(directory) / "cadence.db")

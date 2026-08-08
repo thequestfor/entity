@@ -19,6 +19,11 @@ DEFAULT_WORLD_BANK_INDICATORS = (
     "SL.UEM.TOTL.ZS",  # Unemployment, total (% of labor force)
 )
 
+DEFAULT_HDX_HAPI_THEMES = (
+    "affected-people/humanitarian-needs",
+    "coordination-context/operational-presence",
+)
+
 
 @dataclass(frozen=True)
 class IntelligenceConfig:
@@ -89,6 +94,15 @@ class IntelligenceConfig:
     learned_ensemble_mode: str = "shadow"
     reliefweb_appname: str = ""
     reliefweb_enabled: bool = True
+    acled_enabled: bool = False
+    acled_username: str = ""
+    acled_password: str = ""
+    acled_lookback_days: int = 7
+    hdx_hapi_enabled: bool = False
+    hdx_hapi_app_identifier: str = ""
+    hdx_hapi_locations: tuple[str, ...] = ()
+    hdx_hapi_themes: tuple[str, ...] = DEFAULT_HDX_HAPI_THEMES
+    copernicus_ems_enabled: bool = True
     usgs_enabled: bool = True
     eonet_enabled: bool = True
     gdacs_enabled: bool = True
@@ -401,6 +415,15 @@ class IntelligenceConfig:
                 "ENTITY_RELIEFWEB_ENABLED",
                 True
             ),
+            acled_enabled=_env_bool("ENTITY_ACLED_ENABLED", False),
+            acled_username=os.getenv("ENTITY_ACLED_USERNAME", "").strip(),
+            acled_password=os.getenv("ENTITY_ACLED_PASSWORD", ""),
+            acled_lookback_days=_env_int("ENTITY_ACLED_LOOKBACK_DAYS", 7, minimum=1, maximum=30),
+            hdx_hapi_enabled=_env_bool("ENTITY_HDX_HAPI_ENABLED", False),
+            hdx_hapi_app_identifier=os.getenv("ENTITY_HDX_HAPI_APP_IDENTIFIER", "").strip(),
+            hdx_hapi_locations=_env_csv(os.getenv("ENTITY_HDX_HAPI_LOCATIONS"), ()),
+            hdx_hapi_themes=_env_csv(os.getenv("ENTITY_HDX_HAPI_THEMES"), DEFAULT_HDX_HAPI_THEMES),
+            copernicus_ems_enabled=_env_bool("ENTITY_COPERNICUS_EMS_ENABLED", True),
             usgs_enabled=_env_bool("ENTITY_USGS_ENABLED", True),
             eonet_enabled=_env_bool("ENTITY_EONET_ENABLED", True),
             gdacs_enabled=_env_bool("ENTITY_GDACS_ENABLED", True),

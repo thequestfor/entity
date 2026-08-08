@@ -3,7 +3,9 @@ import time
 from dataclasses import dataclass
 
 from agent.connectors import (
+    AcledConnector,
     CisaKevConnector,
+    CopernicusEmsConnector,
     EonetConnector,
     FirmsConnector,
     FredConnector,
@@ -11,6 +13,7 @@ from agent.connectors import (
     GdeltConnector,
     GmailConnector,
     GitHubAdvisoriesConnector,
+    HdxHapiConnector,
     OutlookConnector,
     NwsAlertsConnector,
     NoaaSpaceWeatherConnector,
@@ -145,6 +148,26 @@ class IntelligenceWorker:
     @classmethod
     def from_config(cls, store, config):
         connectors = [
+            AcledConnector(
+                username=config.acled_username,password=config.acled_password,
+                lookback_days=config.acled_lookback_days,
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.acled_enabled
+            ),
+            HdxHapiConnector(
+                app_identifier=config.hdx_hapi_app_identifier,
+                locations=config.hdx_hapi_locations,
+                themes=config.hdx_hapi_themes,
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.hdx_hapi_enabled
+            ),
+            CopernicusEmsConnector(
+                timeout=config.request_timeout_seconds,
+                max_items=config.max_items_per_source,
+                enabled=config.copernicus_ems_enabled
+            ),
             UsgsConnector(
                 timeout=config.request_timeout_seconds,
                 max_items=config.max_items_per_source,

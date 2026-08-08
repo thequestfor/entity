@@ -63,20 +63,23 @@ class WorldEventGraphEngine:
         )
         return 0
 
-    def _finish_lane(self, connection, lane, rows, created, now):
+    def _finish_lane(self, connection, lane, rows, created, now,
+                     processed_count=None):
+        processed_count = len(rows) if processed_count is None else int(processed_count)
         if rows:
             connection.execute(
                 """UPDATE world_graph_backfill_state SET cursor_id=?,
                    processed=processed+?,created_count=created_count+?,
                    completed=0,completed_at=NULL,last_error='',updated_at=?
                    WHERE lane=?""",
-                (rows[-1]["cursor_id"], len(rows), created, now, lane)
+                (rows[-1]["cursor_id"], processed_count, created, now, lane)
             )
         else:
             connection.execute(
                 """UPDATE world_graph_backfill_state SET completed=1,
+                   processed=processed+?,created_count=created_count+?,
                    completed_at=COALESCE(completed_at,?),updated_at=?
-                   WHERE lane=?""", (now, now, lane)
+                   WHERE lane=?""", (processed_count, created, now, now, lane)
             )
 
     def _run_situations(self, connection, limit, now):
@@ -182,13 +185,10 @@ class WorldEventGraphEngine:
                        updated_at=? WHERE id=?""",
                     (event_id, event_id, now, event_id)
                 )
-        if historical:
-            self._finish_lane(
-                connection, DOCUMENT_LANE, historical,
-                events + observations, now
-            )
-        else:
-            self._finish_lane(connection, DOCUMENT_LANE, [], 0, now)
+        self._finish_lane(
+            connection, DOCUMENT_LANE, historical,
+            events + observations, now, processed_count=len(rows)
+        )
         return WorldGraphResult(
             processed=len(rows), events=events, observations=observations,
             entities=entities, relations=relations
