@@ -12,6 +12,7 @@ const elements = {
   briefingPeriod: document.querySelector("#briefing-period"),
   worldMap: document.querySelector("#world-map"),
   mapStatus: document.querySelector("#map-status"),
+  mapPriorityFilter: document.querySelector("#map-priority-filter"),
   situationList: document.querySelector("#situation-list"),
   situationDetail: document.querySelector("#situation-detail"),
   documentFeed: document.querySelector("#document-feed"),
@@ -26,6 +27,7 @@ const elements = {
 
 let selectedCategory = "";
 let selectedSituationId = "";
+let mapPriority = "priority";
 
 async function request(path) {
   const response = await fetch(path, {
@@ -128,17 +130,18 @@ function renderMap(situations) {
   const located = situations.filter((situation) =>
     Number.isFinite(situation.latitude) && Number.isFinite(situation.longitude)
   );
-  elements.mapStatus.textContent = located.length
-    ? `${located.length} located situation${located.length === 1 ? "" : "s"} in this view`
+  const displayed = selectMapSituations(located);
+  elements.mapStatus.textContent = displayed.length
+    ? `${displayed.length} shown · ${located.length} located available`
     : "No located situations in this view";
-  if (!located.length) {
+  if (!displayed.length) {
     const empty = document.createElement("p");
     empty.className = "map-empty";
     empty.textContent = "No located situations are available in this view.";
     elements.worldMap.append(empty);
     return;
   }
-  for (const situation of located) {
+  for (const situation of displayed) {
     const point = document.createElement("button");
     point.type = "button";
     point.className = "map-point";
@@ -152,6 +155,32 @@ function renderMap(situations) {
     point.addEventListener("click", () => selectSituation(situation.id));
     elements.worldMap.append(point);
   }
+}
+
+function selectMapSituations(situations) {
+  if (mapPriority === "all") return situations;
+  const active = situations.filter((situation) => situation.status === "active");
+  if (mapPriority === "active") return active.slice(0, 75);
+  return active
+    .map((situation) => ({ situation, score: mapPriorityScore(situation) }))
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 30)
+    .map((item) => item.situation);
+}
+
+function mapPriorityScore(situation) {
+  const timestamp = new Date(situation.last_seen_at || situation.updated_at);
+  const ageHours = Number.isNaN(timestamp.getTime())
+    ? 168
+    : Math.max(0, (Date.now() - timestamp.getTime()) / 3_600_000);
+  const freshness = Math.max(0, 3 - ageHours / 24);
+  return (
+    (situation.status === "contested" ? 5 : 0) +
+    Number(situation.confidence || 0) * 2 +
+    Math.min(3, Number(situation.source_count || 0)) +
+    Math.min(1, Number(situation.evidence_count || 0) / 10) +
+    freshness
+  );
 }
 
 function selectSituation(id) {
@@ -309,8 +338,8 @@ function renderReputations(reputations) {
     const score = document.createElement("span");
     const evaluated = Number(reputation.evaluated_count ?? 0);
     const learned = Number(reputation.learned_credibility ?? 0);
-    const salt = evaluated < 3
-      ? "unproven — large grain of salt"
+    const salt = evaluated < 12
+      ? `provisional (${evaluated}/12 factual checks) — large grain of salt`
       : learned >= 0.8
         ? "strong track record — small grain of salt"
         : learned >= 0.6
@@ -328,7 +357,7 @@ function renderReputations(reputations) {
       `${reputation.deleted_unverified_count} deleted/unverified · ` +
       `${reputation.early_confirmation_count} reported early · ${salt}`;
     outcomes.title = reputation.latest_outcome_reason ||
-      "Reliability changes only after delayed independent evidence.";
+      "This measures corroborated factual reporting, not neutrality or framing.";
     card.append(title, score, outcomes);
     if (reputation.latest_outcome) {
       const audit = document.createElement("small");
@@ -401,6 +430,11 @@ async function refresh() {
 
 elements.categoryFilter.addEventListener("change", () => {
   selectedCategory = elements.categoryFilter.value;
+  refresh();
+});
+
+elements.mapPriorityFilter.addEventListener("change", () => {
+  mapPriority = elements.mapPriorityFilter.value;
   refresh();
 });
 

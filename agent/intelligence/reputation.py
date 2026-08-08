@@ -25,7 +25,8 @@ class ReputationEngine:
         maturity_hours=6,
         max_adjustment=0.15,
         confirmation_floor=0.75,
-        prior_strength=8.0
+        prior_strength=8.0,
+        min_evaluated_outcomes=12
     ):
         self.store = store
         self.enabled = bool(enabled)
@@ -33,6 +34,9 @@ class ReputationEngine:
         self.max_adjustment = max(0.0, min(0.3, float(max_adjustment)))
         self.confirmation_floor = max(0.5, min(1.0, float(confirmation_floor)))
         self.prior_strength = max(2.0, min(100.0, float(prior_strength)))
+        self.min_evaluated_outcomes = max(
+            3, min(100, int(min_evaluated_outcomes))
+        )
 
     def evaluate(self):
         if not self.enabled:
@@ -372,8 +376,21 @@ class ReputationEngine:
             deviation = math.sqrt(
                 max(0.0, alpha * beta / (total * total * (total + 1.0)))
             )
-            lower = round(max(0.0, target - 1.64 * deviation), 4)
-            upper = round(min(1.0, target + 1.64 * deviation), 4)
+            # Corroborated facts are not evidence of neutral framing or broad
+            # editorial reliability. Positive matches leave a publisher at its
+            # configured baseline until its outcome record is mature. Specific
+            # contradictions still lower its weight immediately.
+            maturity_locked = (
+                evaluated < self.min_evaluated_outcomes
+                and not (contradicted or deleted)
+            )
+            if maturity_locked:
+                target = baseline
+                lower = round(max(0.0, baseline - 0.25), 4)
+                upper = round(min(1.0, baseline + 0.25), 4)
+            else:
+                lower = round(max(0.0, target - 1.64 * deviation), 4)
+                upper = round(min(1.0, target + 1.64 * deviation), 4)
             counts_changed = any((
                 confirmed != row["confirmed_count"],
                 contradicted != row["contradicted_count"],
@@ -382,7 +399,9 @@ class ReputationEngine:
                 evaluated != row["evaluated_count"]
             ))
             previous = float(row["learned_credibility"])
-            if counts_changed:
+            if maturity_locked:
+                learned = round(baseline, 4)
+            elif counts_changed:
                 new_outcomes = max(1, evaluated - int(row["evaluated_count"]))
                 allowed_change = self.max_adjustment * math.sqrt(new_outcomes)
                 change = max(
@@ -426,7 +445,12 @@ class ReputationEngine:
                 (
                     row["publisher_key"], previous, learned, confirmed,
                     contradicted, deleted, early,
-                    "Independent delayed-outcome Bayesian recalibration", now
+                    (
+                        "Baseline retained pending sufficient independent "
+                        "outcomes"
+                        if maturity_locked else
+                        "Independent delayed-outcome Bayesian recalibration"
+                    ), now
                 )
             )
             self._reweight_evidence(connection, row["publisher_key"], learned)

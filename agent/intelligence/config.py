@@ -49,6 +49,7 @@ class IntelligenceConfig:
     reputation_maturity_hours: float = 6.0
     reputation_max_adjustment: float = 0.15
     reputation_prior_strength: float = 8.0
+    reputation_min_evaluated_outcomes: int = 12
     forecast_max_active: int = 12
     forecast_per_cycle: int = 2
     reliefweb_appname: str = ""
@@ -216,6 +217,10 @@ class IntelligenceConfig:
             reputation_prior_strength=_env_float(
                 "ENTITY_REPUTATION_PRIOR_STRENGTH", 8.0,
                 minimum=2.0, maximum=100.0
+            ),
+            reputation_min_evaluated_outcomes=_env_int(
+                "ENTITY_REPUTATION_MIN_EVALUATED_OUTCOMES", 12,
+                minimum=3, maximum=100
             ),
             forecast_max_active=_env_int(
                 "ENTITY_FORECAST_MAX_ACTIVE", 12, minimum=1

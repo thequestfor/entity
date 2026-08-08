@@ -239,7 +239,8 @@ class IntelligenceWorker:
             enabled=config.reputation_enabled,
             maturity_hours=config.reputation_maturity_hours,
             max_adjustment=config.reputation_max_adjustment,
-            prior_strength=config.reputation_prior_strength
+            prior_strength=config.reputation_prior_strength,
+            min_evaluated_outcomes=config.reputation_min_evaluated_outcomes
         )
         embedding_provider = OllamaEmbeddingProvider(
             enabled=config.cluster_embeddings_enabled,

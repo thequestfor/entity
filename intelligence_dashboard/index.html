@@ -42,7 +42,17 @@
             <p class="eyebrow">GEOGRAPHIC EVIDENCE</p>
             <h2>Located situations</h2>
           </div>
-          <span id="map-status">Loading located situations…</span>
+          <div class="map-controls">
+            <label>
+              Map view
+              <select id="map-priority-filter">
+                <option value="priority">Priority · top 30</option>
+                <option value="active">Active · top 75</option>
+                <option value="all">All located</option>
+              </select>
+            </label>
+            <span id="map-status">Loading located situations…</span>
+          </div>
         </div>
         <div class="world-map" id="world-map" aria-label="Located situations"></div>
       </section>

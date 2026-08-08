@@ -752,8 +752,7 @@ class ReputationEngineTests(unittest.TestCase):
 
         self.assertEqual(1, result.outcomes_recorded)
         self.assertEqual(1, reputation["confirmed_count"])
-        self.assertGreater(reputation["learned_credibility"], 0.3)
-        self.assertLessEqual(reputation["learned_credibility"], 0.45)
+        self.assertEqual(0.3, reputation["learned_credibility"])
 
     def test_deleted_unverified_post_lowers_trust_without_erasing_baseline(self):
         self.store.ingest_items("telegram", [SourceItem(
@@ -819,7 +818,7 @@ class ReputationEngineTests(unittest.TestCase):
         self.assertEqual(0.95, reputation["learned_credibility"])
 
     def test_repeated_confirmations_can_overcome_social_source_baseline(self):
-        for index in range(8):
+        for index in range(12):
             city = f"ExampleCity{index}"
             self.store.ingest_items("telegram", [SourceItem(
                 external_id=f"early-{index}",
@@ -848,8 +847,8 @@ class ReputationEngineTests(unittest.TestCase):
             for row in self.store.list_publisher_reputations()
         }["telegram:osint613"]
 
-        self.assertEqual(8, reputation["confirmed_count"])
-        self.assertEqual(8, reputation["early_confirmation_count"])
+        self.assertEqual(12, reputation["confirmed_count"])
+        self.assertEqual(12, reputation["early_confirmation_count"])
         self.assertGreater(reputation["learned_credibility"], 0.45)
         self.assertGreater(reputation["reliability_lower_bound"], 0.3)
 
