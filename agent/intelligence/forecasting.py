@@ -1,11 +1,16 @@
 """Continuous, scored forecasts made by the world-model thinking router."""
 
 import json
+import hashlib
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from agent.intelligence.store import utc_now
 from agent.models.base import ModelUnavailable
+from agent.intelligence.base_rates import BaseRateEngine, horizon_bucket
+from agent.intelligence.temporal_features import TemporalFeatureExtractor
+from agent.intelligence.prediction_ensemble import PredictionEnsemble
+from agent.intelligence.forecast_resolution import BlindedForecastResolver
 
 
 class ForecastEngine:
@@ -13,13 +18,20 @@ class ForecastEngine:
 
     method = "thinking-forecast-v1"
 
-    def __init__(self, store, router, max_active=12, per_cycle=2):
+    def __init__(self, store, router, max_active=12, per_cycle=2,
+                 mode="legacy"):
         self.store = store
         self.router = router
         self.max_active = max(1, int(max_active))
         self.per_cycle = max(1, int(per_cycle))
+        self.mode = mode if mode in {"legacy", "shadow", "active"} else "shadow"
+        self.base_rates = BaseRateEngine(store)
+        self.features = TemporalFeatureExtractor(store)
+        self.ensemble = PredictionEnsemble()
+        self.resolver = BlindedForecastResolver(router)
 
     def run_cycle(self):
+        self.base_rates.refresh()
         resolved = self.resolve_due()
         created = self.create_forecasts()
         return {"created": created, "resolved": resolved}
@@ -50,9 +62,20 @@ class ForecastEngine:
             if result is None:
                 self.store.note_forecast_unresolved(forecast["id"])
                 continue
+            self.store.record_forecast_resolution_attempt(
+                forecast["id"], result["outcome"],
+                result.get("confidence", 0), result.get("summary", ""),
+                result.get("evidence", []), result.get("snapshot_hash", ""),
+                result.get("resolver_method", "")
+            )
+            if result["outcome"] == "unclear":
+                self.store.note_forecast_unresolved(forecast["id"])
+                continue
             self.store.resolve_forecast(
                 forecast["id"], result["outcome"], result["summary"],
-                result["evidence"], utc_now()
+                result["evidence"], utc_now(),
+                confidence=result.get("confidence", 0),
+                resolver_method=result.get("resolver_method", "")
             )
             resolved += 1
         return resolved
@@ -85,7 +108,7 @@ class ForecastEngine:
             and max(item["source_credibility"] for item in evidence) < 0.95
         ):
             probability = min(probability, 0.69)
-        return {
+        forecast = {
             "id": str(uuid4()), "situation_id": situation["id"],
             "question": question[:500], "predicted_outcome": outcome[:1000],
             "probability": probability, "target_at": target_at,
@@ -94,6 +117,53 @@ class ForecastEngine:
             "evidence": evidence, "model": getattr(self.router, "last_provider_name", "") or self.router.provider_name(),
             "method": self.method, "created_at": utc_now()
         }
+        if self.mode == "legacy":
+            return forecast
+        hypotheses = [
+            item for item in detail.get("hypotheses", [])
+            if item.get("method") == "evidence-competition-v1"
+        ]
+        if not hypotheses:
+            return None
+        hypothesis = max(hypotheses, key=lambda item: float(item["probability"]))
+        bucket = horizon_bucket(forecast["created_at"], target_at)
+        base_rate, base_source = self.base_rates.estimate(
+            situation.get("category", "general"), "hypothesis-falsifier", bucket
+        )
+        model_probability = probability
+        ensemble_probability, components = self.ensemble.combine({
+            "base_rate": base_rate,
+            "hypothesis": float(hypothesis["probability"]),
+            "reasoning": model_probability
+        })
+        if int(calibration.get("resolved") or 0) < 20:
+            ensemble_probability = max(.15, min(.85, ensemble_probability))
+        feature_values, feature_hash = self.features.snapshot(situation["id"])
+        snapshot = {
+            "documents": [item["document_id"] for item in evidence],
+            "claims": [item["id"] for item in detail["claims"]],
+            "hypothesis": hypothesis["id"], "features": feature_hash
+        }
+        snapshot_hash = hashlib.sha256(
+            json.dumps(snapshot, sort_keys=True).encode()
+        ).hexdigest()
+        forecast.update({
+            "probability": ensemble_probability,
+            "hypothesis_id": hypothesis["id"],
+            "forecast_kind": "hypothesis-falsifier",
+            "category": situation.get("category", "general"),
+            "horizon_bucket": bucket,
+            "evidence_cutoff_at": forecast["created_at"],
+            "evidence_snapshot_hash": snapshot_hash,
+            "base_rate": base_rate, "base_rate_source": base_source,
+            "model_probability": model_probability,
+            "ensemble_probability": ensemble_probability,
+            "shadow": self.mode == "shadow", "components": components,
+            "claim_ids": [item["id"] for item in detail["claims"]],
+            "feature_values": feature_values,
+            "method": "hypothesis-forecast-v2"
+        })
+        return forecast
 
     def _resolve(self, forecast):
         detail = self.store.get_situation(forecast["situation_id"])
@@ -102,11 +172,13 @@ class ForecastEngine:
         evidence = self._evidence(detail["documents"], after=forecast["created_at"])
         if not evidence:
             return None
-        payload = self._generate_json(self._resolution_prompt(forecast, evidence), forecast["question"])
+        payload = self.resolver.resolve(forecast, evidence)
         outcome = str((payload or {}).get("outcome") or "").lower()
-        if outcome not in {"yes", "no"}:
-            return None
-        return {"outcome": outcome, "summary": str(payload.get("summary") or "")[:3000], "evidence": evidence}
+        if outcome not in {"yes", "no", "unclear"}:
+            outcome = "unclear"
+        return {"outcome": outcome, "summary": str(payload.get("summary") or "")[:3000], "evidence": evidence,
+                "confidence": payload.get("confidence",0), "resolver_method": self.resolver.method,
+                "snapshot_hash": payload.get("snapshot_hash","")}
 
     def _generate_json(self, prompt, user_input):
         try:

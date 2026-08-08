@@ -64,6 +64,7 @@ class IntelligenceConfig:
     reputation_min_evaluated_outcomes: int = 12
     forecast_max_active: int = 12
     forecast_per_cycle: int = 2
+    forecast_v2_mode: str = "shadow"
     reliefweb_appname: str = ""
     reliefweb_enabled: bool = True
     usgs_enabled: bool = True
@@ -280,6 +281,9 @@ class IntelligenceConfig:
             forecast_per_cycle=_env_int(
                 "ENTITY_FORECAST_PER_CYCLE", 2, minimum=1
             ),
+            forecast_v2_mode=os.getenv(
+                "ENTITY_FORECAST_V2_MODE", "shadow"
+            ).strip().lower() or "shadow",
             reliefweb_appname=os.getenv(
                 "ENTITY_RELIEFWEB_APPNAME",
                 ""

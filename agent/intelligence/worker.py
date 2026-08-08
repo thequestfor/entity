@@ -54,6 +54,7 @@ class IntelligenceWorker:
         forecasting=None,
         forecast_max_active=12,
         forecast_per_cycle=2,
+        forecast_v2_mode="legacy",
         analysis_poll_seconds=300,
         forecast_poll_seconds=900,
         source_backoff_max_seconds=21600,
@@ -77,7 +78,8 @@ class IntelligenceWorker:
         self.last_reputation_result = ReputationResult()
         self.forecasting = forecasting or ForecastEngine(
             store, router=self.understanding.router,
-            max_active=forecast_max_active, per_cycle=forecast_per_cycle
+            max_active=forecast_max_active, per_cycle=forecast_per_cycle,
+            mode=forecast_v2_mode
         )
         self.last_forecast_result = {"created": 0, "resolved": 0}
         self.analysis_poll_seconds = max(30, int(analysis_poll_seconds))
@@ -306,6 +308,7 @@ class IntelligenceWorker:
             hypothesis_competition=hypothesis_competition,
             forecast_max_active=config.forecast_max_active,
             forecast_per_cycle=config.forecast_per_cycle,
+            forecast_v2_mode=config.forecast_v2_mode,
             analysis_poll_seconds=config.analysis_poll_seconds,
             forecast_poll_seconds=config.forecast_poll_seconds,
             source_backoff_max_seconds=config.source_backoff_max_seconds,

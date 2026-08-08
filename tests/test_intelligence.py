@@ -94,7 +94,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(13, version)
+            self.assertEqual(14, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -858,6 +858,57 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual("resolved", resolved["status"])
         self.assertEqual(1, resolved["actual_outcome"])
         self.assertAlmostEqual((0.69 - 1) ** 2, resolved["brier_score"])
+
+    def test_forecast_v2_freezes_hypothesis_evidence_and_stores_components(self):
+        class ForecastRouter:
+            last_provider_name = "local_thinking"
+
+            def generate_json(self, prompt, **kwargs):
+                return {
+                    "question": "Will an independent authority confirm the disruption?",
+                    "predicted_outcome": "Independent confirmation will appear.",
+                    "probability": 0.64,
+                    "target_at": (datetime.now(UTC)+timedelta(hours=12)).isoformat(),
+                    "resolution_criteria": "A later primary source confirms it.",
+                    "rationale": "A provisional report exists."
+                }
+
+            def provider_name(self):
+                return "local_thinking"
+
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="forecast-v2", title="Port Alpha disruption",
+            summary="A provisional disruption report.",
+            url="https://a.test/forecast-v2", category="traditional-news"
+        )])
+        self.engine.analyze_pending()
+        HypothesisCompetitionEngine(self.store, batch_size=10).run_batch()
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE situations SET worldview='Provisional disruption.'"
+            )
+        forecaster = ForecastEngine(
+            self.store, ForecastRouter(), max_active=2, mode="shadow"
+        )
+
+        self.assertEqual(1, forecaster.create_forecasts())
+        forecast = self.store.list_forecasts()[0]
+        with self.store._connect() as connection:
+            components = connection.execute(
+                "SELECT * FROM forecast_component_predictions WHERE forecast_id=?",
+                (forecast["id"],)
+            ).fetchall()
+            frozen = connection.execute(
+                "SELECT COUNT(*) FROM forecast_evidence WHERE forecast_id=?",
+                (forecast["id"],)
+            ).fetchone()[0]
+
+        self.assertEqual("hypothesis-forecast-v2", forecast["method"])
+        self.assertTrue(forecast["hypothesis_id"])
+        self.assertTrue(forecast["evidence_snapshot_hash"])
+        self.assertTrue(forecast["shadow"])
+        self.assertEqual(3, len(components))
+        self.assertGreater(frozen, 0)
 
     def test_distinct_nws_offices_are_not_merged_into_one_situation(self):
         self.store.ingest_items("source-a", [SourceItem(

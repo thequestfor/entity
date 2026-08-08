@@ -911,8 +911,10 @@ class IntelligenceStore:
                 INSERT INTO forecasts (
                     id, situation_id, question, predicted_outcome, probability,
                     target_at, resolution_criteria, rationale, evidence, model,
-                    method, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)
+                    method, status, created_at,hypothesis_id,forecast_kind,
+                    category,horizon_bucket,evidence_cutoff_at,evidence_snapshot_hash,
+                    base_rate,base_rate_source,model_probability,ensemble_probability,shadow
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     forecast["id"], forecast["situation_id"], forecast["question"],
@@ -920,9 +922,32 @@ class IntelligenceStore:
                     forecast["target_at"], forecast["resolution_criteria"],
                     forecast.get("rationale", ""), self._json(forecast.get("evidence", [])),
                     forecast.get("model", ""), forecast.get("method", "thinking-forecast-v1"),
-                    forecast["created_at"]
+                    forecast["created_at"],forecast.get("hypothesis_id"),
+                    forecast.get("forecast_kind","freeform"),
+                    forecast.get("category","general"),
+                    forecast.get("horizon_bucket","unknown"),
+                    forecast.get("evidence_cutoff_at"),
+                    forecast.get("evidence_snapshot_hash",""),
+                    forecast.get("base_rate"),forecast.get("base_rate_source",""),
+                    forecast.get("model_probability"),
+                    forecast.get("ensemble_probability"),int(bool(forecast.get("shadow")))
                 )
             )
+            now=forecast["created_at"]
+            for component in forecast.get("components",[]):
+                connection.execute(
+                    "INSERT OR IGNORE INTO forecast_component_predictions VALUES (?,?,?,?,?,?)",
+                    (forecast["id"],component["component"],component["probability"],
+                     component["weight"],"fixed-log-odds-v1",now)
+                )
+            for claim_id in forecast.get("claim_ids",[]):
+                connection.execute(
+                    "INSERT OR IGNORE INTO forecast_evidence "
+                    "(forecast_id,claim_id,document_version_id,role,observed_at,snapshot_hash) "
+                    "VALUES (?,?,NULL,'snapshot',?,?)",
+                    (forecast["id"],claim_id,now,
+                     forecast.get("evidence_snapshot_hash",""))
+                )
 
     def list_forecasts(self, limit=50, status=None):
         query = "SELECT forecasts.*, situations.title AS situation_title, situations.category AS situation_category FROM forecasts JOIN situations ON situations.id = forecasts.situation_id"
@@ -949,7 +974,8 @@ class IntelligenceStore:
             rows = connection.execute("SELECT DISTINCT situation_id FROM forecasts WHERE status = 'active'").fetchall()
         return {row["situation_id"] for row in rows}
 
-    def resolve_forecast(self, forecast_id, outcome, summary, evidence, now):
+    def resolve_forecast(self, forecast_id, outcome, summary, evidence, now,
+                         confidence=0.0, resolver_method=""):
         actual = 1 if outcome == "yes" else 0
         with self._connect() as connection:
             row = connection.execute("SELECT probability FROM forecasts WHERE id = ? AND status = 'active'", (forecast_id,)).fetchone()
@@ -957,8 +983,9 @@ class IntelligenceStore:
                 return False
             score = (float(row["probability"]) - actual) ** 2
             connection.execute(
-                "UPDATE forecasts SET status = 'resolved', resolved_at = ?, actual_outcome = ?, resolution_summary = ?, resolution_evidence = ?, brier_score = ?, resolution_attempts = resolution_attempts + 1 WHERE id = ?",
-                (now, actual, str(summary)[:3000], self._json(evidence), score, forecast_id)
+                "UPDATE forecasts SET status = 'resolved', resolved_at = ?, actual_outcome = ?, resolution_summary = ?, resolution_evidence = ?, brier_score = ?, resolution_attempts = resolution_attempts + 1,resolution_confidence=?,resolver_method=?,resolver_version='v1' WHERE id = ?",
+                (now, actual, str(summary)[:3000], self._json(evidence), score,
+                 float(confidence or 0),str(resolver_method),forecast_id)
             )
         return True
 
@@ -966,11 +993,42 @@ class IntelligenceStore:
         with self._connect() as connection:
             connection.execute("UPDATE forecasts SET resolution_attempts = resolution_attempts + 1 WHERE id = ? AND status = 'active'", (forecast_id,))
 
+    def record_forecast_resolution_attempt(self, forecast_id, outcome,
+                                           confidence, summary, evidence,
+                                           snapshot_hash, method):
+        document_ids = [item.get("document_id") for item in evidence if item.get("document_id")]
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO forecast_resolution_attempts (
+                  forecast_id,outcome,confidence,summary,evidence_document_ids,
+                  input_snapshot_hash,method,created_at
+                ) VALUES (?,?,?,?,?,?,?,?)
+                """,
+                (forecast_id,outcome,float(confidence or 0),str(summary)[:3000],
+                 self._json(document_ids),str(snapshot_hash),str(method),utc_now())
+            )
+
     def forecast_calibration(self):
         with self._connect() as connection:
             row = connection.execute("SELECT COUNT(*) AS resolved, AVG(brier_score) AS brier, AVG(actual_outcome) AS base_rate FROM forecasts WHERE status = 'resolved'").fetchone()
             active = connection.execute("SELECT COUNT(*) FROM forecasts WHERE status = 'active'").fetchone()[0]
-        return {"active": active, "resolved": row["resolved"], "brier_score": row["brier"], "base_rate": row["base_rate"]}
+            unclear = connection.execute(
+                "SELECT COUNT(*) FROM forecast_resolution_attempts WHERE outcome='unclear'"
+            ).fetchone()[0]
+            log_loss = connection.execute(
+                """
+                SELECT AVG(-(actual_outcome*log(MAX(0.000001,probability))+
+                  (1-actual_outcome)*log(MAX(0.000001,1-probability))))
+                FROM forecasts WHERE actual_outcome IS NOT NULL
+                """
+            ).fetchone()[0]
+        decided=int(row["resolved"] or 0)
+        coverage=decided/max(1,decided+int(unclear or 0))
+        return {"active": active, "resolved": decided,
+                "brier_score": row["brier"], "base_rate": row["base_rate"],
+                "log_loss": log_loss, "resolution_coverage": coverage,
+                "unclear_attempts": unclear}
 
     def latest_briefing(self):
         with self._connect() as connection:
