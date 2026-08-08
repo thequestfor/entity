@@ -213,7 +213,7 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             "Content-Security-Policy",
             "default-src 'self'; connect-src 'self' https://raw.githubusercontent.com; "
             "style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' https://unpkg.com; "
-            "img-src 'self' data: https://tile.openstreetmap.org https://unpkg.com"
+            "img-src 'self' data: https://*.basemaps.cartocdn.com https://unpkg.com"
         )
         super().end_headers()
 

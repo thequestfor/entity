@@ -217,9 +217,10 @@ function initializeMap() {
     center: [20, 0], zoom: 2, minZoom: 2, maxZoom: 11,
     worldCopyJump: true, zoomControl: true, preferCanvas: true
   });
-  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-    maxZoom: 19,
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
+  L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+    maxZoom: 20,
+    subdomains: "abcd",
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
   }).addTo(intelligenceMap);
   countryMapLayer = L.layerGroup().addTo(intelligenceMap);
   situationMapLayer = L.layerGroup().addTo(intelligenceMap);

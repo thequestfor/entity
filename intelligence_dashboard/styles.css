@@ -118,7 +118,7 @@ main { padding-block: 30px 60px; }
   overflow: hidden;
   background: #08171b;
 }
-.world-map .leaflet-tile-pane { filter: brightness(.58) saturate(.68) hue-rotate(125deg); }
+.world-map .leaflet-tile-pane { filter: brightness(.82) saturate(.75); }
 .world-map .leaflet-control-zoom a { border-color: #244745; background: #0b1b1f; color: #c9f5ef; }
 .world-map .leaflet-control-attribution { background: rgba(4,14,17,.78); color: #77928f; }
 .world-map .leaflet-control-attribution a { color: #8ed4cc; }
