@@ -49,6 +49,11 @@ class IntelligenceConfig:
     max_hypotheses_per_situation: int = 5
     model_hypothesis_generation_enabled: bool = False
     intelligence_evaluations_enabled: bool = True
+    reasoning_hourly_model_calls: int = 24
+    reasoning_daily_model_calls: int = 200
+    reasoning_job_lease_seconds: int = 120
+    active_acquisition_enabled: bool = False
+    active_acquisition_per_cycle: int = 5
     cluster_auto_link_threshold: float = 0.82
     cluster_review_threshold: float = 0.65
     cluster_lookback_days: int = 14
@@ -223,6 +228,21 @@ class IntelligenceConfig:
             ),
             intelligence_evaluations_enabled=_env_bool(
                 "ENTITY_INTELLIGENCE_EVALUATIONS_ENABLED", True
+            ),
+            reasoning_hourly_model_calls=_env_int(
+                "ENTITY_REASONING_HOURLY_MODEL_CALLS",24,minimum=1,maximum=1000
+            ),
+            reasoning_daily_model_calls=_env_int(
+                "ENTITY_REASONING_DAILY_MODEL_CALLS",200,minimum=1,maximum=10000
+            ),
+            reasoning_job_lease_seconds=_env_int(
+                "ENTITY_REASONING_JOB_LEASE_SECONDS",120,minimum=30,maximum=900
+            ),
+            active_acquisition_enabled=_env_bool(
+                "ENTITY_ACTIVE_ACQUISITION_ENABLED",False
+            ),
+            active_acquisition_per_cycle=_env_int(
+                "ENTITY_ACTIVE_ACQUISITION_PER_CYCLE",5,minimum=1,maximum=20
             ),
             cluster_auto_link_threshold=_env_float(
                 "ENTITY_CLUSTER_AUTO_LINK_THRESHOLD", 0.82,

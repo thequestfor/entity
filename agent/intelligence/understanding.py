@@ -409,6 +409,9 @@ class UnderstandingEngine:
             }
             for claim in detail["claims"]
         ]
+        hypothesis_gate = self.store.feature_gate_status(
+            "hypothesis_competition", default="shadow"
+        )
         hypotheses = [
             {
                 "id": hypothesis["id"], "title": hypothesis["title"],
@@ -418,6 +421,8 @@ class UnderstandingEngine:
                 "falsifiers": hypothesis["falsifiers"]
             }
             for hypothesis in detail.get("hypotheses", [])
+            if hypothesis.get("method") != "evidence-competition-v1"
+            or hypothesis_gate == "active"
         ]
         return {
             "situation": {
@@ -458,6 +463,7 @@ class UnderstandingEngine:
                                           THEN claims.id END)
                            AS contested_count,
                        COUNT(DISTINCT CASE WHEN forecasts.status = 'active'
+                                           AND forecasts.shadow = 0
                                           THEN forecasts.id END)
                            AS active_forecast_count
                 FROM situations
@@ -522,6 +528,7 @@ class UnderstandingEngine:
                           SELECT 1 FROM forecasts
                           WHERE forecasts.situation_id = situations.id
                             AND forecasts.status = 'active'
+                            AND forecasts.shadow = 0
                       )
                     """,
                     (category, cutoff)
@@ -552,6 +559,7 @@ class UnderstandingEngine:
                           SELECT 1 FROM forecasts
                           WHERE forecasts.situation_id = situations.id
                             AND forecasts.status = 'active'
+                            AND forecasts.shadow = 0
                       )
                       AND (
                           SELECT COUNT(DISTINCT COALESCE(

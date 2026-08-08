@@ -70,3 +70,11 @@ CREATE TABLE intelligence_gaps (
 
 CREATE INDEX idx_intelligence_gaps_status_priority
 ON intelligence_gaps(status, priority DESC, updated_at);
+
+UPDATE situation_hypotheses SET
+    hypothesis_key=COALESCE(hypothesis_key,''),
+    hypothesis_type=COALESCE(hypothesis_type,'alternative'),
+    prior_probability=COALESCE(prior_probability,0.2),
+    assumptions=COALESCE(assumptions,'[]'),
+    open_questions=COALESCE(open_questions,'[]'),
+    generator_version=COALESCE(generator_version,'');

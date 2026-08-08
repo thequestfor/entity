@@ -32,6 +32,9 @@ from agent.intelligence.embeddings import OllamaEmbeddingProvider
 from agent.intelligence.belief_revision import BeliefRevisionEngine
 from agent.intelligence.hypotheses import HypothesisCompetitionEngine
 from agent.intelligence.evaluation import IntelligenceEvaluationEngine
+from agent.intelligence.reasoning_budget import ReasoningBudget, BudgetedModelRouter
+from agent.intelligence.reasoning_jobs import ReasoningJobQueue
+from agent.intelligence.acquisition import ActiveAcquisitionEngine
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class IntelligenceWorker:
         belief_revision=None,
         hypothesis_competition=None,
         evaluation=None,
+        acquisition=None,
         forecasting=None,
         forecast_max_active=12,
         forecast_per_cycle=2,
@@ -78,6 +82,7 @@ class IntelligenceWorker:
             hypothesis_competition or HypothesisCompetitionEngine(store)
         )
         self.evaluation = evaluation
+        self.acquisition = acquisition
         self.last_reputation_result = ReputationResult()
         self.forecasting = forecasting or ForecastEngine(
             store, router=self.understanding.router,
@@ -286,6 +291,13 @@ class IntelligenceWorker:
                 config.epistemic_backfill_batch_size
             )
         )
+        budget = ReasoningBudget(
+            store, hourly_calls=config.reasoning_hourly_model_calls,
+            daily_calls=config.reasoning_daily_model_calls
+        )
+        bounded_router = BudgetedModelRouter(understanding.router, budget)
+        understanding.router = bounded_router
+        understanding.claim_extractor.router = bounded_router
         belief_revision = BeliefRevisionEngine(
             store,
             enabled=(
@@ -305,6 +317,13 @@ class IntelligenceWorker:
             IntelligenceEvaluationEngine(store)
             if config.intelligence_evaluations_enabled else None
         )
+        queue = ReasoningJobQueue(
+            store, lease_seconds=config.reasoning_job_lease_seconds
+        )
+        acquisition = ActiveAcquisitionEngine(
+            store, enabled=config.active_acquisition_enabled,
+            max_per_cycle=config.active_acquisition_per_cycle, queue=queue
+        )
         return cls(
             store=store,
             connectors=connectors,
@@ -314,6 +333,7 @@ class IntelligenceWorker:
             belief_revision=belief_revision,
             hypothesis_competition=hypothesis_competition,
             evaluation=evaluation,
+            acquisition=acquisition,
             forecast_max_active=config.forecast_max_active,
             forecast_per_cycle=config.forecast_per_cycle,
             forecast_v2_mode=config.forecast_v2_mode,
@@ -383,6 +403,12 @@ class IntelligenceWorker:
             self.hypothesis_competition.run_batch()
         except Exception as exc:
             print("Intelligence hypothesis competition cycle failed:", exc)
+        if self.acquisition is not None:
+            try:
+                self.acquisition.enqueue_gaps()
+                self.acquisition.dispatch_one()
+            except Exception as exc:
+                print("Intelligence acquisition cycle failed:", exc)
         if not analysis_due:
             try:
                 backfill = getattr(

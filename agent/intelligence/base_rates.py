@@ -39,6 +39,6 @@ class BaseRateEngine:
                 success=int(row["yes"] or 0); failure=int(row["n"])-success
                 alpha=success+self.prior_successes; beta=failure+self.prior_failures
                 rate=alpha/(alpha+beta); deviation=math.sqrt(alpha*beta/((alpha+beta)**2*(alpha+beta+1)))
-                c.execute("INSERT INTO base_rate_models VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(category,forecast_kind,horizon_bucket) DO UPDATE SET successes=excluded.successes,failures=excluded.failures,rate=excluded.rate,lower_bound=excluded.lower_bound,upper_bound=excluded.upper_bound,method=excluded.method,updated_at=excluded.updated_at",
+                c.execute("INSERT INTO base_rate_models VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(category,forecast_kind,horizon_bucket) DO UPDATE SET successes=excluded.successes,failures=excluded.failures,rate=excluded.rate,lower_bound=excluded.lower_bound,upper_bound=excluded.upper_bound,method=excluded.method,updated_at=excluded.updated_at",
                           (row["category"],row["forecast_kind"],row["horizon_bucket"],success,failure,rate,max(0,rate-1.64*deviation),min(1,rate+1.64*deviation),self.method,now)); updated+=1
         return updated

@@ -24,6 +24,11 @@ const elements = {
   typedClaimCount: document.querySelector("#typed-claim-count"),
   integrityReviewCount: document.querySelector("#integrity-review-count"),
   epistemicBackfillStatus: document.querySelector("#epistemic-backfill-status"),
+  corroboratedClaimCount: document.querySelector("#corroborated-claim-count"),
+  truthDisputeCount: document.querySelector("#truth-dispute-count"),
+  verificationTaskCount: document.querySelector("#verification-task-count"),
+  intelligenceGapCount: document.querySelector("#intelligence-gap-count"),
+  reasoningJobCount: document.querySelector("#reasoning-job-count"),
   documentTemplate: document.querySelector("#document-template"),
   situationTemplate: document.querySelector("#situation-template")
 };
@@ -78,6 +83,11 @@ function renderOverview(overview) {
   elements.dependentReportCount.textContent = overview.dependent_reports ?? 0;
   elements.typedClaimCount.textContent = overview.epistemically_typed_claims ?? 0;
   elements.integrityReviewCount.textContent = overview.integrity_reviews ?? 0;
+  elements.corroboratedClaimCount.textContent = overview.corroborated_claims ?? 0;
+  elements.truthDisputeCount.textContent = overview.disputed_truth_claims ?? 0;
+  elements.verificationTaskCount.textContent = overview.verification_tasks ?? 0;
+  elements.intelligenceGapCount.textContent = overview.intelligence_gaps ?? 0;
+  elements.reasoningJobCount.textContent = overview.pending_reasoning_jobs ?? 0;
   const processed = overview.epistemic_backfill_processed ?? 0;
   elements.epistemicBackfillStatus.textContent = overview.epistemic_backfill_complete
     ? `Historical epistemic backfill complete · ${processed} records reviewed`
@@ -244,7 +254,8 @@ function renderSituationDetail(detail) {
       ...new Set((claim.evidence ?? []).map((item) => item.source_name))
     ];
     confidence.textContent =
-      `${claim.status} · ${Math.round(claim.confidence * 100)}% · ` +
+      `${claim.status} / ${claim.truth_status || "unverified"} · ` +
+      `${Math.round(Number(claim.resolution_confidence || claim.confidence) * 100)}% · ` +
       `${sourceNames.join(", ") || `${claim.source_count} source(s)`}`;
     row.append(assertion, confidence);
     const evidenceLinks = document.createElement("span");

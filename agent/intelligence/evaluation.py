@@ -90,6 +90,14 @@ class IntelligenceEvaluationEngine:
         calibration=self.store.forecast_calibration()
         resolved=int(calibration.get("resolved") or 0)
         brier=calibration.get("brier_score")
+        mature_cell=c.execute(
+            "SELECT COALESCE(MAX(evaluated_count),0) FROM publisher_reliability_cells"
+        ).fetchone()[0]
+        reliability_ready=(not critical and int(mature_cell or 0)>=12)
+        c.execute("UPDATE intelligence_feature_gates SET status=?,reason=?,evaluation_run_id=?,sample_count=?,updated_at=? WHERE feature='topic_reliability'",
+                  ("active" if reliability_ready else "shadow",
+                   "Scoped outcome and symmetry gates passed" if reliability_ready else "Awaiting 12 resolved outcomes in a topic/type cell",
+                   run_id,int(mature_cell or 0),now))
         hypothesis_status="active" if not critical else "blocked"
         c.execute("UPDATE intelligence_feature_gates SET status=?,reason=?,evaluation_run_id=?,sample_count=?,updated_at=? WHERE feature='hypothesis_competition'",
                   (hypothesis_status,"Blinded deterministic suite passed" if not critical else "Critical evaluation failure",run_id,resolved,now))

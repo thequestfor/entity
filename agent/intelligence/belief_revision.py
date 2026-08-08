@@ -6,7 +6,7 @@ import math
 from dataclasses import dataclass
 
 from agent.intelligence.store import utc_now
-from agent.intelligence.topic_taxonomy import normalize_topic
+from agent.intelligence.topic_taxonomy import normalize_topic, TOPIC_ALIASES
 from agent.intelligence.verification import VerificationPlanner
 
 
@@ -81,7 +81,8 @@ class BeliefRevisionEngine:
                     resolved += self._resolve_claim(connection, claim, now)
             tasks = self.verification.plan(connection, touched_claims)
             cells = self._recalculate_reliability(connection, now)
-            self._refresh_content_profiles(connection, now)
+            if int(state["processed"] or 0) % 500 == 0:
+                self._refresh_content_profiles(connection, now)
             connection.execute(
                 """
                 UPDATE epistemic_backfill_state SET cursor_rowid=?,
@@ -351,6 +352,28 @@ class BeliefRevisionEngine:
             )
             if previous is None or abs(float(previous[0])-learned) >= .0001:
                 updated += 1
+            gate = connection.execute(
+                "SELECT status FROM intelligence_feature_gates "
+                "WHERE feature='topic_reliability'"
+            ).fetchone()
+            if gate and gate["status"] == "active":
+                topic_values = [row["topic"]] + [
+                    raw for raw, normalized in TOPIC_ALIASES.items()
+                    if normalized == row["topic"]
+                ]
+                connection.execute(
+                    """
+                    UPDATE claim_evidence SET source_weight=?
+                    WHERE document_version_id IN (
+                      SELECT versions.id FROM document_versions versions
+                      JOIN documents ON documents.id=versions.document_id
+                      WHERE documents.publisher_key=?
+                    ) AND claim_id IN (SELECT id FROM claims WHERE topic IN (%s)
+                      AND claim_type=?)
+                    """ % ",".join("?" for _ in topic_values),
+                    (round(learned,4),row["publisher_key"],*topic_values,
+                     row["claim_type"])
+                )
         return updated
 
     def _refresh_content_profiles(self, connection, now):

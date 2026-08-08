@@ -36,6 +36,10 @@ from agent.intelligence.epistemic_backfill import EpistemicBackfill, dry_run as 
 from agent.intelligence.belief_revision import BeliefRevisionEngine
 from agent.intelligence.hypotheses import HypothesisCompetitionEngine
 from agent.intelligence.evaluation import IntelligenceEvaluationEngine, anonymize_evidence
+from agent.intelligence.reasoning_jobs import ReasoningJobQueue
+from agent.intelligence.reasoning_budget import ReasoningBudget, BudgetedModelRouter
+from agent.intelligence.acquisition import ActiveAcquisitionEngine
+from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
 from agent.intelligence.service import IntelligenceService
@@ -95,7 +99,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(15, version)
+            self.assertEqual(16, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -435,6 +439,47 @@ class UnderstandingEngineTests(unittest.TestCase):
             gate["status"] for gate in report["gates"]
             if gate["feature"] == "forecast_v2"
         ))
+
+    def test_reasoning_jobs_are_idempotent_leased_and_budget_bounded(self):
+        queue=ReasoningJobQueue(self.store,lease_seconds=30)
+        self.assertTrue(queue.enqueue("hypothesis","situation","one","same-job"))
+        self.assertFalse(queue.enqueue("hypothesis","situation","one","same-job"))
+        job=queue.lease(["hypothesis"])
+        self.assertEqual("leased",job["status"])
+        queue.complete(job["id"],{"safe":True})
+        self.assertEqual(1,queue.overview()["counts"]["completed"])
+
+        class Router:
+            def generate_json(self,*args,**kwargs): return {"ok":True}
+        bounded=BudgetedModelRouter(
+            Router(),ReasoningBudget(self.store,hourly_calls=2,daily_calls=2)
+        )
+        self.assertTrue(bounded.generate_json("one")["ok"])
+        self.assertTrue(bounded.generate_json("two")["ok"])
+        with self.assertRaises(ModelUnavailable):
+            bounded.generate_json("three")
+
+    def test_active_acquisition_only_schedules_allowlisted_configured_source(self):
+        self.store.register_source(
+            "usgs_earthquakes","USGS","earthquake",enabled=True
+        )
+        self.store.ingest_items("source-a",[SourceItem(
+            external_id="gap-quake",title="Possible earthquake at Test City",
+            url="https://a.test/gap-quake",category="earthquake"
+        )])
+        self.engine.analyze_pending()
+        BeliefRevisionEngine(self.store,batch_size=100).run_batch()
+        HypothesisCompetitionEngine(self.store,batch_size=10).run_batch()
+        acquisition=ActiveAcquisitionEngine(self.store,enabled=True)
+
+        self.assertGreater(acquisition.enqueue_gaps(),0)
+        self.assertEqual("usgs_earthquakes",acquisition.dispatch_one())
+        with self.store._connect() as connection:
+            status=connection.execute(
+                "SELECT status FROM intelligence_gaps "
+                "WHERE desired_source_kind='usgs' LIMIT 1"
+            ).fetchone()[0]
+        self.assertEqual("requested",status)
 
     def test_private_mail_never_enters_public_world_model(self):
         self.store.register_source(
@@ -881,6 +926,8 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual("resolved", resolved["status"])
         self.assertEqual(1, resolved["actual_outcome"])
         self.assertAlmostEqual((0.69 - 1) ** 2, resolved["brier_score"])
+        from agent.intelligence.base_rates import BaseRateEngine
+        self.assertEqual(1, BaseRateEngine(self.store).refresh())
 
     def test_forecast_v2_freezes_hypothesis_evidence_and_stores_components(self):
         class ForecastRouter:
@@ -930,6 +977,7 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertTrue(forecast["hypothesis_id"])
         self.assertTrue(forecast["evidence_snapshot_hash"])
         self.assertTrue(forecast["shadow"])
+        self.assertNotIn(forecast["situation_id"], self.store.active_forecast_situation_ids())
         self.assertEqual(3, len(components))
         self.assertGreater(frozen, 0)
 

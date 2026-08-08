@@ -142,3 +142,9 @@ CREATE TABLE publisher_content_profiles (
     updated_at TEXT NOT NULL,
     FOREIGN KEY(publisher_key) REFERENCES publisher_reputation(publisher_key)
 );
+
+UPDATE claims SET
+    truth_status=COALESCE(truth_status,'unverified'),
+    resolution_confidence=COALESCE(resolution_confidence,0.0),
+    core_importance=COALESCE(core_importance,0.5),
+    resolver_version=COALESCE(resolver_version,'');

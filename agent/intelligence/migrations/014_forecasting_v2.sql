@@ -114,3 +114,15 @@ CREATE TABLE forecast_calibration_buckets (
     updated_at TEXT NOT NULL,
     PRIMARY KEY(category, horizon_bucket, probability_bucket)
 );
+
+UPDATE forecasts SET
+    forecast_kind=COALESCE(forecast_kind,'freeform'),
+    category=COALESCE(category,'general'),
+    horizon_bucket=COALESCE(horizon_bucket,'unknown'),
+    evidence_snapshot_hash=COALESCE(evidence_snapshot_hash,''),
+    base_rate_source=COALESCE(base_rate_source,''),
+    resolution_confidence=COALESCE(resolution_confidence,0.0),
+    resolver_method=COALESCE(resolver_method,''),
+    resolver_version=COALESCE(resolver_version,''),
+    terminal_reason=COALESCE(terminal_reason,''),
+    shadow=COALESCE(shadow,0);

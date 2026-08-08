@@ -509,7 +509,9 @@ class IntelligenceStore:
                     (SELECT COUNT(*) FROM intelligence_gaps
                      WHERE status = 'open') AS intelligence_gaps,
                     (SELECT COUNT(*) FROM intelligence_feature_gates
-                     WHERE status = 'blocked') AS blocked_feature_gates
+                     WHERE status = 'blocked') AS blocked_feature_gates,
+                    (SELECT COUNT(*) FROM intelligence_reasoning_jobs
+                     WHERE status = 'pending') AS pending_reasoning_jobs
                 """
             ).fetchone()
             categories = connection.execute(
@@ -918,6 +920,31 @@ class IntelligenceStore:
         return {"runs":[{**dict(row),"metrics":self._json_load(row["metrics"],{})} for row in runs],
                 "gates":[dict(row) for row in gates]}
 
+    def feature_gate_status(self, feature, default="shadow"):
+        with self._connect() as connection:
+            row=connection.execute(
+                "SELECT status FROM intelligence_feature_gates WHERE feature=?",
+                (feature,)
+            ).fetchone()
+        return row["status"] if row else default
+
+    def reasoning_overview(self, limit=50):
+        with self._connect() as connection:
+            counts=connection.execute(
+                "SELECT status,COUNT(*) count FROM intelligence_reasoning_jobs GROUP BY status"
+            ).fetchall()
+            jobs=connection.execute(
+                "SELECT * FROM intelligence_reasoning_jobs ORDER BY "
+                "status='pending' DESC,priority DESC,created_at LIMIT ?",
+                (max(1,min(200,int(limit))),)
+            ).fetchall()
+            budget=connection.execute(
+                "SELECT * FROM intelligence_budget_usage ORDER BY bucket_start DESC LIMIT 10"
+            ).fetchall()
+        return {"counts":{row["status"]:row["count"] for row in counts},
+                "jobs":[dict(row) for row in jobs],
+                "budget":[dict(row) for row in budget]}
+
     def add_forecast(self, forecast):
         with self._connect() as connection:
             connection.execute(
@@ -985,7 +1012,7 @@ class IntelligenceStore:
 
     def active_forecast_situation_ids(self):
         with self._connect() as connection:
-            rows = connection.execute("SELECT DISTINCT situation_id FROM forecasts WHERE status = 'active'").fetchall()
+            rows = connection.execute("SELECT DISTINCT situation_id FROM forecasts WHERE status = 'active' AND shadow=0").fetchall()
         return {row["situation_id"] for row in rows}
 
     def resolve_forecast(self, forecast_id, outcome, summary, evidence, now,
