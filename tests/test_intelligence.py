@@ -33,6 +33,7 @@ from agent.connectors.x import XConnector
 from agent.intelligence.config import IntelligenceConfig
 from agent.intelligence.claim_extraction import HybridClaimExtractor
 from agent.intelligence.epistemic_backfill import EpistemicBackfill, dry_run as epistemic_dry_run
+from agent.intelligence.belief_revision import BeliefRevisionEngine
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
 from agent.intelligence.service import IntelligenceService
@@ -92,7 +93,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(11, version)
+            self.assertEqual(12, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -346,6 +347,49 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual(1, result.updated)
         self.assertEqual("Minister Rao", claim["attributed_to"])
         self.assertIn("bridge was destroyed", evidence["excerpt"])
+
+    def test_belief_revision_requires_independent_families_and_scopes_reliability(self):
+        from agent.intelligence.clustering import ClusterDecision, EventClusterer
+
+        class LinkClusterer(EventClusterer):
+            def decide(self, connection, document):
+                existing = connection.execute(
+                    "SELECT id FROM situations ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                if existing:
+                    return ClusterDecision(
+                        action="link", target_situation_id=existing["id"],
+                        score=0.95, components={"fixture": 1.0}
+                    )
+                return ClusterDecision(action="separate")
+
+        now = datetime.now(UTC).isoformat()
+        for source, url, summary in (
+            ("source-a", "https://a.test/status", "Port Alpha remains open."),
+            ("source-b", "https://b.test/status", "Officials report normal operations continue at Port Alpha."),
+        ):
+            self.store.ingest_items(source, [SourceItem(
+                external_id=f"shared-{source}", title="Port Alpha status",
+                summary=summary, url=url,
+                category="traditional-news", published_at=now,
+                metadata={"status": "open"}
+            )])
+        UnderstandingEngine(self.store, clusterer=LinkClusterer()).analyze_pending()
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE documents SET reporting_family_key=publisher_key"
+            )
+        result = BeliefRevisionEngine(self.store, batch_size=100).run_batch()
+        situation = self.store.get_situation(self.store.list_situations()[0]["id"])
+        status_claim = next(
+            claim for claim in situation["claims"]
+            if claim["predicate"] == "event.status"
+        )
+
+        self.assertGreater(result.claims_resolved, 0)
+        self.assertEqual("corroborated", status_claim["truth_status"])
+        self.assertEqual(2, status_claim["source_count"])
+        self.assertTrue(self.store.list_reliability_cells())
 
     def test_private_mail_never_enters_public_world_model(self):
         self.store.register_source(

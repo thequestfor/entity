@@ -41,6 +41,9 @@ class IntelligenceConfig:
     claim_extraction_max_claims: int = 20
     epistemic_backfill_enabled: bool = True
     epistemic_backfill_batch_size: int = 50
+    belief_revision_enabled: bool = True
+    belief_revision_batch_size: int = 50
+    topic_reliability_enabled: bool = True
     cluster_auto_link_threshold: float = 0.82
     cluster_review_threshold: float = 0.65
     cluster_lookback_days: int = 14
@@ -188,6 +191,16 @@ class IntelligenceConfig:
             epistemic_backfill_batch_size=_env_int(
                 "ENTITY_EPISTEMIC_BACKFILL_BATCH_SIZE", 50,
                 minimum=1, maximum=100
+            ),
+            belief_revision_enabled=_env_bool(
+                "ENTITY_BELIEF_REVISION_ENABLED", True
+            ),
+            belief_revision_batch_size=_env_int(
+                "ENTITY_BELIEF_REVISION_BATCH_SIZE", 50,
+                minimum=1, maximum=200
+            ),
+            topic_reliability_enabled=_env_bool(
+                "ENTITY_TOPIC_RELIABILITY_ENABLED", True
             ),
             cluster_auto_link_threshold=_env_float(
                 "ENTITY_CLUSTER_AUTO_LINK_THRESHOLD", 0.82,

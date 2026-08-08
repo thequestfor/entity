@@ -29,6 +29,7 @@ from agent.intelligence.understanding import AnalysisResult, UnderstandingEngine
 from agent.intelligence.forecasting import ForecastEngine
 from agent.intelligence.clustering import EventClusterer
 from agent.intelligence.embeddings import OllamaEmbeddingProvider
+from agent.intelligence.belief_revision import BeliefRevisionEngine
 
 
 @dataclass(frozen=True)
@@ -47,6 +48,7 @@ class IntelligenceWorker:
         loop_seconds=30,
         understanding=None,
         reputation=None,
+        belief_revision=None,
         forecasting=None,
         forecast_max_active=12,
         forecast_per_cycle=2,
@@ -66,6 +68,7 @@ class IntelligenceWorker:
         )
         self.last_analysis_result = AnalysisResult()
         self.reputation = reputation or ReputationEngine(store)
+        self.belief_revision = belief_revision or BeliefRevisionEngine(store)
         self.last_reputation_result = ReputationResult()
         self.forecasting = forecasting or ForecastEngine(
             store, router=self.understanding.router,
@@ -273,12 +276,23 @@ class IntelligenceWorker:
                 config.epistemic_backfill_batch_size
             )
         )
+        belief_revision = BeliefRevisionEngine(
+            store,
+            enabled=(
+                config.belief_revision_enabled
+                and config.topic_reliability_enabled
+            ),
+            batch_size=config.belief_revision_batch_size,
+            prior_strength=config.reputation_prior_strength,
+            min_positive_outcomes=config.reputation_min_evaluated_outcomes
+        )
         return cls(
             store=store,
             connectors=connectors,
             loop_seconds=config.worker_poll_seconds,
             understanding=understanding,
             reputation=reputation,
+            belief_revision=belief_revision,
             forecast_max_active=config.forecast_max_active,
             forecast_per_cycle=config.forecast_per_cycle,
             analysis_poll_seconds=config.analysis_poll_seconds,
@@ -339,6 +353,10 @@ class IntelligenceWorker:
         self.last_forecast_result = {"created": 0, "resolved": 0}
         changed = sum(outcome.result.changed for outcome in outcomes)
         analysis_due = changed or force or now >= self._next_analysis_at
+        try:
+            self.belief_revision.run_batch()
+        except Exception as exc:
+            print("Intelligence belief revision cycle failed:", exc)
         if not analysis_due:
             try:
                 backfill = getattr(

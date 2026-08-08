@@ -63,6 +63,22 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/api/intelligence/reliability-cells":
+            query = parse_qs(parsed.query)
+            self._send_json({"cells": self.server.intelligence_store.list_reliability_cells(
+                publisher_key=(query.get("publisher") or [None])[0],
+                limit=_query_int(query, "limit", 200)
+            )})
+            return
+
+        if parsed.path == "/api/intelligence/verification-tasks":
+            query = parse_qs(parsed.query)
+            self._send_json({"tasks": self.server.intelligence_store.list_verification_tasks(
+                status=(query.get("status") or ["pending"])[0],
+                limit=_query_int(query, "limit", 100)
+            )})
+            return
+
         if parsed.path == "/api/intelligence/forecasts":
             query = parse_qs(parsed.query)
             self._send_json({

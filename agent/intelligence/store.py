@@ -499,7 +499,13 @@ class IntelligenceStore:
                                     'historical-prose-claims'))
                      AS epistemic_backfill_complete,
                     (SELECT COUNT(*) FROM situation_integrity_flags
-                     WHERE status = 'review') AS integrity_reviews
+                     WHERE status = 'review') AS integrity_reviews,
+                    (SELECT COUNT(*) FROM claims
+                     WHERE truth_status = 'corroborated') AS corroborated_claims,
+                    (SELECT COUNT(*) FROM claims
+                     WHERE truth_status IN ('disputed','refuted')) AS disputed_truth_claims,
+                    (SELECT COUNT(*) FROM claim_verification_tasks
+                     WHERE status = 'pending') AS verification_tasks
                 """
             ).fetchone()
             categories = connection.execute(
@@ -856,6 +862,31 @@ class IntelligenceStore:
                 (situation_id, max(1, min(100, int(limit))))
             ).fetchall()
         return [self._worldview_synthesis_from_row(row) for row in rows]
+
+    def list_reliability_cells(self, publisher_key=None, limit=200):
+        query = "SELECT * FROM publisher_reliability_cells"
+        params = []
+        if publisher_key:
+            query += " WHERE publisher_key=?"
+            params.append(publisher_key)
+        query += " ORDER BY evaluated_count DESC,updated_at DESC LIMIT ?"
+        params.append(max(1, min(1000, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_verification_tasks(self, status="pending", limit=100):
+        query = "SELECT tasks.*,claims.predicate,claims.object,claims.topic " \
+                "FROM claim_verification_tasks tasks JOIN claims ON claims.id=tasks.claim_id"
+        params = []
+        if status:
+            query += " WHERE tasks.status=?"
+            params.append(status)
+        query += " ORDER BY tasks.priority DESC,tasks.next_attempt_at LIMIT ?"
+        params.append(max(1, min(500, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
     def add_forecast(self, forecast):
         with self._connect() as connection:
