@@ -567,38 +567,41 @@ class BeliefRevisionEngine:
     def _refresh_epistemic_profiles(self, connection, now):
         rows = connection.execute(
             """
+            WITH outcome_summary AS (
+              SELECT publisher_key,
+                SUM(CASE WHEN outcome='confirmed' THEN
+                  confidence*outcome_weight ELSE 0 END) good,
+                SUM(CASE WHEN outcome='refuted' THEN
+                  confidence*outcome_weight ELSE 0 END) bad,
+                COUNT(*) factual_samples
+              FROM publisher_claim_outcomes GROUP BY publisher_key
+            ), claim_summary AS (
+              SELECT documents.publisher_key,
+                AVG(CASE WHEN claims.claim_type='attributed_assertion'
+                  THEN claims.attributed_to!='' ELSE 1 END) attribution_quality,
+                SUM(claims.status='superseded') revisions
+              FROM documents
+              JOIN document_versions versions ON versions.document_id=documents.id
+              JOIN claim_evidence evidence
+                ON evidence.document_version_id=versions.id
+              JOIN claims ON claims.id=evidence.claim_id
+              GROUP BY documents.publisher_key
+            )
             SELECT reputation.publisher_key,
-              COALESCE(SUM(CASE WHEN outcomes.outcome='confirmed' THEN
-                outcomes.confidence*outcomes.outcome_weight ELSE 0 END),0) good,
-              COALESCE(SUM(CASE WHEN outcomes.outcome='refuted' THEN
-                outcomes.confidence*outcomes.outcome_weight ELSE 0 END),0) bad,
-              COUNT(outcomes.id) factual_samples,
+              COALESCE(outcomes.good,0) good,COALESCE(outcomes.bad,0) bad,
+              COALESCE(outcomes.factual_samples,0) factual_samples,
               COALESCE(content.syndication_share,0) syndication_share,
               COALESCE(content.interpretation_share,0) interpretation_share,
               COALESCE(content.causal_claim_share,0) causal_share,
-              COALESCE((
-                SELECT AVG(CASE WHEN claims.claim_type='attributed_assertion'
-                  THEN claims.attributed_to!='' ELSE 1 END)
-                FROM documents d
-                JOIN document_versions v ON v.document_id=d.id
-                JOIN claim_evidence e ON e.document_version_id=v.id
-                JOIN claims ON claims.id=e.claim_id
-                WHERE d.publisher_key=reputation.publisher_key
-              ),.5) attribution_quality,
-              COALESCE((
-                SELECT COUNT(*) FROM documents d
-                JOIN document_versions v ON v.document_id=d.id
-                JOIN claim_evidence e ON e.document_version_id=v.id
-                JOIN claims ON claims.id=e.claim_id
-                WHERE d.publisher_key=reputation.publisher_key
-                  AND claims.status='superseded'
-              ),0) revisions
+              COALESCE(claims.attribution_quality,.5) attribution_quality,
+              COALESCE(claims.revisions,0) revisions
             FROM publisher_reputation reputation
-            LEFT JOIN publisher_claim_outcomes outcomes
+            LEFT JOIN outcome_summary outcomes
               ON outcomes.publisher_key=reputation.publisher_key
             LEFT JOIN publisher_content_profiles content
               ON content.publisher_key=reputation.publisher_key
-            GROUP BY reputation.publisher_key
+            LEFT JOIN claim_summary claims
+              ON claims.publisher_key=reputation.publisher_key
             """
         ).fetchall()
         for row in rows:
@@ -636,19 +639,26 @@ class BeliefRevisionEngine:
     def _refresh_content_profiles(self, connection, now):
         rows = connection.execute(
             """
+            WITH dependent_documents AS (
+              SELECT left_document_id document_id FROM document_relationships
+              WHERE relationship IN ('copied','syndicated')
+              UNION
+              SELECT right_document_id document_id FROM document_relationships
+              WHERE relationship IN ('copied','syndicated')
+            )
             SELECT documents.publisher_key,COUNT(DISTINCT claims.id) samples,
               AVG(claims.claim_type IN ('direct_fact','quantitative_fact')) direct_share,
               AVG(claims.claim_type='attributed_assertion') attributed_share,
               AVG(claims.claim_type='interpretation') interpretation_share,
               AVG(claims.claim_type='causal_claim') causal_share,
               AVG(claims.evidence_role='primary') primary_share,
-              AVG(EXISTS(SELECT 1 FROM document_relationships r
-                         WHERE (r.left_document_id=documents.id OR r.right_document_id=documents.id)
-                           AND r.relationship IN ('copied','syndicated'))) syndicated_share
+              AVG(dependent_documents.document_id IS NOT NULL) syndicated_share
             FROM documents
             JOIN document_versions versions ON versions.document_id=documents.id
             JOIN claim_evidence evidence ON evidence.document_version_id=versions.id
             JOIN claims ON claims.id=evidence.claim_id
+            LEFT JOIN dependent_documents
+              ON dependent_documents.document_id=documents.id
             GROUP BY documents.publisher_key
             """
         ).fetchall()
