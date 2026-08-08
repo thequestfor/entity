@@ -51,7 +51,8 @@ class NwsAlertsConnector(JsonConnector):
                     "area": properties.get("areaDesc"),
                     "onset": properties.get("onset"),
                     "expires": properties.get("expires"),
-                    "sender": properties.get("senderName")
+                    "sender": properties.get("senderName"),
+                    "geometry": feature.get("geometry") or {}
                 }
             ))
         return ConnectorBatch(items=items, cursor={

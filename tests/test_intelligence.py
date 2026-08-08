@@ -46,6 +46,9 @@ from agent.intelligence.authoritative_verification import (
 )
 from agent.intelligence.ensemble_training import EnsembleTrainer
 from agent.intelligence.aircraft import AdsbLolAircraftMonitor
+from agent.intelligence.geospatial_intelligence import (
+    GeospatialIntelligenceEngine, GeospatialPredictionFeatures
+)
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
@@ -107,7 +110,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(21, version)
+        self.assertEqual(22, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -151,6 +154,77 @@ class IntelligenceStoreTests(unittest.TestCase):
         self.assertEqual(1, monitor.run_if_due(force=True))
         self.assertEqual("adsb_lol", self.store.list_aircraft_states()[0]["source_id"])
         self.assertEqual([], self.store.list_situations())
+
+    def test_native_geospatial_pipeline_versions_features_and_detects_change(self):
+        self.store.register_source(
+            "usgs_earthquakes", "USGS Earthquakes", "natural_hazard",
+            credibility=.99
+        )
+        observed = datetime.now(UTC).isoformat()
+        first = SourceItem(
+            "quake-native-1", "M4.0 earthquake in Testland",
+            "https://earthquake.usgs.gov/earthquakes/eventpage/test",
+            summary="Initial observation", published_at=observed,
+            category="earthquake", latitude=10.0, longitude=20.0,
+            metadata={
+                "magnitude": 4.0, "country": "Testland",
+                "geometry": {"type": "Point", "coordinates": [20.0, 10.0]}
+            }
+        )
+        self.store.ingest_items("usgs_earthquakes", [first])
+        engine = GeospatialIntelligenceEngine(self.store, batch_size=10)
+        first_result = engine.run_batch()
+        features = self.store.list_geo_features(
+            bbox=(19, 9, 21, 11), layers=("earthquake",)
+        )
+        self.assertEqual(1, first_result["features"])
+        self.assertEqual("Point", features[0]["geometry"]["type"])
+        self.assertTrue(features[0]["authoritative"])
+
+        changed = SourceItem(
+            "quake-native-1", "M6.4 earthquake in Testland",
+            "https://earthquake.usgs.gov/earthquakes/eventpage/test",
+            summary="Magnitude revised upward", published_at=observed,
+            category="earthquake", latitude=10.0, longitude=20.0,
+            metadata={
+                "magnitude": 6.4, "country": "Testland",
+                "geometry": {"type": "Point", "coordinates": [20.0, 10.0]}
+            }
+        )
+        self.store.ingest_items("usgs_earthquakes", [changed])
+        second_result = engine.run_batch()
+        anomalies = self.store.list_geo_anomalies(bbox=(19, 9, 21, 11))
+        assessment = self.store.regional_assessment(
+            (19, 9, 21, 11), layers=("earthquake",)
+        )
+        profile = self.store.get_country_profile("Testland")
+        self.assertEqual(1, second_result["observations"])
+        self.assertEqual("severity-increase", anomalies[0]["anomaly_type"])
+        self.assertEqual(1, assessment["feature_counts"]["earthquake"])
+        self.assertEqual(1, profile["profile"]["active_hazards"])
+
+    def test_prediction_geography_snapshot_is_cutoff_safe(self):
+        self.store.register_source(
+            "usgs_earthquakes", "USGS Earthquakes", "natural_hazard",
+            credibility=.99
+        )
+        self.store.ingest_items("usgs_earthquakes", [SourceItem(
+            "snapshot-quake", "Earthquake near Snapshot City",
+            "https://earthquake.usgs.gov/earthquakes/eventpage/snapshot",
+            summary="M5.1 recorded near Snapshot City", category="earthquake",
+            latitude=34.0, longitude=-118.0,
+            metadata={"magnitude": 5.1, "country": "United States",
+                      "geometry": {"type": "Point", "coordinates": [-118.0, 34.0]}}
+        )])
+        UnderstandingEngine(self.store).analyze_pending()
+        GeospatialIntelligenceEngine(self.store, batch_size=10).run_batch()
+        situation = self.store.list_situations(located_only=True)[0]
+        features, feature_ids, digest = GeospatialPredictionFeatures(self.store).snapshot(
+            situation["id"], cutoff_at=datetime.now(UTC).isoformat()
+        )
+        self.assertGreaterEqual(features["linked_hazard_count"], 1)
+        self.assertEqual(1, len(feature_ids))
+        self.assertEqual(64, len(digest))
 
     def test_claim_migration_materializes_non_null_defaults_for_legacy_rows(self):
         legacy_path = Path(self.temporary_directory.name) / "legacy.db"
@@ -2559,6 +2633,19 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ]
             )
             UnderstandingEngine(store).analyze_pending()
+            store.register_source(
+                "usgs_earthquakes", "USGS Earthquakes", "natural_hazard",
+                credibility=.99
+            )
+            store.ingest_items("usgs_earthquakes", [SourceItem(
+                "dashboard-quake", "Dashboard earthquake",
+                "https://earthquake.usgs.gov/earthquakes/eventpage/dashboard",
+                published_at=datetime.now(UTC).isoformat(), category="earthquake",
+                latitude=10.0, longitude=20.0,
+                metadata={"magnitude": 5.0, "country": "Testland",
+                          "geometry": {"type": "Point", "coordinates": [20.0, 10.0]}}
+            )])
+            GeospatialIntelligenceEngine(store, batch_size=10).run_batch()
             static_root = temporary / "dashboard"
             static_root.mkdir()
             (static_root / "index.html").write_text(
@@ -2603,6 +2690,21 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ) as response:
                     aircraft = json.loads(response.read())
                 with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/map/features?bbox=19,9,21,11&layers=earthquake&zoom=7",
+                    timeout=2
+                ) as response:
+                    map_features = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/map/regional-assessment?bbox=19,9,21,11&layers=earthquake",
+                    timeout=2
+                ) as response:
+                    regional = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/country-profile?country=Testland",
+                    timeout=2
+                ) as response:
+                    country_profile = json.loads(response.read())
+                with urllib.request.urlopen(
                     dashboard.url + "api/intelligence/map-commentary?type=situation&id="
                     + situations[0]["id"], timeout=2
                 ) as response:
@@ -2631,15 +2733,18 @@ class IntelligenceDashboardTests(unittest.TestCase):
                     reputation_outcomes = json.loads(response.read())
 
                 self.assertIn("Intelligence test", page)
-                self.assertEqual(
+                self.assertIn(
                     "Dashboard evidence",
-                    payload["documents"][0]["title"]
+                    {item["title"] for item in payload["documents"]}
                 )
                 self.assertEqual(1, len(situations))
                 self.assertEqual(1, len(located_situations))
                 self.assertEqual(35.0, located_situations[0]["latitude"])
                 self.assertIn("countries", geography)
                 self.assertEqual([], aircraft["aircraft"])
+                self.assertEqual("earthquake", map_features["features"][0]["feature_type"])
+                self.assertEqual(1, regional["feature_counts"]["earthquake"])
+                self.assertEqual("Testland", country_profile["profile"]["country_name"])
                 self.assertEqual("stored-worldview", map_commentary["basis"])
                 self.assertEqual("Dashboard evidence", map_commentary["headline"])
                 self.assertGreater(len(situation_detail["claims"]), 0)

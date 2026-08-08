@@ -39,6 +39,7 @@ from agent.intelligence.verification import VerificationEngine
 from agent.intelligence.claim_grounding import ClaimGroundingEngine
 from agent.intelligence.ensemble_training import EnsembleTrainer
 from agent.intelligence.aircraft import AdsbLolAircraftMonitor
+from agent.intelligence.geospatial_intelligence import GeospatialIntelligenceEngine
 
 
 @dataclass(frozen=True)
@@ -74,7 +75,8 @@ class IntelligenceWorker:
         activity_watchdog_seconds=90,
         on_activity=None,
         aircraft_monitor=None,
-        geography_batch_size=50
+        geography_batch_size=50,
+        geospatial_engine=None
     ):
         self.store = store
         self.connectors = list(connectors)
@@ -117,6 +119,7 @@ class IntelligenceWorker:
         self.on_activity = on_activity
         self.aircraft_monitor = aircraft_monitor
         self.geography_batch_size = max(1, min(500, int(geography_batch_size)))
+        self.geospatial_engine = geospatial_engine
         self._stop = threading.Event()
         self._thread = None
 
@@ -374,6 +377,10 @@ class IntelligenceWorker:
             poll_seconds=config.aircraft_poll_seconds, max_states=config.aircraft_max_states,
             timeout=config.request_timeout_seconds
         )
+        geospatial_engine = GeospatialIntelligenceEngine(
+            store, enabled=config.geospatial_features_enabled,
+            batch_size=config.geospatial_feature_batch_size
+        )
         return cls(
             store=store,
             connectors=connectors,
@@ -396,7 +403,8 @@ class IntelligenceWorker:
             source_backoff_max_seconds=config.source_backoff_max_seconds,
             activity_watchdog_seconds=config.activity_watchdog_seconds,
             aircraft_monitor=aircraft_monitor,
-            geography_batch_size=config.geography_backfill_batch_size
+            geography_batch_size=config.geography_backfill_batch_size,
+            geospatial_engine=geospatial_engine
         )
 
     @property
@@ -458,6 +466,11 @@ class IntelligenceWorker:
             )
         except Exception as exc:
             print("Intelligence geography reconciliation failed:", type(exc).__name__)
+        if self.geospatial_engine is not None:
+            try:
+                self.geospatial_engine.run_batch()
+            except Exception as exc:
+                print("Native geospatial feature cycle failed:", type(exc).__name__)
         analysis_due = changed or force or now >= self._next_analysis_at
         try:
             self.belief_revision.run_batch()

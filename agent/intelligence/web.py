@@ -156,6 +156,48 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             )})
             return
 
+        if parsed.path == "/api/intelligence/map/features":
+            query = parse_qs(parsed.query)
+            bbox = _query_bbox(query)
+            layers = _query_csv(query, "layers")
+            since_at = (query.get("since") or [None])[0]
+            minimum_severity = _query_float(query, "severity", 0.0)
+            zoom = _query_int(query, "zoom", 2)
+            self._send_json({
+                "features": self.server.intelligence_store.list_geo_features(
+                    bbox=bbox, layers=layers, since_at=since_at,
+                    minimum_severity=minimum_severity,
+                    limit=_query_int(query, "limit", 1000)
+                ),
+                "cells": self.server.intelligence_store.list_geo_cells(
+                    bbox=bbox, layers=layers, since_at=since_at,
+                    limit=_query_int(query, "cell_limit", 1000)
+                ) if zoom <= 6 else [],
+                "anomalies": self.server.intelligence_store.list_geo_anomalies(
+                    bbox=bbox, limit=100
+                )
+            })
+            return
+
+        if parsed.path == "/api/intelligence/map/regional-assessment":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.regional_assessment(
+                bbox=_query_bbox(query), layers=_query_csv(query, "layers"),
+                since_at=(query.get("since") or [None])[0]
+            ))
+            return
+
+        if parsed.path == "/api/intelligence/country-profile":
+            query = parse_qs(parsed.query)
+            profile = self.server.intelligence_store.get_country_profile(
+                (query.get("country") or [""])[0]
+            )
+            if profile is None:
+                self._send_json({"error":"Country profile not found."}, status=HTTPStatus.NOT_FOUND)
+            else:
+                self._send_json(profile)
+            return
+
         if parsed.path == "/api/intelligence/map-commentary":
             query = parse_qs(parsed.query)
             self._send_json(self.server.intelligence_store.map_commentary(
@@ -305,3 +347,33 @@ def _query_int(query, name, default):
 def _query_bool(query, name, default=False):
     value = str((query.get(name) or [default])[0]).strip().lower()
     return value in {"1", "true", "yes", "on"}
+
+
+def _query_float(query, name, default=0.0):
+    try:
+        return float((query.get(name) or [default])[0])
+    except (TypeError, ValueError):
+        return default
+
+
+def _query_csv(query, name):
+    return tuple(
+        item.strip().lower()
+        for item in str((query.get(name) or [""])[0]).split(",")
+        if item.strip()
+    )
+
+
+def _query_bbox(query):
+    value = str((query.get("bbox") or ["-180,-90,180,90"])[0])
+    try:
+        west, south, east, north = (float(item.strip()) for item in value.split(","))
+    except (TypeError, ValueError):
+        return (-180.0, -90.0, 180.0, 90.0)
+    west = max(-180.0, min(180.0, west))
+    east = max(-180.0, min(180.0, east))
+    south = max(-90.0, min(90.0, south))
+    north = max(-90.0, min(90.0, north))
+    if south > north:
+        south, north = north, south
+    return west, south, east, north

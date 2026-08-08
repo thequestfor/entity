@@ -73,7 +73,11 @@ class EonetConnector(JsonConnector):
                         "closed_at": event.get("closed"),
                         "source_links": sources,
                         "geometry_type": latest_geometry.get("type"),
-                        "geometry_count": len(geometry)
+                        "geometry_count": len(geometry),
+                        "geometry": {
+                            "type": latest_geometry.get("type") or "Point",
+                            "coordinates": coordinates
+                        }
                     }
                 )
             )

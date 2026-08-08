@@ -12,6 +12,7 @@ from agent.intelligence.temporal_features import TemporalFeatureExtractor
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.intelligence.forecast_resolution import BlindedForecastResolver
 from agent.intelligence.reasoning_jobs import ReasoningJobQueue
+from agent.intelligence.geospatial_intelligence import GeospatialPredictionFeatures
 
 
 class ForecastEngine:
@@ -29,6 +30,7 @@ class ForecastEngine:
         self.mode = mode if mode in {"legacy", "shadow", "active"} else "shadow"
         self.base_rates = BaseRateEngine(store)
         self.features = TemporalFeatureExtractor(store)
+        self.geo_features = GeospatialPredictionFeatures(store)
         self.ensemble = PredictionEnsemble(
             store, mode=(learned_ensemble_mode if mode != "legacy" else "fixed")
         )
@@ -278,9 +280,13 @@ class ForecastEngine:
         if not evidence:
             return None
         portfolio_slot = self._portfolio_slot()
+        evidence_cutoff = utc_now()
+        geo_values, geo_feature_ids, geo_snapshot_hash = (
+            self.geo_features.snapshot(situation["id"], evidence_cutoff)
+        )
         payload = self._generate_json(
             self._forecast_prompt(situation, evidence, calibration,
-                                  portfolio_slot), situation["title"]
+                                  portfolio_slot, geo_values), situation["title"]
         )
         if not isinstance(payload, dict):
             return None
@@ -309,7 +315,10 @@ class ForecastEngine:
             "resolution_criteria": criteria[:1200],
             "rationale": str(payload.get("rationale") or "")[:1600],
             "evidence": evidence, "model": getattr(self.router, "last_provider_name", "") or self.router.provider_name(),
-            "method": self.method, "created_at": utc_now()
+            "method": self.method, "created_at": evidence_cutoff,
+            "geo_feature_values": geo_values,
+            "geo_feature_ids": geo_feature_ids,
+            "geo_snapshot_hash": geo_snapshot_hash
         }
         if self.mode == "legacy":
             return forecast
@@ -440,7 +449,7 @@ class ForecastEngine:
         return items[:15]
 
     def _forecast_prompt(self, situation, evidence, calibration,
-                         portfolio_slot=None):
+                         portfolio_slot=None, geo_features=None):
         window = {
             "0-1d": "6 to 24 hours", "1-3d": "more than 24 to 72 hours",
             "3-7d": "more than 3 to 7 days",
@@ -458,6 +467,7 @@ class ForecastEngine:
             "Return JSON only: {question, predicted_outcome, probability, "
             "target_at, resolution_criteria, rationale}. Probability is 0.05-0.95. "
             f"Past calibration: {json.dumps(calibration)}. Situation: {json.dumps(situation)}. "
+            f"Geospatial features frozen at the evidence cutoff: {json.dumps(geo_features or {})}. "
             f"Evidence: {json.dumps(evidence)}"
         )
 

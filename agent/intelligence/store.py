@@ -2,7 +2,8 @@ import hashlib
 import json
 import re
 import sqlite3
-from datetime import UTC, datetime
+from collections import Counter
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import uuid4
@@ -853,6 +854,27 @@ class IntelligenceStore:
         """Produce a cheap, auditable hover readout from the stored worldview."""
         kind = str(kind or "").strip().lower()
         now = utc_now()
+        if kind == "feature" and identifier:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """SELECT features.*,sources.name source_name,
+                       (SELECT COUNT(*) FROM geo_anomalies anomalies
+                        WHERE anomalies.feature_id=features.id AND anomalies.status='active') anomaly_count
+                       FROM geo_features features JOIN sources ON sources.id=features.source_id
+                       WHERE features.id=?""", (str(identifier)[:100],)
+                ).fetchone()
+            if not row:
+                return {"headline":"Hazard unavailable","commentary":"The observation is no longer active.","updated_at":now}
+            item = dict(row)
+            commentary = (
+                f"{item['source_name']} currently reports this {item['feature_type']} at "
+                f"{round(float(item['severity'] or 0)*100)}% normalized severity. "
+                f"It has {int(item['anomaly_count'] or 0)} active change signal(s). "
+                "Proximity does not establish a causal relationship with nearby situations."
+            )
+            return {"headline":f"{item['feature_type'].title()} observation",
+                    "commentary":commentary,"confidence":float(item["confidence"] or 0),
+                    "updated_at":item["updated_at"],"basis":"authoritative-hazard-observation"}
         if kind == "situation" and identifier:
             with self._connect() as connection:
                 row = connection.execute(
@@ -918,6 +940,232 @@ class IntelligenceStore:
                 "updated_at": now, "basis": "country-rollup"
             }
         return {"headline": "Map commentary", "commentary": "Hover over a country or situation for Entity's evidence-based readout.", "updated_at": now}
+
+    def list_geo_features(self, bbox=(-180, -90, 180, 90), layers=(),
+                          since_at=None, minimum_severity=0.0, limit=1000):
+        west, south, east, north = bbox
+        query = """SELECT * FROM geo_features WHERE status='active'
+                   AND (expires_at IS NULL OR expires_at>=?)
+                   AND centroid_latitude BETWEEN ? AND ?
+                   AND severity>=?"""
+        now = utc_now()
+        params = [now, south, north, max(0.0, min(1.0, float(minimum_severity)))]
+        if west <= east:
+            query += " AND centroid_longitude BETWEEN ? AND ?"
+            params.extend([west, east])
+        else:
+            query += " AND (centroid_longitude>=? OR centroid_longitude<=?)"
+            params.extend([west, east])
+        clean_layers = tuple(
+            str(layer).strip().lower() for layer in layers
+            if str(layer).strip().lower() in {
+                "earthquake", "wildfire", "flood", "storm", "volcano",
+                "drought", "weather"
+            }
+        )
+        if clean_layers:
+            query += " AND feature_type IN (%s)" % ",".join("?" for _ in clean_layers)
+            params.extend(clean_layers)
+        if since_at:
+            query += " AND observed_at>=?"
+            params.append(str(since_at))
+        query += " ORDER BY severity DESC,observed_at DESC LIMIT ?"
+        params.append(max(1, min(5000, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["geometry"] = self._json_load(item.get("geometry"), {})
+            item["properties"] = self._json_load(item.get("properties"), {})
+            item["authoritative"] = bool(item.get("authoritative"))
+            result.append(item)
+        return result
+
+    def list_geo_cells(self, bbox=(-180, -90, 180, 90), layers=(),
+                       since_at=None, limit=1000):
+        west, south, east, north = bbox
+        query = """SELECT * FROM geo_cells WHERE centroid_latitude BETWEEN ? AND ?"""
+        params = [south, north]
+        if west <= east:
+            query += " AND centroid_longitude BETWEEN ? AND ?"
+            params.extend([west, east])
+        else:
+            query += " AND (centroid_longitude>=? OR centroid_longitude<=?)"
+            params.extend([west, east])
+        clean_layers = tuple(str(item).lower() for item in layers if item)
+        if clean_layers:
+            query += " AND feature_type IN (%s)" % ",".join("?" for _ in clean_layers)
+            params.extend(clean_layers)
+        if since_at:
+            query += " AND latest_observed_at>=?"
+            params.append(str(since_at))
+        query += " ORDER BY detection_count DESC,max_severity DESC LIMIT ?"
+        params.append(max(1, min(5000, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_geo_anomalies(self, bbox=None, limit=100):
+        query = """SELECT anomalies.*,features.feature_type,features.centroid_latitude,
+                   features.centroid_longitude FROM geo_anomalies anomalies
+                   LEFT JOIN geo_features features ON features.id=anomalies.feature_id
+                   WHERE anomalies.status='active'"""
+        params = []
+        if bbox:
+            west, south, east, north = bbox
+            query += " AND features.centroid_latitude BETWEEN ? AND ?"
+            params.extend([south, north])
+            if west <= east:
+                query += " AND features.centroid_longitude BETWEEN ? AND ?"
+            else:
+                query += " AND (features.centroid_longitude>=? OR features.centroid_longitude<=?)"
+            params.extend([west, east])
+        query += " ORDER BY anomalies.severity DESC,anomalies.last_seen_at DESC LIMIT ?"
+        params.append(max(1, min(500, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["evidence"] = self._json_load(item.get("evidence"), {})
+            output.append(item)
+        return output
+
+    def regional_assessment(self, bbox, layers=(), since_at=None):
+        features = self.list_geo_features(
+            bbox=bbox, layers=layers, since_at=since_at, limit=1000
+        )
+        anomalies = self.list_geo_anomalies(bbox=bbox, limit=50)
+        west, south, east, north = bbox
+        with self._connect() as connection:
+            situations = connection.execute(
+                """SELECT id,title,category,status,confidence,latitude,longitude,
+                          location_country_name,updated_at
+                   FROM situations WHERE latitude BETWEEN ? AND ?
+                     AND longitude BETWEEN ? AND ?
+                   ORDER BY status='contested' DESC,confidence DESC LIMIT 100""",
+                (south,north,west,east)
+            ).fetchall() if west <= east else connection.execute(
+                """SELECT id,title,category,status,confidence,latitude,longitude,
+                          location_country_name,updated_at
+                   FROM situations WHERE latitude BETWEEN ? AND ?
+                     AND (longitude>=? OR longitude<=?)
+                   ORDER BY status='contested' DESC,confidence DESC LIMIT 100""",
+                (south,north,west,east)
+            ).fetchall()
+        type_counts = Counter(item["feature_type"] for item in features)
+        countries = Counter(
+            item["country_name"] for item in features if item.get("country_name")
+        )
+        contested = sum(row["status"] == "contested" for row in situations)
+        headline = (
+            f"{len(features)} native hazard feature(s), {len(situations)} situation(s), "
+            f"and {len(anomalies)} active anomaly signal(s) in view"
+        )
+        hazard_summary = ", ".join(
+            f"{count} {kind}" for kind, count in type_counts.most_common()
+        ) or "no current native hazards"
+        country_summary = ", ".join(name for name, _ in countries.most_common(5)) or "no country attribution"
+        assessment = (
+            f"Entity observes {hazard_summary}. The region contains {contested} contested "
+            f"situation(s). Most represented countries: {country_summary}. "
+            "This is a geographic evidence summary, not a claim that nearby events are causally related."
+        )
+        uncertainties = []
+        if any(not item.get("country_name") for item in features):
+            uncertainties.append("Some hazards have coordinates but no evidence-backed country attribution.")
+        if len(features) >= 1000:
+            uncertainties.append("The viewport feature limit was reached; zoom in for a complete local view.")
+        if not features:
+            uncertainties.append("No native hazard observations matched the selected time and layer filters.")
+        evidence = [
+            {"feature_id":item["id"],"source_id":item["source_id"],
+             "document_id":item["document_id"],"observed_at":item["observed_at"]}
+            for item in features[:100]
+        ]
+        fingerprint = hashlib.sha256(self._json({
+            "bbox":bbox,"layers":sorted(layers),"since":since_at,
+            "features":[item["id"]+item["observed_at"] for item in features],
+            "anomalies":[item["id"] for item in anomalies]
+        }).encode()).hexdigest()
+        result = {
+            "headline":headline,"assessment":assessment,
+            "uncertainties":uncertainties,"evidence":evidence,
+            "feature_counts":dict(type_counts),"situation_count":len(situations),
+            "anomalies":anomalies,"request_fingerprint":fingerprint,
+            "method":"deterministic-regional-assessment-v1","created_at":utc_now()
+        }
+        assessment_id = hashlib.sha256(
+            f"regional:{fingerprint}".encode()
+        ).hexdigest()
+        expires_at = (
+            datetime.now(UTC) + timedelta(minutes=15)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO regional_assessments
+                   (id,request_fingerprint,bbox,layers,since_at,headline,assessment,
+                    uncertainties,evidence,method,created_at,expires_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(request_fingerprint) DO UPDATE SET
+                   headline=excluded.headline,assessment=excluded.assessment,
+                   uncertainties=excluded.uncertainties,evidence=excluded.evidence,
+                   method=excluded.method,created_at=excluded.created_at,
+                   expires_at=excluded.expires_at""",
+                (assessment_id,fingerprint,self._json(bbox),self._json(sorted(layers)),
+                 since_at,headline,assessment,self._json(uncertainties),
+                 self._json(evidence),result["method"],result["created_at"],expires_at)
+            )
+            connection.execute(
+                "DELETE FROM regional_assessments WHERE expires_at<?",
+                (result["created_at"],)
+            )
+        return result
+
+    def get_country_profile(self, country):
+        country = str(country or "").strip()[:120]
+        key = "".join(character for character in country.lower() if character.isalnum())
+        with self._connect() as connection:
+            profile = connection.execute(
+                "SELECT * FROM country_profiles WHERE country_key=? OR country_name=?",
+                (key,country)
+            ).fetchone()
+            if not profile:
+                return None
+            situations = connection.execute(
+                """SELECT id,title,category,status,confidence,updated_at FROM situations
+                   WHERE location_country_name=? ORDER BY status='contested' DESC,
+                   confidence DESC,updated_at DESC LIMIT 20""", (profile["country_name"],)
+            ).fetchall()
+            features = connection.execute(
+                """SELECT id,feature_type,severity,severity_label,observed_at,source_id
+                   FROM geo_features WHERE country_name=? AND status='active'
+                   ORDER BY severity DESC,observed_at DESC LIMIT 50""", (profile["country_name"],)
+            ).fetchall()
+            forecasts = connection.execute(
+                """SELECT forecasts.id,forecasts.question,forecasts.probability,forecasts.target_at
+                   FROM forecasts JOIN situations ON situations.id=forecasts.situation_id
+                   WHERE situations.location_country_name=? AND forecasts.status='active'
+                   ORDER BY forecasts.target_at LIMIT 20""", (profile["country_name"],)
+            ).fetchall()
+        item = dict(profile)
+        item["dimensions"] = self._json_load(item.get("dimensions"), {})
+        item["coverage_gaps"] = self._json_load(item.get("coverage_gaps"), [])
+        return {"profile":item,"situations":[dict(row) for row in situations],
+                "features":[dict(row) for row in features],
+                "forecasts":[dict(row) for row in forecasts]}
+
+    def add_forecast_geo_snapshot(self, forecast_id, situation_id, cutoff_at,
+                                  features, feature_ids, snapshot_hash):
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT OR IGNORE INTO forecast_geo_feature_snapshots
+                   (forecast_id,situation_id,evidence_cutoff_at,feature_version,features,
+                    feature_ids,snapshot_hash,created_at) VALUES (?,?,?,?,?,?,?,?)""",
+                (forecast_id,situation_id,cutoff_at,"geospatial-prediction-v1",
+                 self._json(features),self._json(feature_ids),snapshot_hash,utc_now())
+            )
 
     def get_situation(self, situation_id):
         with self._connect() as connection:
@@ -1201,6 +1449,19 @@ class IntelligenceStore:
                     "UPDATE forecast_portfolio_state SET generated_count="
                     "generated_count+1,updated_at=? WHERE horizon_bucket=?",
                     (now,forecast["portfolio_slot"])
+                )
+            if forecast.get("geo_snapshot_hash"):
+                connection.execute(
+                    """INSERT OR IGNORE INTO forecast_geo_feature_snapshots
+                       (forecast_id,situation_id,evidence_cutoff_at,feature_version,
+                        features,feature_ids,snapshot_hash,created_at)
+                       VALUES (?,?,?,?,?,?,?,?)""",
+                    (forecast["id"],forecast["situation_id"],
+                     forecast.get("evidence_cutoff_at") or forecast["created_at"],
+                     "geospatial-prediction-v1",
+                     self._json(forecast.get("geo_feature_values",{})),
+                     self._json(forecast.get("geo_feature_ids",[])),
+                     forecast["geo_snapshot_hash"],now)
                 )
 
     def list_forecasts(self, limit=50, status=None):

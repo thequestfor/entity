@@ -72,21 +72,41 @@
               Country
               <select id="map-country-filter"><option value="">All countries</option></select>
             </label>
+            <label>
+              Time window
+              <select id="map-time-filter">
+                <option value="1">Last 24 hours</option>
+                <option value="7" selected>Last 7 days</option>
+                <option value="30">Last 30 days</option>
+              </select>
+            </label>
+            <label>
+              Severity
+              <select id="map-severity-filter">
+                <option value="0">All severities</option>
+                <option value="0.4">Moderate+</option>
+                <option value="0.7">High+</option>
+              </select>
+            </label>
             <label class="map-toggle"><input id="map-labels-toggle" type="checkbox" /> Labels</label>
             <label class="map-toggle"><input id="map-aircraft-toggle" type="checkbox" /> Aircraft</label>
             <label class="map-toggle"><input id="map-commentary-toggle" type="checkbox" /> Entity commentary</label>
+            <button class="map-analyze" id="map-analyze" type="button">Analyze visible region</button>
             <span id="map-status">Loading located situations…</span>
           </div>
         </div>
         <div class="world-map" id="world-map" aria-label="Located situations"></div>
         <div class="map-legend" aria-label="Map marker legend">
-          <span><i data-kind="wildfire"></i> Wildfire</span>
-          <span><i data-kind="earthquake"></i> Earthquake</span>
-          <span><i data-kind="flood"></i> Flood</span>
-          <span><i data-kind="storm"></i> Severe weather</span>
+          <label><input class="map-layer-toggle" type="checkbox" value="wildfire" checked /><i data-kind="wildfire"></i> Wildfire</label>
+          <label><input class="map-layer-toggle" type="checkbox" value="earthquake" checked /><i data-kind="earthquake"></i> Earthquake</label>
+          <label><input class="map-layer-toggle" type="checkbox" value="flood" checked /><i data-kind="flood"></i> Flood</label>
+          <label><input class="map-layer-toggle" type="checkbox" value="storm" checked /><i data-kind="storm"></i> Severe weather</label>
+          <label><input class="map-layer-toggle" type="checkbox" value="volcano" checked /><i data-kind="volcano"></i> Volcano</label>
           <span><i data-kind="other"></i> Other situation</span>
         </div>
         <aside class="map-commentary" id="map-commentary" hidden aria-live="polite"></aside>
+        <article class="regional-assessment" id="regional-assessment" hidden aria-live="polite"></article>
+        <article class="country-profile" id="country-profile" hidden aria-live="polite"></article>
         <div class="country-breakdown" id="country-breakdown" aria-live="polite"></div>
         <p class="map-disclaimer">Hazard marks are based on Entity’s authoritative event feeds where available. Locations are reconciled from cited source metadata and coordinates. Aircraft are approximate crowd-sourced ADS-B state vectors, not air-traffic-control data.</p>
       </section>

@@ -107,6 +107,8 @@ class IntelligenceConfig:
     aircraft_poll_seconds: int = 120
     aircraft_max_states: int = 300
     geography_backfill_batch_size: int = 50
+    geospatial_features_enabled: bool = True
+    geospatial_feature_batch_size: int = 100
     world_bank_enabled: bool = True
     world_bank_countries: tuple[str, ...] = ("WLD",)
     world_bank_indicators: tuple[str, ...] = DEFAULT_WORLD_BANK_INDICATORS
@@ -423,6 +425,8 @@ class IntelligenceConfig:
             aircraft_poll_seconds=_env_int("ENTITY_AIRCRAFT_POLL_SECONDS", 120, minimum=60),
             aircraft_max_states=_env_int("ENTITY_AIRCRAFT_MAX_STATES", 300, minimum=1, maximum=1000),
             geography_backfill_batch_size=_env_int("ENTITY_GEOGRAPHY_BACKFILL_BATCH_SIZE", 50, minimum=1, maximum=500),
+            geospatial_features_enabled=_env_bool("ENTITY_GEOSPATIAL_FEATURES_ENABLED", True),
+            geospatial_feature_batch_size=_env_int("ENTITY_GEOSPATIAL_FEATURE_BATCH_SIZE", 100, minimum=1, maximum=500),
             world_bank_enabled=_env_bool("ENTITY_WORLD_BANK_ENABLED", True),
             world_bank_countries=_env_csv(
                 os.getenv("ENTITY_WORLD_BANK_COUNTRIES"), ("WLD",)

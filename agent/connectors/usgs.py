@@ -54,7 +54,11 @@ class UsgsConnector(JsonConnector):
                         "tsunami": bool(properties.get("tsunami")),
                         "status": properties.get("status"),
                         "updated_at": properties.get("updated"),
-                        "depth_km": _coordinate(coordinates, 2)
+                        "depth_km": _coordinate(coordinates, 2),
+                        "geometry": {
+                            "type": geometry.get("type") or "Point",
+                            "coordinates": coordinates
+                        }
                     }
                 )
             )

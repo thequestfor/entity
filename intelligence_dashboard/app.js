@@ -14,10 +14,16 @@ const elements = {
   mapStatus: document.querySelector("#map-status"),
   mapPriorityFilter: document.querySelector("#map-priority-filter"),
   mapCountryFilter: document.querySelector("#map-country-filter"),
+  mapTimeFilter: document.querySelector("#map-time-filter"),
+  mapSeverityFilter: document.querySelector("#map-severity-filter"),
+  mapAnalyze: document.querySelector("#map-analyze"),
+  mapLayerToggles: [...document.querySelectorAll(".map-layer-toggle")],
   mapLabelsToggle: document.querySelector("#map-labels-toggle"),
   mapAircraftToggle: document.querySelector("#map-aircraft-toggle"),
   mapCommentaryToggle: document.querySelector("#map-commentary-toggle"),
   mapCommentary: document.querySelector("#map-commentary"),
+  regionalAssessment: document.querySelector("#regional-assessment"),
+  countryProfile: document.querySelector("#country-profile"),
   countryBreakdown: document.querySelector("#country-breakdown"),
   situationList: document.querySelector("#situation-list"),
   situationDetail: document.querySelector("#situation-detail"),
@@ -53,9 +59,14 @@ let intelligenceMap;
 let situationMapLayer;
 let aircraftMapLayer;
 let countryMapLayer;
+let nativeHazardLayer;
+let nativeAnomalyLayer;
 let countryRollups = new Map();
 let countryLayers = new Map();
 let commentaryTimer;
+let viewportTimer;
+let viewportRequest = 0;
+let nativeFeatureSituationIds = new Set();
 const commentaryCache = new Map();
 const COUNTRY_BOUNDARIES_URL = "https://raw.githubusercontent.com/johan/world.geo.json/34c96bba9c07d2ceb30696c599bb51a5b939b20f/countries.geo.json";
 
@@ -177,7 +188,9 @@ function renderMap(situations) {
     Number.isFinite(situation.latitude) && Number.isFinite(situation.longitude)
   );
   const countryLocated = mapCountry ? located.filter((item) => item.location_country_name === mapCountry) : located;
-  const displayed = selectMapSituations(countryLocated);
+  const displayed = selectMapSituations(countryLocated).filter((item) =>
+    !nativeFeatureSituationIds.has(item.id) || hazardKind(item) === "other"
+  );
   elements.mapStatus.textContent = displayed.length
     ? `${displayed.length} shown · ${countryLocated.length} in view · ${located.length} located`
     : "No located situations in this view";
@@ -223,10 +236,17 @@ function initializeMap() {
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a> &copy; <a href="https://carto.com/attributions">CARTO</a>'
   }).addTo(intelligenceMap);
   countryMapLayer = L.layerGroup().addTo(intelligenceMap);
+  nativeHazardLayer = L.layerGroup().addTo(intelligenceMap);
+  nativeAnomalyLayer = L.layerGroup().addTo(intelligenceMap);
   situationMapLayer = L.layerGroup().addTo(intelligenceMap);
   aircraftMapLayer = L.layerGroup().addTo(intelligenceMap);
-  intelligenceMap.on("zoomend", () => renderMap(lastMapSituations));
+  intelligenceMap.on("zoomend", () => {
+    renderMap(lastMapSituations);
+    scheduleViewportLoad();
+  });
+  intelligenceMap.on("moveend", scheduleViewportLoad);
   loadCountryBoundaries();
+  scheduleViewportLoad();
   return true;
 }
 
@@ -251,6 +271,7 @@ async function loadCountryBoundaries() {
           elements.mapCountryFilter.value = mapCountry;
           intelligenceMap.fitBounds(layer.getBounds(), { padding: [20, 20] });
           renderMap(lastMapSituations);
+          loadCountryProfile(mapCountry || name);
         });
       }
     });
@@ -296,7 +317,7 @@ function addSituationMarker(situation, kind) {
 }
 
 function hazardGlyph(kind) {
-  return { wildfire: "▲", earthquake: "◆", flood: "≈", storm: "●", other: "·" }[kind] || "·";
+  return { wildfire: "▲", earthquake: "◆", flood: "≈", storm: "●", volcano: "⬟", other: "·" }[kind] || "·";
 }
 
 function situationTooltip(situation) {
@@ -357,6 +378,7 @@ function renderCountries(countries) {
       const layer = countryLayers.get(normalizeCountry(country.country_name));
       if (layer) intelligenceMap.fitBounds(layer.getBounds(), { padding: [20, 20] });
       renderMap(lastMapSituations);
+      loadCountryProfile(country.country_name);
     });
     elements.countryBreakdown.append(button);
   }
@@ -382,6 +404,160 @@ function countryTooltip(name) {
   detail.textContent = rollup ? `${rollup.active} active · ${rollup.contested} contested · ${rollup.situations} total` : "No country-attributed situations in this view";
   node.append(title, detail);
   return node;
+}
+
+function selectedHazardLayers() {
+  return elements.mapLayerToggles.filter((item) => item.checked).map((item) => item.value);
+}
+
+function mapSince() {
+  const days = Math.max(1, Number(elements.mapTimeFilter.value || 7));
+  return new Date(Date.now() - days * 86_400_000).toISOString();
+}
+
+function viewportQuery() {
+  const bounds = intelligenceMap.getBounds();
+  return new URLSearchParams({
+    bbox: [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()].join(","),
+    layers: selectedHazardLayers().join(","),
+    since: mapSince(),
+    severity: elements.mapSeverityFilter.value || "0",
+    zoom: String(intelligenceMap.getZoom()),
+    limit: intelligenceMap.getZoom() <= 5 ? "600" : "1800",
+    cell_limit: "800"
+  });
+}
+
+function scheduleViewportLoad() {
+  if (!intelligenceMap) return;
+  clearTimeout(viewportTimer);
+  viewportTimer = setTimeout(loadViewportFeatures, 220);
+}
+
+async function loadViewportFeatures() {
+  const requestId = ++viewportRequest;
+  try {
+    const payload = await request(`/api/intelligence/map/features?${viewportQuery()}`);
+    if (requestId !== viewportRequest) return;
+    renderNativeFeatures(payload);
+  } catch (error) {
+    if (requestId === viewportRequest) elements.mapStatus.textContent += " · hazard layer unavailable";
+  }
+}
+
+function renderNativeFeatures(payload) {
+  nativeHazardLayer.clearLayers();
+  nativeAnomalyLayer.clearLayers();
+  nativeFeatureSituationIds = new Set();
+  const zoom = intelligenceMap.getZoom();
+  const features = payload.features || [];
+  const aggregateWildfires = zoom <= 5;
+  for (const feature of features) {
+    if (feature.situation_id) nativeFeatureSituationIds.add(feature.situation_id);
+    if (aggregateWildfires && feature.feature_type === "wildfire") continue;
+    addNativeFeature(feature);
+  }
+  if (aggregateWildfires) {
+    for (const cell of payload.cells || []) {
+      if (cell.feature_type !== "wildfire") continue;
+      const radius = Math.max(5, Math.min(19, 4 + Math.sqrt(Number(cell.detection_count || 1)) * 1.7));
+      const marker = L.circleMarker([cell.centroid_latitude, cell.centroid_longitude], {
+        radius, className: "native-cell native-cell-wildfire", color: "#ff8169",
+        weight: 1, fillColor: "#dd3c25", fillOpacity: .42
+      });
+      marker.bindTooltip(`${cell.detection_count} wildfire detections · max ${Math.round(Number(cell.max_severity || 0) * 100)}% severity · zoom in for observations`, { sticky: true, className: "entity-map-tooltip" });
+      marker.addTo(nativeHazardLayer);
+    }
+  }
+  for (const anomaly of payload.anomalies || []) {
+    if (!Number.isFinite(anomaly.centroid_latitude) || !Number.isFinite(anomaly.centroid_longitude)) continue;
+    L.circleMarker([anomaly.centroid_latitude, anomaly.centroid_longitude], {
+      radius: 12, className: "geo-anomaly", color: "#fff198", weight: 2,
+      fillColor: "transparent", fillOpacity: 0
+    }).bindTooltip(`Change signal: ${String(anomaly.anomaly_type || "anomaly").replaceAll("-", " ")} · ${Math.round(Number(anomaly.confidence || 0) * 100)}% confidence`, { sticky: true, className: "entity-map-tooltip" }).addTo(nativeAnomalyLayer);
+  }
+  renderMap(lastMapSituations);
+  const rendered = features.length + (payload.cells || []).length;
+  elements.mapStatus.textContent = `${rendered} native observations/cells · ${selectMapSituations(lastMapSituations).length} situation candidates`;
+}
+
+function addNativeFeature(feature) {
+  const kind = feature.feature_type || "other";
+  const geometry = feature.geometry && feature.geometry.coordinates ? feature.geometry : {
+    type: "Point", coordinates: [feature.centroid_longitude, feature.centroid_latitude]
+  };
+  const layer = L.geoJSON({ type: "Feature", geometry, properties: {} }, {
+    style: () => ({
+      className: `native-geometry native-${kind}`, color: hazardColor(kind), weight: 2,
+      fillColor: hazardColor(kind), fillOpacity: kind === "wildfire" ? .24 : .15
+    }),
+    pointToLayer: (_item, latlng) => L.marker(latlng, {
+      icon: L.divIcon({
+        className: "map-symbol-wrap native-symbol-wrap",
+        html: `<span class="map-symbol map-symbol-${kind}" aria-hidden="true">${hazardGlyph(kind)}</span>`,
+        iconSize: [24, 24], iconAnchor: [12, 12]
+      }), keyboard: true
+    })
+  });
+  const tooltip = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = `${kind.replaceAll("-", " ")} · ${feature.severity_label || `${Math.round(Number(feature.severity || 0) * 100)}% severity`}`;
+  const detail = document.createElement("span");
+  detail.textContent = `${feature.source_id} · observed ${formatTime(feature.observed_at)}${feature.country_name ? ` · ${feature.country_name}` : ""}`;
+  tooltip.append(title, detail);
+  layer.bindTooltip(tooltip, { sticky: true, className: "entity-map-tooltip" });
+  layer.on("mouseover", () => scheduleCommentary("feature", feature.id));
+  layer.on("click", () => {
+    if (feature.situation_id) selectSituation(feature.situation_id);
+  });
+  layer.addTo(nativeHazardLayer);
+}
+
+function hazardColor(kind) {
+  return { wildfire: "#f04b35", earthquake: "#efa24a", flood: "#3a9de6", storm: "#a373e5", volcano: "#df6e3d" }[kind] || "#42c9ba";
+}
+
+async function analyzeVisibleRegion() {
+  elements.regionalAssessment.hidden = false;
+  elements.regionalAssessment.textContent = "Entity is assembling an evidence-linked regional assessment…";
+  try {
+    const payload = await request(`/api/intelligence/map/regional-assessment?${viewportQuery()}`);
+    elements.regionalAssessment.replaceChildren();
+    const title = document.createElement("strong"); title.textContent = payload.headline;
+    const body = document.createElement("span"); body.textContent = payload.assessment;
+    const note = document.createElement("small");
+    note.textContent = `${payload.evidence?.length || 0} linked observations · ${payload.method}`;
+    elements.regionalAssessment.append(title, body);
+    for (const uncertainty of payload.uncertainties || []) {
+      const warning = document.createElement("em"); warning.textContent = uncertainty;
+      elements.regionalAssessment.append(warning);
+    }
+    elements.regionalAssessment.append(note);
+  } catch (error) {
+    elements.regionalAssessment.textContent = "Entity could not assemble this regional assessment.";
+  }
+}
+
+async function loadCountryProfile(country) {
+  if (!country) {
+    elements.countryProfile.hidden = true;
+    return;
+  }
+  elements.countryProfile.hidden = false;
+  elements.countryProfile.textContent = `Loading the evidence profile for ${country}…`;
+  try {
+    const payload = await request(`/api/intelligence/country-profile?country=${encodeURIComponent(country)}`);
+    const profile = payload.profile || {};
+    elements.countryProfile.replaceChildren();
+    const title = document.createElement("strong"); title.textContent = `${profile.country_name} evidence profile`;
+    const body = document.createElement("span");
+    body.textContent = `${profile.active_situations || 0} active situations · ${profile.contested_situations || 0} contested · ${profile.active_hazards || 0} native hazards · ${profile.forecast_count || 0} active forecasts`;
+    const gaps = document.createElement("small");
+    gaps.textContent = (profile.coverage_gaps || []).length ? `Coverage gaps: ${profile.coverage_gaps.join(", ")}` : "No configured hazard-layer gaps detected.";
+    elements.countryProfile.append(title, body, gaps);
+  } catch (error) {
+    elements.countryProfile.textContent = `A materialized profile for ${country} is not available yet; the bounded backfill is still learning it.`;
+  }
 }
 
 function scheduleCommentary(type, value) {
@@ -738,6 +914,7 @@ async function refresh() {
     aircraft = aircraftResponse.aircraft ?? [];
     renderCountries(geography.countries ?? []);
     renderMap(lastMapSituations);
+    scheduleViewportLoad();
     renderBriefing(briefing);
     renderReputations(reputations.reputations ?? []);
     renderForecasts(forecasts.forecasts ?? [], forecasts.calibration ?? {});
@@ -763,9 +940,14 @@ elements.mapCountryFilter.addEventListener("change", () => {
   if (layer && mapCountry) intelligenceMap.fitBounds(layer.getBounds(), { padding: [20, 20] });
   else if (intelligenceMap && !mapCountry) intelligenceMap.setView([20, 0], 2);
   renderMap(lastMapSituations);
+  loadCountryProfile(mapCountry);
 });
 elements.mapLabelsToggle.addEventListener("change", () => { mapLabels = elements.mapLabelsToggle.checked; renderMap(lastMapSituations); });
 elements.mapAircraftToggle.addEventListener("change", () => renderMap(lastMapSituations));
+elements.mapTimeFilter.addEventListener("change", scheduleViewportLoad);
+elements.mapSeverityFilter.addEventListener("change", scheduleViewportLoad);
+for (const toggle of elements.mapLayerToggles) toggle.addEventListener("change", scheduleViewportLoad);
+elements.mapAnalyze.addEventListener("click", analyzeVisibleRegion);
 elements.mapCommentaryToggle.addEventListener("change", () => {
   clearTimeout(commentaryTimer);
   if (!elements.mapCommentaryToggle.checked) {
