@@ -85,7 +85,9 @@ function renderOverview(overview) {
   elements.integrityReviewCount.textContent = overview.integrity_reviews ?? 0;
   elements.corroboratedClaimCount.textContent = overview.corroborated_claims ?? 0;
   elements.truthDisputeCount.textContent = overview.disputed_truth_claims ?? 0;
-  elements.verificationTaskCount.textContent = overview.verification_tasks ?? 0;
+  elements.verificationTaskCount.textContent = (
+    `${overview.verification_tasks ?? 0} · ${overview.verification_results ?? 0} done`
+  );
   elements.intelligenceGapCount.textContent = overview.intelligence_gaps ?? 0;
   elements.reasoningJobCount.textContent = overview.pending_reasoning_jobs ?? 0;
   const processed = overview.epistemic_backfill_processed ?? 0;

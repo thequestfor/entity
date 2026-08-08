@@ -39,6 +39,7 @@ from agent.intelligence.evaluation import IntelligenceEvaluationEngine, anonymiz
 from agent.intelligence.reasoning_jobs import ReasoningJobQueue
 from agent.intelligence.reasoning_budget import ReasoningBudget, BudgetedModelRouter
 from agent.intelligence.acquisition import ActiveAcquisitionEngine
+from agent.intelligence.verification import VerificationEngine
 from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
@@ -99,7 +100,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(16, version)
+            self.assertEqual(17, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -397,6 +398,62 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual(2, status_claim["source_count"])
         self.assertTrue(self.store.list_reliability_cells())
 
+    def test_verification_worker_applies_allowlisted_authoritative_evidence(self):
+        self.store.register_source(
+            "usgs_earthquakes", "USGS", "earthquake", credibility=.99
+        )
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="reported-quake", title="Earthquake near Test City",
+            url="https://news.test/quake", category="earthquake",
+            metadata={"magnitude": 4.8}
+        )])
+        self.engine.analyze_pending()
+        beliefs = BeliefRevisionEngine(self.store, batch_size=100)
+        beliefs.run_batch()
+        with self.store._connect() as connection:
+            claim = connection.execute(
+                "SELECT * FROM claims WHERE predicate='seismic.magnitude'"
+            ).fetchone()
+            task = connection.execute(
+                "SELECT * FROM claim_verification_tasks WHERE claim_id=?",
+                (claim["id"],)
+            ).fetchone()
+        self.assertEqual("usgs", task["desired_source_kind"])
+
+        self.store.ingest_items("usgs_earthquakes", [SourceItem(
+            external_id="usgs-quake", title="Earthquake near Test City",
+            url="https://earthquake.usgs.gov/example", category="earthquake",
+            metadata={"magnitude": 4.8}
+        )])
+        with self.store._connect() as connection:
+            version = connection.execute("""
+              SELECT versions.id FROM document_versions versions
+              JOIN documents ON documents.id=versions.document_id
+              WHERE documents.source_id='usgs_earthquakes'
+              ORDER BY versions.id DESC LIMIT 1
+            """).fetchone()[0]
+            connection.execute("""
+              INSERT INTO claim_evidence (
+                claim_id,document_version_id,stance,source_weight,excerpt,observed_at
+              ) VALUES (?,?,'supports',.99,'USGS reviewed magnitude',?)
+            """, (claim["id"], version, datetime.now(UTC).isoformat()))
+
+        execution = VerificationEngine(self.store, batch_size=100).run_batch()
+        applied = beliefs.apply_verification_results()
+        with self.store._connect() as connection:
+            updated = connection.execute(
+                "SELECT truth_status FROM claims WHERE id=?", (claim["id"],)
+            ).fetchone()[0]
+            results = connection.execute(
+                "SELECT COUNT(*) FROM claim_verification_results WHERE claim_id=?",
+                (claim["id"],)
+            ).fetchone()[0]
+
+        self.assertGreaterEqual(execution.results_recorded, 1)
+        self.assertGreaterEqual(applied, 1)
+        self.assertEqual("corroborated", updated)
+        self.assertEqual(1, results)
+
     def test_hypotheses_compete_on_linked_claims_and_create_information_gaps(self):
         self.store.ingest_items("source-a", [SourceItem(
             external_id="hypothesis-event", title="Unconfirmed port disruption",
@@ -411,12 +468,29 @@ class UnderstandingEngineTests(unittest.TestCase):
         situation = self.store.get_situation(self.store.list_situations()[0]["id"])
         competing = [
             item for item in situation["hypotheses"]
-            if item["method"] == "evidence-competition-v1"
+            if item["method"] == "evidence-competition-v2"
         ]
 
         self.assertEqual(5, result.hypotheses_created)
         self.assertAlmostEqual(1.0, sum(item["probability"] for item in competing), places=3)
         self.assertTrue(self.store.list_intelligence_gaps())
+
+    def test_hypothesis_templates_are_category_specific(self):
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="cyber-event", title="Possible exploited vulnerability",
+            summary="A weakness may be under active exploitation.",
+            url="https://a.test/cyber", category="cybersecurity"
+        )])
+        self.engine.analyze_pending()
+        HypothesisCompetitionEngine(self.store, batch_size=10).run_batch()
+        situation = self.store.get_situation(self.store.list_situations()[0]["id"])
+        keys = {
+            item["hypothesis_key"] for item in situation["hypotheses"]
+            if item["method"] == "evidence-competition-v2"
+        }
+
+        self.assertIn("exploitation-unconfirmed", keys)
+        self.assertIn("attribution-unsupported", keys)
 
     def test_blinded_evaluations_are_symmetric_and_gate_model_features(self):
         left = anonymize_evidence([
@@ -480,6 +554,27 @@ class UnderstandingEngineTests(unittest.TestCase):
                 "WHERE desired_source_kind='usgs' LIMIT 1"
             ).fetchone()[0]
         self.assertEqual("requested",status)
+
+    def test_active_acquisition_can_repoll_for_a_verification_task(self):
+        self.store.register_source(
+            "usgs_earthquakes","USGS","earthquake",enabled=True
+        )
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="verification-quake", title="Possible earthquake",
+            url="https://a.test/verification-quake", category="earthquake",
+            metadata={"magnitude": 3.4}
+        )])
+        self.engine.analyze_pending()
+        BeliefRevisionEngine(self.store,batch_size=100).run_batch()
+        acquisition=ActiveAcquisitionEngine(self.store,enabled=True)
+
+        self.assertGreater(acquisition.enqueue_verifications(),0)
+        self.assertEqual("usgs_earthquakes",acquisition.dispatch_one())
+        with self.store._connect() as connection:
+            attempts=connection.execute(
+                "SELECT COUNT(*) FROM verification_acquisition_attempts"
+            ).fetchone()[0]
+        self.assertEqual(1, attempts)
 
     def test_private_mail_never_enters_public_world_model(self):
         self.store.register_source(
@@ -957,12 +1052,24 @@ class UnderstandingEngineTests(unittest.TestCase):
             connection.execute(
                 "UPDATE situations SET worldview='Provisional disruption.'"
             )
+        situation_id = self.store.list_situations()[0]["id"]
+        self.store.add_forecast({
+            "id":"legacy-capacity-fixture","situation_id":situation_id,
+            "question":"Will the situation remain active?",
+            "predicted_outcome":"It will remain active.","probability":.55,
+            "target_at":(datetime.now(UTC)+timedelta(days=2)).isoformat(),
+            "resolution_criteria":"Later reporting describes it as active.",
+            "created_at":datetime.now(UTC).isoformat(),"method":"thinking-forecast-v1"
+        })
         forecaster = ForecastEngine(
-            self.store, ForecastRouter(), max_active=2, mode="shadow"
+            self.store, ForecastRouter(), max_active=1, mode="shadow"
         )
 
         self.assertEqual(1, forecaster.create_forecasts())
-        forecast = self.store.list_forecasts()[0]
+        forecast = next(
+            item for item in self.store.list_forecasts()
+            if item["method"] == "hypothesis-forecast-v2"
+        )
         with self.store._connect() as connection:
             components = connection.execute(
                 "SELECT * FROM forecast_component_predictions WHERE forecast_id=?",
@@ -977,7 +1084,12 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertTrue(forecast["hypothesis_id"])
         self.assertTrue(forecast["evidence_snapshot_hash"])
         self.assertTrue(forecast["shadow"])
-        self.assertNotIn(forecast["situation_id"], self.store.active_forecast_situation_ids())
+        self.assertEqual(1, self.store.forecast_calibration()["active_live"])
+        self.assertEqual(1, self.store.forecast_calibration()["active_shadow"])
+        self.assertIn(
+            forecast["situation_id"],
+            self.store.active_forecast_situation_ids(shadow=True)
+        )
         self.assertEqual(3, len(components))
         self.assertGreater(frozen, 0)
 

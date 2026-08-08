@@ -97,6 +97,128 @@ class BeliefRevisionEngine:
             len(rows), relation_count, resolved, tasks, cells
         )
 
+    def apply_verification_results(self, limit=100):
+        """Apply each decisive verifier result exactly once, with provenance."""
+        if not self.enabled:
+            return 0
+        now = utc_now()
+        applied = 0
+        with self.store._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT results.*,versions.document_id
+                FROM claim_verification_results results
+                LEFT JOIN document_versions versions
+                  ON versions.id=results.document_version_id
+                LEFT JOIN claim_verification_applications applications
+                  ON applications.result_id=results.id
+                WHERE applications.result_id IS NULL
+                ORDER BY results.id LIMIT ?
+                """, (max(1, min(500, int(limit))),)
+            ).fetchall()
+            for result in rows:
+                claim = connection.execute(
+                    "SELECT * FROM claims WHERE id=?", (result["claim_id"],)
+                ).fetchone()
+                if not claim:
+                    continue
+                status = {
+                    "supports": "corroborated",
+                    "refutes": "refuted",
+                    "mixed": "disputed"
+                }.get(result["result"], "unverified")
+                confidence = max(0.0, min(.99, float(result["confidence"] or 0)))
+                previous = claim["truth_status"]
+                previous_confidence = float(claim["resolution_confidence"] or 0)
+                established_conflict = (
+                    {previous, status} == {"corroborated", "refuted"}
+                    and confidence <= previous_confidence + .1
+                )
+                if established_conflict:
+                    status = "disputed"
+                    confidence = min(.7, max(confidence, previous_confidence))
+                if status != "unverified":
+                    digest = hashlib.sha256(
+                        f"verification-result:{result['id']}".encode()
+                    ).hexdigest()
+                    connection.execute(
+                        "UPDATE claims SET truth_status=?,resolution_confidence=?,"
+                        "last_resolved_at=?,resolver_version=?,updated_at=? WHERE id=?",
+                        (status, round(confidence, 4), now,
+                         "verification-result-v1", now, claim["id"])
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO claim_resolution_history (
+                          claim_id,previous_status,truth_status,confidence,
+                          evidence_document_ids,reason,method,input_snapshot_hash,
+                          created_at
+                        ) VALUES (?,?,?,?,?,?,?,?,?)
+                        """,
+                        (claim["id"], previous, status, round(confidence, 4),
+                         self.store._json(
+                             [result["document_id"]]
+                             if result["document_id"] else []
+                         ), result["reason"], "verification-result-v1",
+                         digest, now)
+                    )
+                    self._record_verified_publisher_outcomes(
+                        connection, claim, result, status, confidence, now
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO claim_verification_applications (
+                      result_id,claim_id,applied_status,previous_status,
+                      confidence,method,applied_at
+                    ) VALUES (?,?,?,?,?,?,?)
+                    """,
+                    (result["id"], claim["id"], status, previous,
+                     round(confidence, 4), "verification-result-v1", now)
+                )
+                applied += 1
+            if applied:
+                self._recalculate_reliability(connection, now)
+        return applied
+
+    def _record_verified_publisher_outcomes(self, connection, claim, result,
+                                            status, confidence, now):
+        if status not in {"corroborated", "refuted"}:
+            return
+        evidence = connection.execute(
+            """
+            SELECT DISTINCT documents.publisher_key,documents.id AS document_id,
+              evidence.document_version_id
+            FROM claim_evidence evidence
+            JOIN document_versions versions
+              ON versions.id=evidence.document_version_id
+            JOIN documents ON documents.id=versions.document_id
+            JOIN sources ON sources.id=documents.source_id
+            WHERE evidence.claim_id=? AND evidence.stance='supports'
+              AND sources.kind NOT IN ('private_mail','prediction_market')
+            """, (claim["id"],)
+        ).fetchall()
+        for item in evidence:
+            # A publisher never earns an accuracy outcome from its own document.
+            if item["document_version_id"] == result["document_version_id"]:
+                continue
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO publisher_claim_outcomes (
+                  publisher_key,claim_id,topic,claim_type,outcome,confidence,
+                  evidence_document_ids,method,evaluated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)
+                """,
+                (item["publisher_key"], claim["id"],
+                 normalize_topic(claim["topic"]), claim["claim_type"],
+                 "confirmed" if status == "corroborated" else "refuted",
+                 round(confidence, 4),
+                 self.store._json(
+                     [result["document_id"]]
+                     if result["document_id"] else []
+                 ), "verification-result-v1", now)
+            )
+
     def _ensure_publishers(self, connection, now):
         connection.execute(
             """

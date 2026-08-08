@@ -506,8 +506,18 @@ class IntelligenceStore:
                      WHERE truth_status IN ('disputed','refuted')) AS disputed_truth_claims,
                     (SELECT COUNT(*) FROM claim_verification_tasks
                      WHERE status = 'pending') AS verification_tasks,
+                    (SELECT COUNT(*) FROM claim_verification_tasks
+                     WHERE status = 'deferred') AS deferred_verification_tasks,
+                    (SELECT COUNT(*) FROM claim_verification_results)
+                     AS verification_results,
                     (SELECT COUNT(*) FROM intelligence_gaps
                      WHERE status = 'open') AS intelligence_gaps,
+                    ((SELECT COUNT(*) FROM active_acquisition_attempts) +
+                     (SELECT COUNT(*) FROM verification_acquisition_attempts))
+                     AS acquisition_attempts,
+                    (SELECT COUNT(*) FROM forecasts
+                     WHERE status='active' AND shadow=1)
+                     AS active_shadow_forecasts,
                     (SELECT COUNT(*) FROM intelligence_feature_gates
                      WHERE status = 'blocked') AS blocked_feature_gates,
                     (SELECT COUNT(*) FROM intelligence_reasoning_jobs
@@ -1010,9 +1020,12 @@ class IntelligenceStore:
             ).fetchall()
         return [self._forecast_from_row(row) for row in rows]
 
-    def active_forecast_situation_ids(self):
+    def active_forecast_situation_ids(self, shadow=False):
         with self._connect() as connection:
-            rows = connection.execute("SELECT DISTINCT situation_id FROM forecasts WHERE status = 'active' AND shadow=0").fetchall()
+            rows = connection.execute(
+                "SELECT DISTINCT situation_id FROM forecasts "
+                "WHERE status='active' AND shadow=?", (int(bool(shadow)),)
+            ).fetchall()
         return {row["situation_id"] for row in rows}
 
     def resolve_forecast(self, forecast_id, outcome, summary, evidence, now,
@@ -1054,8 +1067,29 @@ class IntelligenceStore:
         with self._connect() as connection:
             row = connection.execute("SELECT COUNT(*) AS resolved, AVG(brier_score) AS brier, AVG(actual_outcome) AS base_rate FROM forecasts WHERE status = 'resolved'").fetchone()
             active = connection.execute("SELECT COUNT(*) FROM forecasts WHERE status = 'active'").fetchone()[0]
+            active_live = connection.execute(
+                "SELECT COUNT(*) FROM forecasts WHERE status='active' AND shadow=0"
+            ).fetchone()[0]
+            active_shadow = connection.execute(
+                "SELECT COUNT(*) FROM forecasts WHERE status='active' AND shadow=1"
+            ).fetchone()[0]
+            v2 = connection.execute(
+                """
+                SELECT COUNT(*) resolved,AVG(brier_score) brier
+                FROM forecasts
+                WHERE status='resolved' AND method='hypothesis-forecast-v2'
+                """
+            ).fetchone()
             unclear = connection.execute(
                 "SELECT COUNT(*) FROM forecast_resolution_attempts WHERE outcome='unclear'"
+            ).fetchone()[0]
+            v2_unclear = connection.execute(
+                """
+                SELECT COUNT(*) FROM forecast_resolution_attempts attempts
+                JOIN forecasts ON forecasts.id=attempts.forecast_id
+                WHERE attempts.outcome='unclear'
+                  AND forecasts.method='hypothesis-forecast-v2'
+                """
             ).fetchone()[0]
             log_loss = connection.execute(
                 """
@@ -1066,10 +1100,16 @@ class IntelligenceStore:
             ).fetchone()[0]
         decided=int(row["resolved"] or 0)
         coverage=decided/max(1,decided+int(unclear or 0))
-        return {"active": active, "resolved": decided,
+        v2_decided = int(v2["resolved"] or 0)
+        return {"active": active, "active_live": active_live,
+                "active_shadow": active_shadow, "resolved": decided,
                 "brier_score": row["brier"], "base_rate": row["base_rate"],
                 "log_loss": log_loss, "resolution_coverage": coverage,
-                "unclear_attempts": unclear}
+                "unclear_attempts": unclear,
+                "v2_resolved": v2_decided, "v2_brier_score": v2["brier"],
+                "v2_resolution_coverage": (
+                    v2_decided / max(1, v2_decided + int(v2_unclear or 0))
+                ), "v2_unclear_attempts": int(v2_unclear or 0)}
 
     def latest_briefing(self):
         with self._connect() as connection:

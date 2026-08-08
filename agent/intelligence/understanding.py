@@ -421,7 +421,9 @@ class UnderstandingEngine:
                 "falsifiers": hypothesis["falsifiers"]
             }
             for hypothesis in detail.get("hypotheses", [])
-            if hypothesis.get("method") != "evidence-competition-v1"
+            if not str(hypothesis.get("method") or "").startswith(
+                "evidence-competition-v"
+            )
             or hypothesis_gate == "active"
         ]
         return {

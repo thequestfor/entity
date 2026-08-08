@@ -19,8 +19,8 @@ class HypothesisResult:
 
 
 class HypothesisCompetitionEngine:
-    method = "evidence-competition-v1"
-    backfill_name = "hypothesis-competition-v1"
+    method = "evidence-competition-v2"
+    backfill_name = "hypothesis-competition-v2"
 
     def __init__(self, store, enabled=True, batch_size=20,
                  max_hypotheses=5, probability_floor=0.03):
@@ -87,14 +87,48 @@ class HypothesisCompetitionEngine:
         ).fetchone()
 
     def _templates(self, situation):
+        category = str(situation["category"] or "general").lower()
         base = [
             ("substantially-accurate", "The reported event is substantially accurate", .38),
             ("details-uncertain", "The event occurred but material details are uncertain", .30),
-            ("distinct-events", "Reports combine incompatible or distinct events", .14),
-            ("outdated", "Material reporting is outdated or superseded", .10),
-            ("cause-unsupported", "The event may be real while its proposed cause or attribution is unsupported", .08),
         ]
-        return base[:self.max_hypotheses]
+        if any(token in category for token in ("cyber", "vulnerability")):
+            alternatives = [
+                ("exploitation-unconfirmed", "The weakness may be real while active exploitation remains unconfirmed", .14),
+                ("scope-uncertain", "The affected products or organizations may be narrower than reported", .10),
+                ("attribution-unsupported", "The incident may be real while actor attribution is unsupported", .08),
+            ]
+        elif any(token in category for token in ("conflict", "military", "security")):
+            alternatives = [
+                ("attribution-unsupported", "The event may be real while the claimed actor or attribution is unsupported", .14),
+                ("recycled-or-outdated", "Material evidence may be recycled, stale, or superseded", .10),
+                ("localized-not-general", "A localized event may be overstated as a broader development", .08),
+            ]
+        elif any(token in category for token in ("weather", "earthquake", "wildfire", "disaster")):
+            alternatives = [
+                ("measurement-revised", "The event is real but preliminary measurements may be revised", .14),
+                ("secondary-impact-uncertain", "The event is real while reported downstream impacts remain uncertain", .10),
+                ("outdated", "The alert or measurement may have been superseded", .08),
+            ]
+        elif any(token in category for token in ("health", "outbreak", "disease")):
+            alternatives = [
+                ("scale-uncertain", "The event may be real while its reported scale remains uncertain", .14),
+                ("cause-unsupported", "The observed event may be real while its proposed cause is unsupported", .10),
+                ("reporting-lag", "Reporting delay may make the apparent trend misleading", .08),
+            ]
+        elif any(token in category for token in ("economic", "finance", "market")):
+            alternatives = [
+                ("provisional-revision", "The reported measurement may be provisional and later revised", .14),
+                ("cause-unsupported", "The measurement may be real while its proposed explanation is unsupported", .10),
+                ("aggregation-distortion", "Aggregation or geographic scope may distort the reported conclusion", .08),
+            ]
+        else:
+            alternatives = [
+                ("distinct-events", "Reports combine incompatible or distinct events", .14),
+                ("outdated", "Material reporting is outdated or superseded", .10),
+                ("cause-unsupported", "The event may be real while its proposed cause or attribution is unsupported", .08),
+            ]
+        return (base + alternatives)[:self.max_hypotheses]
 
     def _process(self, connection, situation, now):
         claims = connection.execute(
@@ -103,6 +137,12 @@ class HypothesisCompetitionEngine:
         ).fetchall()
         if not claims:
             return 0, 0, 0
+        connection.execute(
+            "UPDATE situation_hypotheses SET status='retired',retired_at=?,"
+            "updated_at=? WHERE situation_id=? AND status='active' "
+            "AND method LIKE 'evidence-competition-v%' AND method!=?",
+            (now, now, situation["id"], self.method)
+        )
         snapshot = [{"id":c["id"],"truth":c["truth_status"],
                      "confidence":c["resolution_confidence"]} for c in claims]
         digest = hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest()
@@ -207,6 +247,18 @@ class HypothesisCompetitionEngine:
             return "supports",3.0
         if key=="cause-unsupported" and ctype in {"causal_claim","interpretation"}:
             return "supports",2.0 if truth!="corroborated" else .5
+        if key=="attribution-unsupported" and ctype in {"attributed_assertion","causal_claim","interpretation"}:
+            return "supports",2.0 if truth!="corroborated" else .5
+        if key in {"scope-uncertain","scale-uncertain","secondary-impact-uncertain","localized-not-general","aggregation-distortion"} and truth in {"unverified","disputed","indeterminate"}:
+            return "supports",1.7
+        if key in {"measurement-revised","provisional-revision"} and claim["predicate"] in {"seismic.magnitude","event.alert_level","event.status"}:
+            return "supports",1.8 if truth!="corroborated" else .7
+        if key=="exploitation-unconfirmed" and truth!="corroborated":
+            return "supports",1.8
+        if key=="reporting-lag" and truth in {"unverified","indeterminate"}:
+            return "supports",1.5
+        if key=="recycled-or-outdated" and claim["status"] in {"contested","superseded"}:
+            return "supports",2.5
         return None,1.0
 
     def _falsifiers(self,key):
@@ -216,4 +268,15 @@ class HypothesisCompetitionEngine:
             "distinct-events":["A shared identifier and consistent time/location reconcile reports."],
             "outdated":["Current primary evidence confirms the original detail remains valid."],
             "cause-unsupported":["Direct primary evidence establishes the proposed cause or attribution."]
+            ,"attribution-unsupported":["Primary evidence identifies the actor with a documented chain of attribution."]
+            ,"recycled-or-outdated":["Provenance verifies the evidence is current and belongs to this event."]
+            ,"localized-not-general":["Independent measurements establish the reported broader geographic scope."]
+            ,"exploitation-unconfirmed":["A primary incident record confirms exploitation in the wild."]
+            ,"scope-uncertain":["A complete affected-product or victim inventory confirms the reported scope."]
+            ,"measurement-revised":["A reviewed measurement confirms the preliminary value without material revision."]
+            ,"secondary-impact-uncertain":["Primary impact assessments confirm the downstream effects."]
+            ,"scale-uncertain":["A primary case count or denominator confirms the reported scale."]
+            ,"reporting-lag":["Event-date data show the apparent trend persists after reporting-delay adjustment."]
+            ,"provisional-revision":["A final release confirms the provisional measurement."]
+            ,"aggregation-distortion":["Disaggregated data support the same conclusion across relevant regions."]
         }.get(key,[])

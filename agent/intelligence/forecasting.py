@@ -38,10 +38,17 @@ class ForecastEngine:
 
     def create_forecasts(self):
         calibration = self.store.forecast_calibration()
-        remaining = self.max_active - calibration["active"]
+        shadow = self.mode == "shadow"
+        active_count = (
+            calibration.get("active_shadow", 0)
+            if shadow else calibration.get("active_live", calibration["active"])
+        )
+        remaining = self.max_active - active_count
         if remaining <= 0:
             return 0
-        active_situations = self.store.active_forecast_situation_ids()
+        active_situations = self.store.active_forecast_situation_ids(
+            shadow=shadow
+        )
         candidates = [
             item for item in self.store.list_situations(limit=100)
             if item.get("worldview") and item["id"] not in active_situations
@@ -121,7 +128,7 @@ class ForecastEngine:
             return forecast
         hypotheses = [
             item for item in detail.get("hypotheses", [])
-            if item.get("method") == "evidence-competition-v1"
+            if str(item.get("method") or "").startswith("evidence-competition-v")
         ]
         if not hypotheses:
             return None

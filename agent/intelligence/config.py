@@ -43,6 +43,9 @@ class IntelligenceConfig:
     epistemic_backfill_batch_size: int = 50
     belief_revision_enabled: bool = True
     belief_revision_batch_size: int = 50
+    verification_execution_enabled: bool = True
+    verification_batch_size: int = 20
+    verification_max_attempts: int = 8
     topic_reliability_enabled: bool = True
     hypothesis_competition_enabled: bool = True
     hypothesis_batch_size: int = 20
@@ -209,6 +212,17 @@ class IntelligenceConfig:
             belief_revision_batch_size=_env_int(
                 "ENTITY_BELIEF_REVISION_BATCH_SIZE", 50,
                 minimum=1, maximum=200
+            ),
+            verification_execution_enabled=_env_bool(
+                "ENTITY_VERIFICATION_EXECUTION_ENABLED", True
+            ),
+            verification_batch_size=_env_int(
+                "ENTITY_VERIFICATION_BATCH_SIZE", 20,
+                minimum=1, maximum=100
+            ),
+            verification_max_attempts=_env_int(
+                "ENTITY_VERIFICATION_MAX_ATTEMPTS", 8,
+                minimum=1, maximum=20
             ),
             topic_reliability_enabled=_env_bool(
                 "ENTITY_TOPIC_RELIABILITY_ENABLED", True

@@ -10,9 +10,10 @@ from agent.intelligence.claim_extraction import HybridClaimExtractor
 from agent.intelligence.config import IntelligenceConfig
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.intelligence.store import IntelligenceStore, utc_now
+from agent.intelligence.verification import VerificationEngine
 
 
-SUITE_VERSION="blinded-intelligence-v1"
+SUITE_VERSION="blinded-intelligence-v2"
 
 
 @dataclass(frozen=True)
@@ -78,18 +79,35 @@ class IntelligenceEvaluationEngine:
             {"publisher":"Unknown B","independence_key":"a","weight":.8},
             {"publisher":"Famous A","independence_key":"b","weight":.8}
         ])
+        verifier=VerificationEngine(self.store)
+        duplicate_family=verifier._signal([
+            {"source_id":"untrusted-a","family_key":"wire-copy",
+             "credibility":.99,"document_version_id":1},
+            {"source_id":"untrusted-b","family_key":"wire-copy",
+             "credibility":.99,"document_version_id":2}
+        ],"independent-public")
+        forged_authority=verifier._signal([
+            {"source_id":"usgs-lookalike","family_key":"impostor",
+             "credibility":1.0,"document_version_id":3}
+        ],"usgs")
+        inverse,_=ensemble.combine({
+            "base_rate":.6,"hypothesis":.3,"reasoning":.45
+        })
         return [
             EvaluationCase("component-order-symmetry","symmetry",abs(left-right)<=.03,True,abs(left-right)),
             EvaluationCase("publisher-label-blinding","bias",masked==swapped,True,0,{"masked":masked}),
             EvaluationCase("quoted-proposition-not-endorsed","attribution",all(c.claim_type!="direct_fact" for c in quoted),True),
             EvaluationCase("private-mail-exclusion","privacy",private_count==0,True,float(private_count)),
-            EvaluationCase("probability-bounds","calibration",.05<=left<=.95,False)
+            EvaluationCase("probability-bounds","calibration",.05<=left<=.95,False),
+            EvaluationCase("duplicate-family-not-independent","independence",duplicate_family is None,True),
+            EvaluationCase("authority-id-is-allowlisted","provenance",forged_authority is None,True),
+            EvaluationCase("directional-complement-symmetry","symmetry",abs((left+inverse)-1)<=.03,True,abs((left+inverse)-1))
         ]
 
     def _update_gates(self,c,run_id,critical,failed,now):
         calibration=self.store.forecast_calibration()
-        resolved=int(calibration.get("resolved") or 0)
-        brier=calibration.get("brier_score")
+        resolved=int(calibration.get("v2_resolved") or 0)
+        brier=calibration.get("v2_brier_score")
         mature_cell=c.execute(
             "SELECT COALESCE(MAX(evaluated_count),0) FROM publisher_reliability_cells"
         ).fetchone()[0]
@@ -101,7 +119,7 @@ class IntelligenceEvaluationEngine:
         hypothesis_status="active" if not critical else "blocked"
         c.execute("UPDATE intelligence_feature_gates SET status=?,reason=?,evaluation_run_id=?,sample_count=?,updated_at=? WHERE feature='hypothesis_competition'",
                   (hypothesis_status,"Blinded deterministic suite passed" if not critical else "Critical evaluation failure",run_id,resolved,now))
-        forecast_ready=(not critical and resolved>=50 and brier is not None and float(brier)<=.23 and float(calibration.get("resolution_coverage") or 0)>=.7)
+        forecast_ready=(not critical and resolved>=50 and brier is not None and float(brier)<=.23 and float(calibration.get("v2_resolution_coverage") or 0)>=.7)
         c.execute("UPDATE intelligence_feature_gates SET status=?,reason=?,evaluation_run_id=?,sample_count=?,metric=?,required_metric=.23,updated_at=? WHERE feature='forecast_v2'",
                   ("active" if forecast_ready else "shadow","Promotion criteria met" if forecast_ready else "Awaiting 50 resolved forecasts, coverage, and Brier gate",run_id,resolved,brier,now))
 

@@ -35,6 +35,7 @@ from agent.intelligence.evaluation import IntelligenceEvaluationEngine
 from agent.intelligence.reasoning_budget import ReasoningBudget, BudgetedModelRouter
 from agent.intelligence.reasoning_jobs import ReasoningJobQueue
 from agent.intelligence.acquisition import ActiveAcquisitionEngine
+from agent.intelligence.verification import VerificationEngine
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,7 @@ class IntelligenceWorker:
         understanding=None,
         reputation=None,
         belief_revision=None,
+        verification=None,
         hypothesis_competition=None,
         evaluation=None,
         acquisition=None,
@@ -78,6 +80,7 @@ class IntelligenceWorker:
         self.last_analysis_result = AnalysisResult()
         self.reputation = reputation or ReputationEngine(store)
         self.belief_revision = belief_revision or BeliefRevisionEngine(store)
+        self.verification = verification or VerificationEngine(store)
         self.hypothesis_competition = (
             hypothesis_competition or HypothesisCompetitionEngine(store)
         )
@@ -308,6 +311,11 @@ class IntelligenceWorker:
             prior_strength=config.reputation_prior_strength,
             min_positive_outcomes=config.reputation_min_evaluated_outcomes
         )
+        verification = VerificationEngine(
+            store, enabled=config.verification_execution_enabled,
+            batch_size=config.verification_batch_size,
+            max_attempts=config.verification_max_attempts
+        )
         hypothesis_competition = HypothesisCompetitionEngine(
             store, enabled=config.hypothesis_competition_enabled,
             batch_size=config.hypothesis_batch_size,
@@ -331,6 +339,7 @@ class IntelligenceWorker:
             understanding=understanding,
             reputation=reputation,
             belief_revision=belief_revision,
+            verification=verification,
             hypothesis_competition=hypothesis_competition,
             evaluation=evaluation,
             acquisition=acquisition,
@@ -400,12 +409,18 @@ class IntelligenceWorker:
         except Exception as exc:
             print("Intelligence belief revision cycle failed:", exc)
         try:
+            self.verification.run_batch()
+            self.belief_revision.apply_verification_results()
+        except Exception as exc:
+            print("Intelligence verification cycle failed:", exc)
+        try:
             self.hypothesis_competition.run_batch()
         except Exception as exc:
             print("Intelligence hypothesis competition cycle failed:", exc)
         if self.acquisition is not None:
             try:
                 self.acquisition.enqueue_gaps()
+                self.acquisition.enqueue_verifications()
                 self.acquisition.dispatch_one()
             except Exception as exc:
                 print("Intelligence acquisition cycle failed:", exc)
