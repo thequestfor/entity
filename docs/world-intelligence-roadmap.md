@@ -20,7 +20,7 @@ or turn raw intelligence signals directly into physical actions.
 ## Fifteen-step implementation plan
 
 1. [x] Add the universal world-event graph.
-2. [ ] Add the licensed source registry and connector contracts.
+2. [x] Add the licensed source registry and connector contracts.
 3. [ ] Integrate conflict, humanitarian, and emergency feeds.
 4. [ ] Add global weather and infrastructure layers.
 5. [ ] Add maritime activity intelligence.

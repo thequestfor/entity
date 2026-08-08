@@ -1,6 +1,8 @@
 import json
 import urllib.request
 
+from agent.intelligence.source_registry import validate_connector_url
+
 
 class JsonConnector:
     source_id = "unknown"
@@ -26,6 +28,7 @@ class JsonConnector:
         raise NotImplementedError
 
     def fetch_json(self, url):
+        url = validate_connector_url(self, url)
         if self._fetch_json_override is not None:
             return self._fetch_json_override(url)
 

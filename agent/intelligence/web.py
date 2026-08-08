@@ -42,6 +42,12 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/intelligence/source-policies":
+            self._send_json({
+                "policies":self.server.intelligence_store.list_source_policies()
+            })
+            return
+
         if parsed.path == "/api/intelligence/reputations":
             query = parse_qs(parsed.query)
             self._send_json({

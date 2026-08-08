@@ -41,6 +41,9 @@ from agent.intelligence.ensemble_training import EnsembleTrainer
 from agent.intelligence.aircraft import AdsbLolAircraftMonitor
 from agent.intelligence.geospatial_intelligence import GeospatialIntelligenceEngine
 from agent.intelligence.world_graph import WorldEventGraphEngine
+from agent.intelligence.source_registry import (
+    policy_for, validate_connector_contract
+)
 
 
 @dataclass(frozen=True)
@@ -127,6 +130,7 @@ class IntelligenceWorker:
         self._thread = None
 
         for connector in self.connectors:
+            policy = validate_connector_contract(connector, policy_for(connector))
             self.store.register_source(
                 source_id=connector.source_id,
                 name=connector.name,
@@ -136,6 +140,7 @@ class IntelligenceWorker:
                 enabled=connector.enabled,
                 poll_seconds=connector.poll_seconds
             )
+            self.store.register_source_policy(connector.source_id, policy)
 
     @classmethod
     def from_config(cls, store, config):

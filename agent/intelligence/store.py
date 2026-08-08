@@ -174,6 +174,67 @@ class IntelligenceStore:
 
         return self._json_load(row["cursor"], {})
 
+    def register_source_policy(self, source_id, policy):
+        now = utc_now()
+        snapshot = policy.snapshot()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO source_policies
+                   (source_id,access_class,authority_class,evidence_role,
+                    license_name,license_url,attribution,usage_scope,
+                    credentials_required,geographic_coverage,expected_latency,
+                    independence_family,allowed_hosts,caveats,retention_days,
+                    policy_version,reviewed_at,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(source_id) DO UPDATE SET
+                   access_class=excluded.access_class,
+                   authority_class=excluded.authority_class,
+                   evidence_role=excluded.evidence_role,
+                   license_name=excluded.license_name,
+                   license_url=excluded.license_url,
+                   attribution=excluded.attribution,usage_scope=excluded.usage_scope,
+                   credentials_required=excluded.credentials_required,
+                   geographic_coverage=excluded.geographic_coverage,
+                   expected_latency=excluded.expected_latency,
+                   independence_family=excluded.independence_family,
+                   allowed_hosts=excluded.allowed_hosts,caveats=excluded.caveats,
+                   retention_days=excluded.retention_days,
+                   policy_version=excluded.policy_version,
+                   reviewed_at=excluded.reviewed_at,updated_at=excluded.updated_at""",
+                (source_id,snapshot["access_class"],snapshot["authority_class"],
+                 snapshot["evidence_role"],snapshot["license_name"],
+                 snapshot["license_url"],snapshot["attribution"],
+                 snapshot["usage_scope"],int(snapshot["credentials_required"]),
+                 snapshot["geographic_coverage"],snapshot["expected_latency"],
+                 snapshot["independence_family"],self._json(snapshot["allowed_hosts"]),
+                 self._json(snapshot["caveats"]),snapshot["retention_days"],
+                 snapshot["policy_version"],snapshot["reviewed_at"],now,now)
+            )
+            connection.execute(
+                """INSERT INTO source_contract_audits
+                   (source_id,outcome,violations,contract_snapshot,checked_at)
+                   VALUES (?,'valid','[]',?,?)""",
+                (source_id,self._json(snapshot),now)
+            )
+
+    def list_source_policies(self):
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT policies.*,sources.name,sources.kind,sources.enabled,
+                          sources.last_success_at,sources.last_error
+                   FROM source_policies policies
+                   JOIN sources ON sources.id=policies.source_id
+                   ORDER BY sources.enabled DESC,sources.name"""
+            ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["allowed_hosts"] = self._json_load(item.get("allowed_hosts"), [])
+            item["caveats"] = self._json_load(item.get("caveats"), [])
+            item["credentials_required"] = bool(item["credentials_required"])
+            output.append(item)
+        return output
+
     def source_due(self, source_id, now=None):
         now = now or datetime.now(UTC)
 

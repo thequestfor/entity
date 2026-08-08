@@ -50,6 +50,10 @@ from agent.intelligence.geospatial_intelligence import (
     GeospatialIntelligenceEngine, GeospatialPredictionFeatures
 )
 from agent.intelligence.world_graph import WorldEventGraphEngine
+from agent.intelligence.source_registry import (
+    ConnectorContractError, policy_for, validate_connector_contract,
+    validate_connector_url
+)
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
@@ -111,7 +115,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(23, version)
+        self.assertEqual(24, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -251,6 +255,46 @@ class IntelligenceStoreTests(unittest.TestCase):
         repeated = WorldEventGraphEngine(self.store, batch_size=20).run_batch()
         self.assertEqual(0, repeated.observations)
         self.assertEqual(1, self.store.world_graph_overview()["observations"])
+
+    def test_source_contracts_persist_role_license_and_host_allowlist(self):
+        class Connector:
+            source_id = "contract_fixture"
+            name = "Contract fixture"
+            kind = "test"
+            base_url = "https://contract.example.test/api"
+            credibility = .5
+            enabled = True
+            poll_seconds = 60
+
+            def poll(self, cursor=None):
+                return ConnectorBatch(cursor=cursor or {})
+
+        connector = Connector()
+        worker = IntelligenceWorker(self.store, [connector])
+        policies = self.store.list_source_policies()
+        self.assertEqual("report", policies[0]["evidence_role"])
+        self.assertEqual(["contract.example.test"], policies[0]["allowed_hosts"])
+        self.assertEqual("source-contract-v1", policies[0]["policy_version"])
+        self.assertEqual(policy_for(connector), validate_connector_contract(connector))
+        with self.assertRaises(ConnectorContractError):
+            validate_connector_url(connector, "https://untrusted.example/api")
+        worker.stop()
+
+    def test_source_contract_rejects_embedded_credentials(self):
+        class Connector:
+            source_id = "unsafe_fixture"
+            name = "Unsafe fixture"
+            kind = "test"
+            base_url = "https://user:password@example.test/api"
+            credibility = .5
+            enabled = True
+            poll_seconds = 60
+
+            def poll(self, cursor=None):
+                return ConnectorBatch()
+
+        with self.assertRaises(ConnectorContractError):
+            validate_connector_contract(Connector())
 
     def test_claim_migration_materializes_non_null_defaults_for_legacy_rows(self):
         legacy_path = Path(self.temporary_directory.name) / "legacy.db"
