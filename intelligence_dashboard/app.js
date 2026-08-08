@@ -407,7 +407,10 @@ function countryTooltip(name) {
 }
 
 function selectedHazardLayers() {
-  return elements.mapLayerToggles.filter((item) => item.checked).map((item) => item.value);
+  const layers = elements.mapLayerToggles
+    .filter((item) => item.checked).map((item) => item.value);
+  if (layers.includes("storm")) layers.push("weather");
+  return layers;
 }
 
 function mapSince() {
@@ -482,7 +485,9 @@ function renderNativeFeatures(payload) {
 }
 
 function addNativeFeature(feature) {
-  const kind = feature.feature_type || "other";
+  const kind = feature.feature_type === "weather"
+    ? "storm"
+    : feature.feature_type || "other";
   const geometry = feature.geometry && feature.geometry.coordinates ? feature.geometry : {
     type: "Point", coordinates: [feature.centroid_longitude, feature.centroid_latitude]
   };
@@ -501,7 +506,7 @@ function addNativeFeature(feature) {
   });
   const tooltip = document.createElement("div");
   const title = document.createElement("strong");
-  title.textContent = `${kind.replaceAll("-", " ")} · ${feature.severity_label || `${Math.round(Number(feature.severity || 0) * 100)}% severity`}`;
+  title.textContent = `${String(feature.feature_type || kind).replaceAll("-", " ")} · ${feature.severity_label || `${Math.round(Number(feature.severity || 0) * 100)}% severity`}`;
   const detail = document.createElement("span");
   detail.textContent = `${feature.source_id} · observed ${formatTime(feature.observed_at)}${feature.country_name ? ` · ${feature.country_name}` : ""}`;
   tooltip.append(title, detail);
