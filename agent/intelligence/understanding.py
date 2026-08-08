@@ -80,7 +80,7 @@ class UnderstandingEngine:
         model_claim_extraction_enabled=False,
         claim_extraction_max_claims=20,
         epistemic_backfill_enabled=True,
-        epistemic_backfill_batch_size=25
+        epistemic_backfill_batch_size=50
     ):
         self.store = store
         self.router = router or ModelRouter()
@@ -109,14 +109,7 @@ class UnderstandingEngine:
         self.last_backfill_result = None
 
     def analyze_pending(self, limit=250):
-        try:
-            self.last_backfill_result = self.epistemic_backfill.run_batch(
-                refresh=lambda connection, situation_id: self._refresh_situation(
-                    connection, situation_id
-                )
-            )
-        except Exception as exc:
-            print(f"Epistemic backfill batch failed: {exc}")
+        self.run_epistemic_backfill()
         if self.maintenance_enabled:
             self._maintain_situation_lifecycle()
         self.clusterer.backfill_features(self.store, limit=500)
@@ -203,6 +196,19 @@ class UnderstandingEngine:
         except Exception as exc:
             self._finish_run(run_id, error=exc)
             raise
+
+    def run_epistemic_backfill(self):
+        if self.last_backfill_result and self.last_backfill_result.completed:
+            return self.last_backfill_result
+        try:
+            self.last_backfill_result = self.epistemic_backfill.run_batch(
+                refresh=lambda connection, situation_id: self._refresh_situation(
+                    connection, situation_id
+                )
+            )
+        except Exception as exc:
+            print(f"Epistemic backfill batch failed: {exc}")
+        return self.last_backfill_result
 
     def _pending_synthesis_situations(self, limit=25):
         with self.store._connect() as connection:

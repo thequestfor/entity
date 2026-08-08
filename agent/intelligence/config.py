@@ -40,7 +40,7 @@ class IntelligenceConfig:
     model_claim_extraction_enabled: bool = False
     claim_extraction_max_claims: int = 20
     epistemic_backfill_enabled: bool = True
-    epistemic_backfill_batch_size: int = 25
+    epistemic_backfill_batch_size: int = 50
     cluster_auto_link_threshold: float = 0.82
     cluster_review_threshold: float = 0.65
     cluster_lookback_days: int = 14
@@ -186,7 +186,7 @@ class IntelligenceConfig:
                 "ENTITY_EPISTEMIC_BACKFILL_ENABLED", True
             ),
             epistemic_backfill_batch_size=_env_int(
-                "ENTITY_EPISTEMIC_BACKFILL_BATCH_SIZE", 25,
+                "ENTITY_EPISTEMIC_BACKFILL_BATCH_SIZE", 50,
                 minimum=1, maximum=100
             ),
             cluster_auto_link_threshold=_env_float(

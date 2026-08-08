@@ -339,6 +339,15 @@ class IntelligenceWorker:
         self.last_forecast_result = {"created": 0, "resolved": 0}
         changed = sum(outcome.result.changed for outcome in outcomes)
         analysis_due = changed or force or now >= self._next_analysis_at
+        if not analysis_due:
+            try:
+                backfill = getattr(
+                    self.understanding, "run_epistemic_backfill", None
+                )
+                if callable(backfill):
+                    backfill()
+            except Exception as exc:
+                print("Intelligence epistemic backfill cycle failed:", exc)
         update_watchdog = None
         try:
             if analysis_due:
