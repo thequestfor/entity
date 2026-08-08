@@ -254,6 +254,25 @@ function renderSituationDetail(detail) {
     claims.append(row);
   }
   elements.situationDetail.append(claims);
+  const hypotheses = document.createElement("div");
+  hypotheses.className = "hypotheses";
+  for (const hypothesis of detail.hypotheses ?? []) {
+    const card = document.createElement("div");
+    card.className = "hypothesis";
+    const title = document.createElement("strong");
+    title.textContent = `${Math.round(Number(hypothesis.probability || 0) * 100)}% · ${hypothesis.title}`;
+    const description = document.createElement("small");
+    description.textContent = hypothesis.description;
+    const falsifier = document.createElement("small");
+    falsifier.textContent = `Would change Entity's mind: ${(hypothesis.falsifiers ?? []).join(" ")}`;
+    card.append(title, description, falsifier);
+    hypotheses.append(card);
+  }
+  if (hypotheses.childElementCount) {
+    const heading = document.createElement("h3");
+    heading.textContent = "Competing hypotheses";
+    elements.situationDetail.append(heading, hypotheses);
+  }
   const history = document.createElement("p");
   history.className = "history-heading";
   history.textContent = `${detail.documents?.length ?? 0} linked evidence record(s) · confidence history`;

@@ -225,6 +225,9 @@ select {
   font-size: 10px;
 }
 .claims { display: grid; gap: 7px; margin-top: 14px; }
+.hypotheses { display: grid; gap: 7px; margin: 12px 0; }
+.hypothesis { display: grid; gap: 4px; padding: 10px; border-left: 2px solid #a87be7; background: rgba(43, 22, 62, .2); }
+.hypothesis small { color: #a99abd; font-size: 10px; line-height: 1.4; }
 .claim { display: grid; gap: 3px; padding: 9px 11px; background: rgba(4, 15, 18, 0.5); }
 .claim span { color: #cfe8e5; font-size: 12px; }
 .claim-evidence { display: flex; flex-wrap: wrap; gap: 8px; }

@@ -52,6 +52,10 @@ class ClaimCandidate:
     predicate: str
     value: str
     excerpt: str = ""
+    claim_type: str = "reported_fact"
+    verifiability: str = "unknown"
+    attribution: str = "source_report"
+    topic: str = "general"
 
 
 @dataclass(frozen=True)
@@ -969,8 +973,9 @@ class UnderstandingEngine:
                     INSERT INTO claims (
                         id, situation_id, subject, predicate, object,
                         normalized_object, first_seen_at, last_seen_at,
-                        created_at, updated_at
-                    ) VALUES (?, ?, 'situation', ?, ?, ?, ?, ?, ?, ?)
+                        created_at, updated_at, claim_type, verifiability,
+                        attribution, topic
+                    ) VALUES (?, ?, 'situation', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         claim_id,
@@ -981,7 +986,11 @@ class UnderstandingEngine:
                         seen_at,
                         seen_at,
                         now,
-                        now
+                        now,
+                        candidate.claim_type,
+                        candidate.verifiability,
+                        candidate.attribution,
+                        candidate.topic
                     )
                 )
                 created += 1
@@ -1162,6 +1171,7 @@ class UnderstandingEngine:
             """,
             (summary, status, round(confidence, 4), now, situation_id)
         )
+        self._refresh_hypotheses(connection, situation_id, confidence)
         snapshot = {
             "status": status,
             "confidence": round(confidence, 4),
@@ -1225,10 +1235,64 @@ class UnderstandingEngine:
             """,
             (claim_id,)
         ).fetchall()
+        claim = connection.execute(
+            "SELECT claim_type, verifiability FROM claims WHERE id = ?",
+            (claim_id,)
+        ).fetchone()
         remaining_uncertainty = 1.0
         for row in weights:
             remaining_uncertainty *= 1.0 - (float(row["weight"]) * 0.78)
-        return max(0.05, min(0.99, 1.0 - remaining_uncertainty))
+        confidence = max(0.05, min(0.99, 1.0 - remaining_uncertainty))
+        if claim and claim["claim_type"] in {"interpretation", "causal_claim"}:
+            return min(confidence, 0.55)
+        if claim and claim["verifiability"] == "unknown":
+            return min(confidence, 0.75)
+        return confidence
+
+    def _refresh_hypotheses(self, connection, situation_id, confidence):
+        rows = connection.execute(
+            "SELECT id, status, predicate FROM claims WHERE situation_id = ? "
+            "AND status != 'superseded'", (situation_id,)
+        ).fetchall()
+        supported = [row["id"] for row in rows if row["status"] == "active"]
+        contested = [row["id"] for row in rows if row["status"] == "contested"]
+        hypotheses = [
+            ("The reported event is substantially accurate", confidence, supported,
+             contested, ["A credible independent source contradicts a core factual claim.",
+                         "Primary evidence fails to support a checkable reported detail."]),
+            ("The event occurred, but material details remain uncertain",
+             1.0 - confidence * 0.6, contested, supported,
+             ["Independent primary evidence confirms disputed details.",
+              "Independent reporting converges on the same checkable facts."])
+        ]
+        if contested:
+            hypotheses.append((
+                "The situation combines incompatible accounts or distinct events",
+                min(0.8, 0.25 + len(contested) * 0.12), contested, supported,
+                ["A shared event identifier reconciles conflicting claims.",
+                 "Time, location, and provenance show the accounts concern one event."]
+            ))
+        now = utc_now()
+        for title, probability, supports, contradicts, falsifiers in hypotheses:
+            connection.execute(
+                """
+                INSERT INTO situation_hypotheses (
+                    id, situation_id, title, description, probability, status,
+                    supporting_claim_ids, contradicting_claim_ids, falsifiers,
+                    method, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(situation_id, title, method) DO UPDATE SET
+                    probability = excluded.probability,
+                    supporting_claim_ids = excluded.supporting_claim_ids,
+                    contradicting_claim_ids = excluded.contradicting_claim_ids,
+                    falsifiers = excluded.falsifiers, updated_at = excluded.updated_at
+                """,
+                (str(uuid4()), situation_id, title,
+                 "Deterministic alternative retained so source consensus cannot veto contradictory evidence.",
+                 round(max(0.05, min(0.95, probability)), 4),
+                 self.store._json(supports), self.store._json(contradicts),
+                 self.store._json(falsifiers), "deterministic-alternatives-v1", now, now)
+            )
 
     def _write_briefing(self, connection, hours=24):
         end = datetime.now(UTC)
@@ -1317,9 +1381,10 @@ class UnderstandingEngine:
 def extract_claims(document):
     metadata = document.get("metadata") or {}
     excerpt = document.get("summary") or document.get("title") or ""
+    topic = str(document.get("category") or "general")
     claims = [
-        ClaimCandidate("event.category", document.get("category", "general"), excerpt),
-        ClaimCandidate("event.reported", "yes", excerpt)
+        ClaimCandidate("event.category", topic, excerpt, "classification", "checkable", "source_metadata", topic),
+        ClaimCandidate("event.reported", "yes", excerpt, "reported_fact", "unknown", "source_report", topic)
     ]
     scalar_fields = {
         "magnitude": "seismic.magnitude",
@@ -1335,7 +1400,8 @@ def extract_claims(document):
             continue
         if field == "closed_at":
             value = "true"
-        claims.append(ClaimCandidate(predicate, _value_text(value), excerpt))
+        claim_type = "quantitative_fact" if field == "magnitude" else "direct_fact"
+        claims.append(ClaimCandidate(predicate, _value_text(value), excerpt, claim_type, "checkable", "source_metadata", topic))
 
     for field, predicate in (
         ("countries", "event.affected_country"),
@@ -1347,7 +1413,7 @@ def extract_claims(document):
             values = [values]
         for value in values:
             if value not in (None, ""):
-                claims.append(ClaimCandidate(predicate, _value_text(value), excerpt))
+                claims.append(ClaimCandidate(predicate, _value_text(value), excerpt, "direct_fact", "checkable", "source_metadata", topic))
 
     unique = {}
     for claim in claims:

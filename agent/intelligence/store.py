@@ -781,6 +781,14 @@ class IntelligenceStore:
                 """,
                 (situation_id,)
             ).fetchall()
+            hypotheses = connection.execute(
+                """
+                SELECT * FROM situation_hypotheses
+                WHERE situation_id = ? AND status = 'active'
+                ORDER BY probability DESC, updated_at DESC
+                """,
+                (situation_id,)
+            ).fetchall()
 
         evidence_by_claim = {}
         for evidence in claim_evidence:
@@ -801,6 +809,15 @@ class IntelligenceStore:
             "worldview_syntheses": [
                 self._worldview_synthesis_from_row(row)
                 for row in syntheses
+            ],
+            "hypotheses": [
+                {
+                    **dict(row),
+                    "supporting_claim_ids": self._json_load(row["supporting_claim_ids"], []),
+                    "contradicting_claim_ids": self._json_load(row["contradicting_claim_ids"], []),
+                    "falsifiers": self._json_load(row["falsifiers"], [])
+                }
+                for row in hypotheses
             ]
         }
 
