@@ -14,6 +14,7 @@ from agent.intelligence.claim_extraction import (
     HybridClaimExtractor
 )
 from agent.intelligence.epistemic_backfill import EpistemicBackfill
+from agent.intelligence.geospatial import SituationGeography
 from agent.models.router import ModelRouter
 
 
@@ -83,6 +84,7 @@ class UnderstandingEngine:
         epistemic_backfill_batch_size=50
     ):
         self.store = store
+        self.geography = SituationGeography()
         self.router = router or ModelRouter()
         self.synthesis_per_cycle = max(1, min(50, int(synthesis_per_cycle)))
         self.synthesis_batch_size = max(1, min(10, int(synthesis_batch_size)))
@@ -967,6 +969,7 @@ class UnderstandingEngine:
             """,
             (situation_id, document["id"], 1.0, now)
         )
+        self.geography.reconcile(connection, situation_id)
         self.clusterer.record_link(
             connection, document, situation_id, decision
         )
@@ -1153,6 +1156,7 @@ class UnderstandingEngine:
         )
 
     def _refresh_situation(self, connection, situation_id):
+        self.geography.reconcile(connection, situation_id)
         claims = connection.execute(
             """
             SELECT claims.id, claims.predicate, claims.normalized_object,

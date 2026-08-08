@@ -798,6 +798,57 @@ class IntelligenceStore:
             rows = connection.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
+    def geography_overview(self, limit=200):
+        """Return map-ready situations plus country rollups, all read-only."""
+        situations = self.list_situations(limit=limit, located_only=True)
+        countries = {}
+        for item in situations:
+            name = str(item.get("location_country_name") or "").strip()
+            if not name:
+                continue
+            entry = countries.setdefault(name, {
+                "country_name": name,
+                "country_code": item.get("location_country_code") or "",
+                "situations": 0, "active": 0, "contested": 0,
+                "average_location_confidence": 0.0
+            })
+            entry["situations"] += 1
+            entry["active"] += int(item.get("status") == "active")
+            entry["contested"] += int(item.get("status") == "contested")
+            entry["average_location_confidence"] += float(item.get("location_confidence") or 0)
+        values = list(countries.values())
+        for item in values:
+            item["average_location_confidence"] = round(item["average_location_confidence"] / item["situations"], 4)
+        values.sort(key=lambda item: (-item["active"], -item["situations"], item["country_name"]))
+        return {"situations": situations, "countries": values}
+
+    def replace_aircraft_states(self, states, source_id="opensky"):
+        now = utc_now()
+        with self._connect() as connection:
+            for state in states:
+                connection.execute(
+                    """INSERT INTO aircraft_states (icao24,callsign,origin_country,latitude,longitude,altitude_m,
+                      velocity_mps,heading_degrees,vertical_rate_mps,on_ground,last_contact_at,observed_at,source_id,updated_at)
+                      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                      ON CONFLICT(icao24) DO UPDATE SET callsign=excluded.callsign,origin_country=excluded.origin_country,
+                      latitude=excluded.latitude,longitude=excluded.longitude,altitude_m=excluded.altitude_m,
+                      velocity_mps=excluded.velocity_mps,heading_degrees=excluded.heading_degrees,
+                      vertical_rate_mps=excluded.vertical_rate_mps,on_ground=excluded.on_ground,
+                      last_contact_at=excluded.last_contact_at,observed_at=excluded.observed_at,source_id=excluded.source_id,updated_at=excluded.updated_at""",
+                    (state["icao24"], state.get("callsign", ""), state.get("origin_country", ""), state["latitude"], state["longitude"],
+                     state.get("altitude_m"), state.get("velocity_mps"), state.get("heading_degrees"), state.get("vertical_rate_mps"),
+                     int(bool(state.get("on_ground"))), state.get("last_contact_at"), state.get("observed_at", now), source_id, now)
+                )
+            connection.execute("DELETE FROM aircraft_states WHERE julianday(?) - julianday(observed_at) > 0.05", (now,))
+
+    def list_aircraft_states(self, limit=300):
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM aircraft_states WHERE julianday('now')-julianday(observed_at)<=0.05 ORDER BY observed_at DESC LIMIT ?",
+                (max(1, min(1000, int(limit))),)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_situation(self, situation_id):
         with self._connect() as connection:
             situation = connection.execute(

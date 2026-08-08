@@ -62,10 +62,18 @@
                 <option value="all">All located</option>
               </select>
             </label>
+            <label>
+              Country
+              <select id="map-country-filter"><option value="">All countries</option></select>
+            </label>
+            <label class="map-toggle"><input id="map-labels-toggle" type="checkbox" checked /> Labels</label>
+            <label class="map-toggle"><input id="map-aircraft-toggle" type="checkbox" /> Aircraft</label>
             <span id="map-status">Loading located situations…</span>
           </div>
         </div>
         <div class="world-map" id="world-map" aria-label="Located situations"></div>
+        <div class="country-breakdown" id="country-breakdown" aria-live="polite"></div>
+        <p class="map-disclaimer">Locations are reconciled from cited source metadata and coordinates. Aircraft are approximate live ADS-B state vectors, not air-traffic-control data.</p>
       </section>
 
       <section class="layout">

@@ -38,6 +38,7 @@ from agent.intelligence.acquisition import ActiveAcquisitionEngine
 from agent.intelligence.verification import VerificationEngine
 from agent.intelligence.claim_grounding import ClaimGroundingEngine
 from agent.intelligence.ensemble_training import EnsembleTrainer
+from agent.intelligence.aircraft import OpenSkyAircraftMonitor
 
 
 @dataclass(frozen=True)
@@ -71,7 +72,9 @@ class IntelligenceWorker:
         forecast_poll_seconds=900,
         source_backoff_max_seconds=21600,
         activity_watchdog_seconds=90,
-        on_activity=None
+        on_activity=None,
+        aircraft_monitor=None,
+        geography_batch_size=50
     ):
         self.store = store
         self.connectors = list(connectors)
@@ -112,6 +115,8 @@ class IntelligenceWorker:
         self._source_failures = {}
         self._source_retry_at = {}
         self.on_activity = on_activity
+        self.aircraft_monitor = aircraft_monitor
+        self.geography_batch_size = max(1, min(500, int(geography_batch_size)))
         self._stop = threading.Event()
         self._thread = None
 
@@ -363,6 +368,12 @@ class IntelligenceWorker:
             store, enabled=config.active_acquisition_enabled,
             max_per_cycle=config.active_acquisition_per_cycle, queue=queue
         )
+        aircraft_monitor = OpenSkyAircraftMonitor(
+            store, enabled=config.aircraft_enabled, bounds=config.aircraft_bounds,
+            client_id=config.opensky_client_id, client_secret=config.opensky_client_secret,
+            poll_seconds=config.aircraft_poll_seconds, max_states=config.aircraft_max_states,
+            timeout=config.request_timeout_seconds
+        )
         return cls(
             store=store,
             connectors=connectors,
@@ -383,7 +394,9 @@ class IntelligenceWorker:
             analysis_poll_seconds=config.analysis_poll_seconds,
             forecast_poll_seconds=config.forecast_poll_seconds,
             source_backoff_max_seconds=config.source_backoff_max_seconds,
-            activity_watchdog_seconds=config.activity_watchdog_seconds
+            activity_watchdog_seconds=config.activity_watchdog_seconds,
+            aircraft_monitor=aircraft_monitor,
+            geography_batch_size=config.geography_backfill_batch_size
         )
 
     @property
@@ -437,6 +450,14 @@ class IntelligenceWorker:
         self.last_reputation_result = ReputationResult()
         self.last_forecast_result = {"created": 0, "resolved": 0}
         changed = sum(outcome.result.changed for outcome in outcomes)
+        if self.aircraft_monitor is not None:
+            self.aircraft_monitor.run_if_due(force=force)
+        try:
+            self.understanding.geography.reconcile_batch(
+                self.store, self.geography_batch_size
+            )
+        except Exception as exc:
+            print("Intelligence geography reconciliation failed:", type(exc).__name__)
         analysis_due = changed or force or now >= self._next_analysis_at
         try:
             self.belief_revision.run_batch()

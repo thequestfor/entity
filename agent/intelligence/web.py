@@ -142,6 +142,20 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/intelligence/geography":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.geography_overview(
+                limit=_query_int(query, "limit", 200)
+            ))
+            return
+
+        if parsed.path == "/api/intelligence/aircraft":
+            query = parse_qs(parsed.query)
+            self._send_json({"aircraft": self.server.intelligence_store.list_aircraft_states(
+                limit=_query_int(query, "limit", 300)
+            )})
+            return
+
         situation_prefix = "/api/intelligence/situations/"
         if parsed.path.startswith(situation_prefix):
             situation_id = unquote(parsed.path[len(situation_prefix):])

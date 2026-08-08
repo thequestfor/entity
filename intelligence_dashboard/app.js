@@ -13,6 +13,10 @@ const elements = {
   worldMap: document.querySelector("#world-map"),
   mapStatus: document.querySelector("#map-status"),
   mapPriorityFilter: document.querySelector("#map-priority-filter"),
+  mapCountryFilter: document.querySelector("#map-country-filter"),
+  mapLabelsToggle: document.querySelector("#map-labels-toggle"),
+  mapAircraftToggle: document.querySelector("#map-aircraft-toggle"),
+  countryBreakdown: document.querySelector("#country-breakdown"),
   situationList: document.querySelector("#situation-list"),
   situationDetail: document.querySelector("#situation-detail"),
   documentFeed: document.querySelector("#document-feed"),
@@ -40,6 +44,9 @@ const elements = {
 let selectedCategory = "";
 let selectedSituationId = "";
 let mapPriority = "priority";
+let mapCountry = "";
+let mapLabels = true;
+let aircraft = [];
 
 async function request(path) {
   const response = await fetch(path, {
@@ -158,9 +165,10 @@ function renderMap(situations) {
   const located = situations.filter((situation) =>
     Number.isFinite(situation.latitude) && Number.isFinite(situation.longitude)
   );
-  const displayed = selectMapSituations(located);
+  const countryLocated = mapCountry ? located.filter((item) => item.location_country_name === mapCountry) : located;
+  const displayed = selectMapSituations(countryLocated);
   elements.mapStatus.textContent = displayed.length
-    ? `${displayed.length} shown · ${located.length} located available`
+    ? `${displayed.length} shown · ${countryLocated.length} in view · ${located.length} located`
     : "No located situations in this view";
   if (!displayed.length) {
     const empty = document.createElement("p");
@@ -169,21 +177,73 @@ function renderMap(situations) {
     elements.worldMap.append(empty);
     return;
   }
-  for (const situation of displayed) {
+  for (const group of clusterMapSituations(displayed)) {
+    const situation = group.items[0];
     const point = document.createElement("button");
     point.type = "button";
-    point.className = "map-point";
+    point.className = group.items.length > 1 ? "map-point map-cluster" : "map-point";
     point.dataset.status = situation.status;
     point.dataset.situationId = situation.id;
     point.dataset.selected = String(situation.id === selectedSituationId);
-    point.style.left = `${((situation.longitude + 180) / 360) * 100}%`;
-    point.style.top = `${((90 - situation.latitude) / 180) * 100}%`;
-    point.title = `${situation.title} · ${Math.round(situation.confidence * 100)}%`;
+    point.style.left = `${((group.longitude + 180) / 360) * 100}%`;
+    point.style.top = `${((90 - group.latitude) / 180) * 100}%`;
+    point.title = group.items.length > 1 ? `${group.items.length} nearby situations · select highest priority` : `${situation.title} · ${Math.round(situation.confidence * 100)}%`;
     point.setAttribute("aria-label", point.title);
+    if (group.items.length > 1) point.textContent = group.items.length;
     point.addEventListener("click", () => selectSituation(situation.id));
     elements.worldMap.append(point);
+    if (mapLabels && group.items.length === 1 && (situation.location_label || situation.location_country_name)) {
+      const label = document.createElement("span");
+      label.className = "map-label";
+      label.style.left = point.style.left;
+      label.style.top = point.style.top;
+      label.textContent = situation.location_label || situation.location_country_name;
+      elements.worldMap.append(label);
+    }
+  }
+  if (elements.mapAircraftToggle.checked) renderAircraft();
+}
+
+function clusterMapSituations(situations) {
+  const buckets = new Map();
+  for (const item of situations) {
+    const key = `${Math.floor((item.longitude + 180) / 20)}:${Math.floor((item.latitude + 90) / 15)}`;
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(item); buckets.set(key, bucket);
+  }
+  return [...buckets.values()].map((items) => {
+    items.sort((a, b) => mapPriorityScore(b) - mapPriorityScore(a));
+    return { items, longitude: items.reduce((sum, item) => sum + item.longitude, 0) / items.length, latitude: items.reduce((sum, item) => sum + item.latitude, 0) / items.length };
+  });
+}
+
+function renderAircraft() {
+  for (const state of aircraft) {
+    if (!Number.isFinite(state.latitude) || !Number.isFinite(state.longitude)) continue;
+    const marker = document.createElement("span");
+    marker.className = "aircraft-point";
+    marker.style.left = `${((state.longitude + 180) / 360) * 100}%`;
+    marker.style.top = `${((90 - state.latitude) / 180) * 100}%`;
+    marker.style.transform = `translate(-50%, -50%) rotate(${Number(state.heading_degrees || 0)}deg)`;
+    marker.title = `${state.callsign || state.icao24} · ${state.origin_country || "origin unknown"}`;
+    elements.worldMap.append(marker);
   }
 }
+
+function renderCountries(countries) {
+  const current = elements.mapCountryFilter.value;
+  elements.mapCountryFilter.replaceChildren(new Option("All countries", ""));
+  for (const country of countries) elements.mapCountryFilter.add(new Option(`${country.country_name} · ${country.active} active`, country.country_name));
+  elements.mapCountryFilter.value = current;
+  elements.countryBreakdown.replaceChildren();
+  for (const country of countries.slice(0, 12)) {
+    const button = document.createElement("button"); button.type = "button"; button.className = "country-row";
+    button.textContent = `${country.country_name}  ${country.active} active · ${country.situations} total`;
+    button.addEventListener("click", () => { elements.mapCountryFilter.value = country.country_name; mapCountry = country.country_name; renderMap(lastMapSituations); });
+    elements.countryBreakdown.append(button);
+  }
+}
+let lastMapSituations = [];
 
 function selectMapSituations(situations) {
   if (mapPriority === "all") return situations;
@@ -246,7 +306,8 @@ function renderSituationDetail(detail) {
     marker.style.top = `${((90 - situation.latitude) / 180) * 100}%`;
     marker.title = `${situation.latitude.toFixed(3)}, ${situation.longitude.toFixed(3)}`;
     const label = document.createElement("span");
-    label.textContent = `Reported location: ${situation.latitude.toFixed(3)}, ${situation.longitude.toFixed(3)}`;
+    const place = situation.location_label || situation.location_country_name || "reported coordinates";
+    label.textContent = `${place} · ${Math.round((situation.location_confidence || 0) * 100)}% geographic confidence · ${situation.latitude.toFixed(3)}, ${situation.longitude.toFixed(3)}`;
     map.append(marker, label);
     elements.situationDetail.append(map);
   }
@@ -481,22 +542,26 @@ async function refresh() {
     const mapQuery = new URLSearchParams(categoryQuery);
     mapQuery.set("located", "1");
     mapQuery.set("limit", "200");
-    const [overview, documents, sources, situations, mapSituations, briefing, reputations, forecasts, epistemicHealth] = await Promise.all([
+    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, aircraftResponse] = await Promise.all([
       request("/api/intelligence/overview"),
       request(`/api/intelligence/documents${category}`),
       request("/api/intelligence/sources"),
       request(`/api/intelligence/situations${category}`),
-      request(`/api/intelligence/situations?${mapQuery.toString()}`),
+      request(`/api/intelligence/geography?${mapQuery.toString()}`),
       request("/api/intelligence/briefing"),
       request("/api/intelligence/reputations"),
       request("/api/intelligence/forecasts"),
-      request("/api/intelligence/epistemic-health")
+      request("/api/intelligence/epistemic-health"),
+      request("/api/intelligence/aircraft?limit=300")
     ]);
     renderOverview(overview);
     renderDocuments(documents.documents ?? []);
     renderSources(sources.sources ?? []);
     renderSituations(situations.situations ?? []);
-    renderMap(mapSituations.situations ?? []);
+    lastMapSituations = geography.situations ?? [];
+    aircraft = aircraftResponse.aircraft ?? [];
+    renderCountries(geography.countries ?? []);
+    renderMap(lastMapSituations);
     renderBriefing(briefing);
     renderReputations(reputations.reputations ?? []);
     renderForecasts(forecasts.forecasts ?? [], forecasts.calibration ?? {});
@@ -516,6 +581,9 @@ elements.mapPriorityFilter.addEventListener("change", () => {
   mapPriority = elements.mapPriorityFilter.value;
   refresh();
 });
+elements.mapCountryFilter.addEventListener("change", () => { mapCountry = elements.mapCountryFilter.value; renderMap(lastMapSituations); });
+elements.mapLabelsToggle.addEventListener("change", () => { mapLabels = elements.mapLabelsToggle.checked; renderMap(lastMapSituations); });
+elements.mapAircraftToggle.addEventListener("change", () => renderMap(lastMapSituations));
 
 refresh();
 setInterval(refresh, 5000);

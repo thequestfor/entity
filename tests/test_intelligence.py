@@ -106,9 +106,35 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(20, version)
+        self.assertEqual(21, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
+
+    def test_geography_reconciles_source_country_and_resists_far_outlier(self):
+        now = datetime.now(UTC).isoformat()
+        self.store.ingest_items("fixture", [
+            SourceItem("geo-one", "Port disruption", "https://example.test/one",
+                       published_at=now, latitude=31.20, longitude=29.90,
+                       metadata={"country_code": "EG", "city": "Alexandria"}),
+            SourceItem("geo-two", "Port disruption update", "https://example.test/two",
+                       published_at=now, latitude=31.22, longitude=29.91,
+                       metadata={"country": "Egypt", "city": "Alexandria"}),
+        ])
+        engine = UnderstandingEngine(self.store)
+        engine.analyze_pending()
+        situation = self.store.list_situations(located_only=True)[0]
+        self.assertEqual("Egypt", situation["location_country_name"])
+        self.assertEqual("Alexandria", situation["location_label"])
+        self.assertGreater(situation["location_confidence"], .5)
+
+    def test_aircraft_cache_is_not_a_situation_or_claim(self):
+        self.store.replace_aircraft_states([{
+            "icao24": "abc123", "callsign": "TEST1", "origin_country": "Testland",
+            "latitude": 40.0, "longitude": -73.0, "heading_degrees": 90,
+        }])
+        states = self.store.list_aircraft_states()
+        self.assertEqual("abc123", states[0]["icao24"])
+        self.assertEqual([], self.store.list_situations())
 
     def test_claim_migration_materializes_non_null_defaults_for_legacy_rows(self):
         legacy_path = Path(self.temporary_directory.name) / "legacy.db"
@@ -2551,6 +2577,16 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ) as response:
                     located_situations = json.loads(response.read())["situations"]
                 with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/geography",
+                    timeout=2
+                ) as response:
+                    geography = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/aircraft",
+                    timeout=2
+                ) as response:
+                    aircraft = json.loads(response.read())
+                with urllib.request.urlopen(
                     dashboard.url
                     + "api/intelligence/situations/"
                     + situations[0]["id"],
@@ -2581,6 +2617,8 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertEqual(1, len(situations))
                 self.assertEqual(1, len(located_situations))
                 self.assertEqual(35.0, located_situations[0]["latitude"])
+                self.assertIn("countries", geography)
+                self.assertEqual([], aircraft["aircraft"])
                 self.assertGreater(len(situation_detail["claims"]), 0)
                 self.assertEqual(1, briefing["situation_count"])
                 self.assertIn("reputations", reputations)
