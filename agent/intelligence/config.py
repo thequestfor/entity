@@ -102,11 +102,10 @@ class IntelligenceConfig:
     firms_source: str = "VIIRS_SNPP_NRT"
     firms_days: int = 1
     aircraft_enabled: bool = False
-    aircraft_bounds: str = ""
+    aircraft_center: str = ""
+    aircraft_radius_nm: int = 100
     aircraft_poll_seconds: int = 120
     aircraft_max_states: int = 300
-    opensky_client_id: str = ""
-    opensky_client_secret: str = ""
     geography_backfill_batch_size: int = 50
     world_bank_enabled: bool = True
     world_bank_countries: tuple[str, ...] = ("WLD",)
@@ -419,11 +418,10 @@ class IntelligenceConfig:
             ).strip() or "VIIRS_SNPP_NRT",
             firms_days=_env_int("ENTITY_FIRMS_DAYS", 1, minimum=1),
             aircraft_enabled=_env_bool("ENTITY_AIRCRAFT_ENABLED", False),
-            aircraft_bounds=os.getenv("ENTITY_AIRCRAFT_BOUNDS", "").strip(),
+            aircraft_center=os.getenv("ENTITY_AIRCRAFT_CENTER", "").strip(),
+            aircraft_radius_nm=_env_int("ENTITY_AIRCRAFT_RADIUS_NM", 100, minimum=1, maximum=250),
             aircraft_poll_seconds=_env_int("ENTITY_AIRCRAFT_POLL_SECONDS", 120, minimum=60),
             aircraft_max_states=_env_int("ENTITY_AIRCRAFT_MAX_STATES", 300, minimum=1, maximum=1000),
-            opensky_client_id=os.getenv("ENTITY_OPENSKY_CLIENT_ID", "").strip(),
-            opensky_client_secret=os.getenv("ENTITY_OPENSKY_CLIENT_SECRET", "").strip(),
             geography_backfill_batch_size=_env_int("ENTITY_GEOGRAPHY_BACKFILL_BATCH_SIZE", 50, minimum=1, maximum=500),
             world_bank_enabled=_env_bool("ENTITY_WORLD_BANK_ENABLED", True),
             world_bank_countries=_env_csv(

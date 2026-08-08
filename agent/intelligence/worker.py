@@ -38,7 +38,7 @@ from agent.intelligence.acquisition import ActiveAcquisitionEngine
 from agent.intelligence.verification import VerificationEngine
 from agent.intelligence.claim_grounding import ClaimGroundingEngine
 from agent.intelligence.ensemble_training import EnsembleTrainer
-from agent.intelligence.aircraft import OpenSkyAircraftMonitor
+from agent.intelligence.aircraft import AdsbLolAircraftMonitor
 
 
 @dataclass(frozen=True)
@@ -368,9 +368,9 @@ class IntelligenceWorker:
             store, enabled=config.active_acquisition_enabled,
             max_per_cycle=config.active_acquisition_per_cycle, queue=queue
         )
-        aircraft_monitor = OpenSkyAircraftMonitor(
-            store, enabled=config.aircraft_enabled, bounds=config.aircraft_bounds,
-            client_id=config.opensky_client_id, client_secret=config.opensky_client_secret,
+        aircraft_monitor = AdsbLolAircraftMonitor(
+            store, enabled=config.aircraft_enabled, center=config.aircraft_center,
+            radius_nm=config.aircraft_radius_nm,
             poll_seconds=config.aircraft_poll_seconds, max_states=config.aircraft_max_states,
             timeout=config.request_timeout_seconds
         )

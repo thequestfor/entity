@@ -181,7 +181,7 @@ function renderMap(situations) {
     const situation = group.items[0];
     const point = document.createElement("button");
     point.type = "button";
-    point.className = group.items.length > 1 ? "map-point map-cluster" : "map-point";
+    point.className = `map-point map-hazard-${group.kind}` + (group.items.length > 1 ? " map-cluster" : "");
     point.dataset.status = situation.status;
     point.dataset.situationId = situation.id;
     point.dataset.selected = String(situation.id === selectedSituationId);
@@ -207,14 +207,24 @@ function renderMap(situations) {
 function clusterMapSituations(situations) {
   const buckets = new Map();
   for (const item of situations) {
-    const key = `${Math.floor((item.longitude + 180) / 20)}:${Math.floor((item.latitude + 90) / 15)}`;
+    const kind = hazardKind(item);
+    const key = `${kind}:${Math.floor((item.longitude + 180) / 20)}:${Math.floor((item.latitude + 90) / 15)}`;
     const bucket = buckets.get(key) ?? [];
     bucket.push(item); buckets.set(key, bucket);
   }
   return [...buckets.values()].map((items) => {
     items.sort((a, b) => mapPriorityScore(b) - mapPriorityScore(a));
-    return { items, longitude: items.reduce((sum, item) => sum + item.longitude, 0) / items.length, latitude: items.reduce((sum, item) => sum + item.latitude, 0) / items.length };
+    return { items, kind: hazardKind(items[0]), longitude: items.reduce((sum, item) => sum + item.longitude, 0) / items.length, latitude: items.reduce((sum, item) => sum + item.latitude, 0) / items.length };
   });
+}
+
+function hazardKind(situation) {
+  const value = `${situation.category || ""} ${situation.title || ""}`.toLowerCase();
+  if (/wildfire|wildfires|fire alert|vegetation fire/.test(value)) return "wildfire";
+  if (/earthquake|seismic|\beq\b/.test(value)) return "earthquake";
+  if (/flood|inundation/.test(value)) return "flood";
+  if (/storm|cyclone|hurricane|typhoon|tornado|weather-alert/.test(value)) return "storm";
+  return "other";
 }
 
 function renderAircraft() {

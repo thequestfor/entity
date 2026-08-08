@@ -72,8 +72,15 @@
           </div>
         </div>
         <div class="world-map" id="world-map" aria-label="Located situations"></div>
+        <div class="map-legend" aria-label="Map marker legend">
+          <span><i data-kind="wildfire"></i> Wildfire</span>
+          <span><i data-kind="earthquake"></i> Earthquake</span>
+          <span><i data-kind="flood"></i> Flood</span>
+          <span><i data-kind="storm"></i> Severe weather</span>
+          <span><i data-kind="other"></i> Other situation</span>
+        </div>
         <div class="country-breakdown" id="country-breakdown" aria-live="polite"></div>
-        <p class="map-disclaimer">Locations are reconciled from cited source metadata and coordinates. Aircraft are approximate live ADS-B state vectors, not air-traffic-control data.</p>
+        <p class="map-disclaimer">Hazard marks are based on Entity’s authoritative event feeds where available. Locations are reconciled from cited source metadata and coordinates. Aircraft are approximate crowd-sourced ADS-B state vectors, not air-traffic-control data.</p>
       </section>
 
       <section class="layout">

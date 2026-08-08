@@ -45,6 +45,7 @@ from agent.intelligence.authoritative_verification import (
     AuthoritativeVerificationRegistry, compare_observation
 )
 from agent.intelligence.ensemble_training import EnsembleTrainer
+from agent.intelligence.aircraft import AdsbLolAircraftMonitor
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
@@ -134,6 +135,21 @@ class IntelligenceStoreTests(unittest.TestCase):
         }])
         states = self.store.list_aircraft_states()
         self.assertEqual("abc123", states[0]["icao24"])
+        self.assertEqual([], self.store.list_situations())
+
+    def test_adsb_lol_monitor_is_bounded_and_only_updates_aircraft_cache(self):
+        monitor = AdsbLolAircraftMonitor(
+            self.store, enabled=True, center="40,-74", radius_nm=999,
+            max_states=5
+        )
+        self.assertEqual((40.0, -74.0), monitor.center)
+        self.assertEqual(250, monitor.radius_nm)
+        monitor._fetch = lambda: [{
+            "icao24": "adsb01", "latitude": 40.1, "longitude": -74.1,
+            "callsign": "TEST2"
+        }]
+        self.assertEqual(1, monitor.run_if_due(force=True))
+        self.assertEqual("adsb_lol", self.store.list_aircraft_states()[0]["source_id"])
         self.assertEqual([], self.store.list_situations())
 
     def test_claim_migration_materializes_non_null_defaults_for_legacy_rows(self):
