@@ -81,7 +81,7 @@ class ForecastEngine:
         if int(calibration.get("resolved") or 0) < 20:
             probability = min(0.85, max(0.15, probability))
         if (
-            len({item["publisher"] for item in evidence}) < 2
+            len({item["independence_key"] for item in evidence}) < 2
             and max(item["source_credibility"] for item in evidence) < 0.95
         ):
             probability = min(probability, 0.69)
@@ -141,6 +141,11 @@ class ForecastEngine:
                 "source_kind": document.get("source_kind", ""),
                 "source_credibility": float(document.get("source_credibility") or 0.0),
                 "publisher": document.get("publisher_label") or document.get("source_name") or document.get("source_id"),
+                "independence_key": (
+                    document.get("reporting_family_key")
+                    or document.get("publisher_key")
+                    or document.get("source_id")
+                ),
                 "title": document.get("title", "")[:500],
                 "summary": document.get("summary", "")[:1000],
                 "published_at": published

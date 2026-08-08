@@ -63,6 +63,25 @@ class IntelligenceStoreTests(unittest.TestCase):
         with self.assertRaises(sqlite3.ProgrammingError):
             connection.execute("SELECT 1")
 
+    def test_cluster_backfill_dry_run_never_changes_live_links(self):
+        from agent.intelligence.cluster_backfill import dry_run
+
+        self.store.register_source("backfill", "Backfill", "test")
+        self.store.ingest_items("backfill", [SourceItem(
+            external_id="backfill-1", title="Backfill event",
+            url="https://example.test/backfill",
+            published_at=datetime.now(UTC).isoformat()
+        )])
+        UnderstandingEngine(self.store).analyze_pending()
+        before = [item["id"] for item in self.store.list_situations()]
+
+        report = dry_run(self.store.path, limit=10)
+        after = [item["id"] for item in self.store.list_situations()]
+
+        self.assertEqual("dry-run", report["mode"])
+        self.assertEqual(before, after)
+        self.assertEqual(1, report["documents_scanned"])
+
     def test_store_applies_versioned_migration_and_private_permissions(self):
         with self.store._connect() as connection:
             version = connection.execute(
@@ -70,7 +89,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(6, version)
+        self.assertEqual(7, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -288,7 +307,78 @@ class UnderstandingEngineTests(unittest.TestCase):
             )
         )
         self.assertGreaterEqual(len(detail["timeline"]), 2)
-        self.assertIn("unresolved contradictions", self.store.latest_briefing()["content"]["headline"])
+        self.assertIn(
+            "unresolved contradictions",
+            self.store.latest_briefing()["content"]["headline"]
+        )
+
+    def test_syndicated_documents_count_as_one_independent_report(self):
+        now = datetime.now(UTC).isoformat()
+        first = SourceItem(
+            external_id="wire-a", title="Port Alpha closes after storm",
+            url="https://a.test/wire", summary="Port Alpha closes after storm.",
+            published_at=now, category="traditional-news",
+            metadata={"publisher": "A"}
+        )
+        second = SourceItem(
+            external_id="wire-b", title="Port Alpha closes after storm",
+            url="https://b.test/wire", summary="Port Alpha closes after storm.",
+            published_at=now, category="traditional-news",
+            metadata={"publisher": "B"}
+        )
+        self.store.ingest_items("source-a", [first])
+        self.store.ingest_items("source-b", [second])
+
+        self.engine.analyze_pending()
+        situation = self.store.list_situations()[0]
+        detail = self.store.get_situation(situation["id"])
+
+        self.assertEqual(1, len(self.store.list_situations()))
+        self.assertEqual(1, situation["source_count"])
+        families = {
+            document["reporting_family_key"]
+            for document in detail["documents"]
+        }
+        self.assertEqual(1, len(families))
+
+    def test_ambiguous_cluster_match_is_queued_not_automatically_merged(self):
+        from agent.intelligence.clustering import ClusterDecision, EventClusterer
+
+        class ReviewClusterer(EventClusterer):
+            def decide(self, connection, document):
+                features = extract_document_features(document)
+                self._store_features(connection, document["id"], features)
+                existing = connection.execute(
+                    "SELECT id FROM situations ORDER BY created_at LIMIT 1"
+                ).fetchone()
+                if not existing:
+                    return ClusterDecision(action="separate")
+                return ClusterDecision(
+                    action="review", target_situation_id=existing["id"],
+                    score=0.72, components={"lexical": 0.7}
+                )
+
+        from agent.intelligence.features import extract_document_features
+        engine = UnderstandingEngine(self.store, clusterer=ReviewClusterer())
+        now = datetime.now(UTC).isoformat()
+        self.store.ingest_items("source-a", [SourceItem(
+            external_id="review-a", title="Alpha event",
+            url="https://a.test/review-a", published_at=now
+        )])
+        engine.analyze_pending()
+        self.store.ingest_items("source-b", [SourceItem(
+            external_id="review-b", title="Possibly related Alpha development",
+            url="https://b.test/review-b", published_at=now
+        )])
+        engine.analyze_pending()
+
+        with self.store._connect() as connection:
+            candidates = connection.execute(
+                "SELECT * FROM situation_merge_candidates"
+            ).fetchall()
+        self.assertEqual(2, len(self.store.list_situations()))
+        self.assertEqual(1, len(candidates))
+        self.assertEqual("review", candidates[0]["decision"])
 
     def test_thinking_model_synthesizes_all_cross_source_evidence(self):
         class ThinkingRouter:

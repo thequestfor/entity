@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from agent.intelligence.store import utc_now
+from agent.intelligence.clustering import EventClusterer
 from agent.models.router import ModelRouter
 
 
@@ -74,7 +75,8 @@ class UnderstandingEngine:
         synthesis_per_cycle=5,
         synthesis_batch_size=1,
         max_candidate_age_days=30,
-        maintenance_enabled=False
+        maintenance_enabled=False,
+        clusterer=None
     ):
         self.store = store
         self.router = router or ModelRouter()
@@ -84,10 +86,12 @@ class UnderstandingEngine:
             1, min(365, int(max_candidate_age_days))
         )
         self.maintenance_enabled = bool(maintenance_enabled)
+        self.clusterer = clusterer or EventClusterer()
 
     def analyze_pending(self, limit=250):
         if self.maintenance_enabled:
             self._maintain_situation_lifecycle()
+        self.clusterer.backfill_features(self.store, limit=500)
         pending = self._pending_documents(limit)
         if not pending:
             candidates = self._pending_synthesis_situations(
@@ -337,6 +341,11 @@ class UnderstandingEngine:
                 "id": document["id"],
                 "source": document.get("source_name") or document.get("source_id"),
                 "publisher": document.get("publisher_label") or document.get("publisher_key"),
+                "independence_key": (
+                    document.get("reporting_family_key")
+                    or document.get("publisher_key")
+                    or document.get("source_id")
+                ),
                 "publisher_credibility": round(float(
                     document.get("source_credibility") or 0.0
                 ), 4),
@@ -373,7 +382,9 @@ class UnderstandingEngine:
             },
             "documents": documents,
             "claims": claims,
-            "source_count": len({item["publisher"] for item in documents})
+            "source_count": len({
+                item["independence_key"] for item in documents
+            })
         }
 
     def _prioritize_situations(self, situation_ids, limit=None):
@@ -388,6 +399,7 @@ class UnderstandingEngine:
                        COUNT(DISTINCT situation_documents.document_id)
                            AS document_count,
                        COUNT(DISTINCT COALESCE(
+                           NULLIF(documents.reporting_family_key, ''),
                            NULLIF(documents.publisher_key, ''),
                            documents.source_id
                        )) AS publisher_count,
@@ -836,7 +848,13 @@ class UnderstandingEngine:
             )
             return situation_id, False
 
-        candidate = self._best_situation(connection, document, observed_at)
+        decision = self.clusterer.decide(connection, document)
+        candidate = None
+        if decision.action == "link" and decision.target_situation_id:
+            candidate = connection.execute(
+                "SELECT * FROM situations WHERE id = ?",
+                (decision.target_situation_id,)
+            ).fetchone()
         now = utc_now()
 
         if candidate:
@@ -889,6 +907,9 @@ class UnderstandingEngine:
             ) VALUES (?, ?, ?, ?)
             """,
             (situation_id, document["id"], 1.0, now)
+        )
+        self.clusterer.record_link(
+            connection, document, situation_id, decision
         )
         return situation_id, created
 
@@ -1011,7 +1032,10 @@ class UnderstandingEngine:
             SELECT claims.id, claims.predicate, claims.normalized_object,
                    MAX(claim_evidence.observed_at) AS latest_evidence,
                    MAX(claim_evidence.document_version_id) AS latest_version,
-                   COUNT(DISTINCT documents.publisher_key) AS source_count
+                   COUNT(DISTINCT COALESCE(
+                       NULLIF(documents.reporting_family_key, ''),
+                       NULLIF(documents.publisher_key, ''), documents.source_id
+                   )) AS source_count
             FROM claims
             LEFT JOIN claim_evidence ON claim_evidence.claim_id = claims.id
             LEFT JOIN document_versions
@@ -1037,7 +1061,10 @@ class UnderstandingEngine:
                 continue
             source_total = connection.execute(
                 """
-                SELECT COUNT(DISTINCT documents.publisher_key) AS count
+                SELECT COUNT(DISTINCT COALESCE(
+                    NULLIF(documents.reporting_family_key, ''),
+                    NULLIF(documents.publisher_key, ''), documents.source_id
+                )) AS count
                 FROM claims
                 JOIN claim_evidence ON claim_evidence.claim_id = claims.id
                 JOIN document_versions
@@ -1092,7 +1119,10 @@ class UnderstandingEngine:
                WHERE situation_id = ? AND status != 'superseded') AS claim_count,
               (SELECT COUNT(*) FROM claims
                WHERE situation_id = ? AND status = 'contested') AS contested_count,
-              (SELECT COUNT(DISTINCT documents.publisher_key)
+              (SELECT COUNT(DISTINCT COALESCE(
+                          NULLIF(documents.reporting_family_key, ''),
+                          NULLIF(documents.publisher_key, ''), documents.source_id
+                       ))
                FROM situation_documents
                JOIN documents ON documents.id = situation_documents.document_id
                WHERE situation_documents.situation_id = ?) AS source_count
@@ -1188,7 +1218,10 @@ class UnderstandingEngine:
               ON document_versions.id = claim_evidence.document_version_id
             JOIN documents ON documents.id = document_versions.document_id
             WHERE claim_evidence.claim_id = ?
-            GROUP BY documents.publisher_key
+            GROUP BY COALESCE(
+                NULLIF(documents.reporting_family_key, ''),
+                NULLIF(documents.publisher_key, ''), documents.source_id
+            )
             """,
             (claim_id,)
         ).fetchall()
@@ -1205,7 +1238,10 @@ class UnderstandingEngine:
             SELECT situations.*,
                    (SELECT COUNT(*) FROM situation_documents
                     WHERE situation_id = situations.id) AS evidence_count,
-                   (SELECT COUNT(DISTINCT documents.publisher_key)
+                   (SELECT COUNT(DISTINCT COALESCE(
+                               NULLIF(documents.reporting_family_key, ''),
+                               NULLIF(documents.publisher_key, ''), documents.source_id
+                            ))
                     FROM situation_documents
                     JOIN documents
                       ON documents.id = situation_documents.document_id

@@ -17,6 +17,8 @@ const elements = {
   sourceList: document.querySelector("#source-list"),
   reputationList: document.querySelector("#reputation-list"),
   forecastList: document.querySelector("#forecast-list"),
+  clusterReviewCount: document.querySelector("#cluster-review-count"),
+  dependentReportCount: document.querySelector("#dependent-report-count"),
   documentTemplate: document.querySelector("#document-template"),
   situationTemplate: document.querySelector("#situation-template")
 };
@@ -66,6 +68,8 @@ function renderOverview(overview) {
   elements.contestedCount.textContent = overview.contested_claims ?? 0;
   elements.sourceCount.textContent = overview.sources ?? 0;
   elements.issueCount.textContent = overview.unhealthy ?? 0;
+  elements.clusterReviewCount.textContent = overview.cluster_reviews ?? 0;
+  elements.dependentReportCount.textContent = overview.dependent_reports ?? 0;
   elements.lastRetrieval.textContent = formatTime(overview.latest_retrieved_at);
 
   const current = elements.categoryFilter.value;

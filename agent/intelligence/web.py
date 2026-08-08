@@ -74,6 +74,18 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/api/intelligence/clustering":
+            query = parse_qs(parsed.query)
+            self._send_json({
+                "overview": self.server.intelligence_store.clustering_overview(),
+                "merge_candidates": (
+                    self.server.intelligence_store.list_merge_candidates(
+                        limit=_query_int(query, "limit", 50)
+                    )
+                )
+            })
+            return
+
         if parsed.path == "/api/intelligence/situations":
             query = parse_qs(parsed.query)
             self._send_json(

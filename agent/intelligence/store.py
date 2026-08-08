@@ -478,7 +478,12 @@ class IntelligenceStore:
                     (SELECT COUNT(*) FROM claims
                      WHERE status != 'superseded') AS claims,
                     (SELECT COUNT(*) FROM claims
-                     WHERE status = 'contested') AS contested_claims
+                     WHERE status = 'contested') AS contested_claims,
+                    (SELECT COUNT(*) FROM situation_merge_candidates
+                     WHERE decision = 'review') AS cluster_reviews,
+                    (SELECT COUNT(*) FROM document_relationships
+                     WHERE relationship IN ('copied','syndicated'))
+                     AS dependent_reports
                 """
             ).fetchone()
             categories = connection.execute(
@@ -498,6 +503,49 @@ class IntelligenceStore:
             "latest_retrieved_at": latest,
             "categories": [dict(row) for row in categories]
         }
+
+    def clustering_overview(self):
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                  (SELECT COUNT(*) FROM document_features) AS featured_documents,
+                  (SELECT COUNT(*) FROM document_relationships
+                   WHERE relationship = 'copied') AS copied_relationships,
+                  (SELECT COUNT(*) FROM document_relationships
+                   WHERE relationship = 'syndicated') AS syndicated_relationships,
+                  (SELECT COUNT(*) FROM situation_merge_candidates
+                   WHERE decision = 'review') AS review_candidates,
+                  (SELECT COUNT(*) FROM situations
+                   WHERE status = 'merged') AS merged_situations
+                """
+            ).fetchone()
+        return dict(row)
+
+    def list_merge_candidates(self, limit=100, decision="review"):
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT situation_merge_candidates.*,
+                       source.title AS source_title,
+                       target.title AS target_title
+                FROM situation_merge_candidates
+                JOIN situations AS source
+                  ON source.id = source_situation_id
+                JOIN situations AS target
+                  ON target.id = target_situation_id
+                WHERE situation_merge_candidates.decision = ?
+                ORDER BY score DESC, created_at DESC LIMIT ?
+                """,
+                (str(decision), max(1, min(1000, int(limit))))
+            ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["components"] = self._json_load(item.get("components"), {})
+            item["vetoes"] = self._json_load(item.get("vetoes"), [])
+            items.append(item)
+        return items
 
     def list_documents(self, limit=50, category=None):
         limit = max(1, min(200, int(limit)))
@@ -596,7 +644,10 @@ class IntelligenceStore:
             SELECT situations.*,
                    COUNT(DISTINCT situation_documents.document_id)
                      AS evidence_count,
-                   COUNT(DISTINCT documents.publisher_key) AS source_count,
+                   COUNT(DISTINCT COALESCE(
+                       NULLIF(documents.reporting_family_key, ''),
+                       NULLIF(documents.publisher_key, ''), documents.source_id
+                   )) AS source_count,
                    (SELECT COUNT(*) FROM claims
                     WHERE claims.situation_id = situations.id
                       AND claims.status != 'superseded') AS claim_count,
@@ -664,7 +715,10 @@ class IntelligenceStore:
                 SELECT claims.*,
                        COUNT(DISTINCT claim_evidence.document_version_id)
                          AS evidence_count,
-                       COUNT(DISTINCT documents.publisher_key) AS source_count
+                       COUNT(DISTINCT COALESCE(
+                           NULLIF(documents.reporting_family_key, ''),
+                           NULLIF(documents.publisher_key, ''), documents.source_id
+                       )) AS source_count
                 FROM claims
                 LEFT JOIN claim_evidence
                   ON claim_evidence.claim_id = claims.id

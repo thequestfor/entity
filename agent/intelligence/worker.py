@@ -27,6 +27,8 @@ from agent.intelligence.models import IngestResult
 from agent.intelligence.reputation import ReputationEngine, ReputationResult
 from agent.intelligence.understanding import AnalysisResult, UnderstandingEngine
 from agent.intelligence.forecasting import ForecastEngine
+from agent.intelligence.clustering import EventClusterer
+from agent.intelligence.embeddings import OllamaEmbeddingProvider
 
 
 @dataclass(frozen=True)
@@ -235,12 +237,25 @@ class IntelligenceWorker:
             max_adjustment=config.reputation_max_adjustment,
             prior_strength=config.reputation_prior_strength
         )
+        embedding_provider = OllamaEmbeddingProvider(
+            enabled=config.cluster_embeddings_enabled,
+            model=config.cluster_embedding_model,
+            timeout=config.request_timeout_seconds
+        )
+        clusterer = EventClusterer(
+            auto_link_threshold=config.cluster_auto_link_threshold,
+            review_threshold=config.cluster_review_threshold,
+            lookback_days=config.cluster_lookback_days,
+            max_candidates=config.cluster_max_candidates,
+            embedding_provider=embedding_provider
+        )
         understanding = UnderstandingEngine(
             store,
             synthesis_per_cycle=config.worldview_synthesis_per_cycle,
             synthesis_batch_size=config.worldview_batch_size,
             max_candidate_age_days=config.worldview_max_age_days,
-            maintenance_enabled=config.worldview_maintenance_enabled
+            maintenance_enabled=config.worldview_maintenance_enabled,
+            clusterer=clusterer
         )
         return cls(
             store=store,

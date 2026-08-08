@@ -35,6 +35,12 @@ class IntelligenceConfig:
     worldview_batch_size: int = 4
     worldview_max_age_days: int = 30
     worldview_maintenance_enabled: bool = True
+    cluster_auto_link_threshold: float = 0.82
+    cluster_review_threshold: float = 0.65
+    cluster_lookback_days: int = 14
+    cluster_max_candidates: int = 200
+    cluster_embeddings_enabled: bool = False
+    cluster_embedding_model: str = ""
     source_backoff_max_seconds: int = 21600
     request_timeout_seconds: int = 15
     max_items_per_source: int = 50
@@ -154,6 +160,28 @@ class IntelligenceConfig:
             worldview_maintenance_enabled=_env_bool(
                 "ENTITY_WORLDVIEW_MAINTENANCE_ENABLED", True
             ),
+            cluster_auto_link_threshold=_env_float(
+                "ENTITY_CLUSTER_AUTO_LINK_THRESHOLD", 0.82,
+                minimum=0.5, maximum=0.99
+            ),
+            cluster_review_threshold=_env_float(
+                "ENTITY_CLUSTER_REVIEW_THRESHOLD", 0.65,
+                minimum=0.3, maximum=0.95
+            ),
+            cluster_lookback_days=_env_int(
+                "ENTITY_CLUSTER_LOOKBACK_DAYS", 14,
+                minimum=1, maximum=90
+            ),
+            cluster_max_candidates=_env_int(
+                "ENTITY_CLUSTER_MAX_CANDIDATES", 200,
+                minimum=10, maximum=1000
+            ),
+            cluster_embeddings_enabled=_env_bool(
+                "ENTITY_CLUSTER_LOCAL_EMBEDDINGS", False
+            ),
+            cluster_embedding_model=os.getenv(
+                "ENTITY_CLUSTER_EMBEDDING_MODEL", ""
+            ).strip(),
             source_backoff_max_seconds=_env_int(
                 "ENTITY_INTELLIGENCE_SOURCE_BACKOFF_MAX_SECONDS",
                 21600,
