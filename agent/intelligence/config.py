@@ -109,6 +109,8 @@ class IntelligenceConfig:
     geography_backfill_batch_size: int = 50
     geospatial_features_enabled: bool = True
     geospatial_feature_batch_size: int = 100
+    world_graph_enabled: bool = True
+    world_graph_batch_size: int = 100
     world_bank_enabled: bool = True
     world_bank_countries: tuple[str, ...] = ("WLD",)
     world_bank_indicators: tuple[str, ...] = DEFAULT_WORLD_BANK_INDICATORS
@@ -427,6 +429,8 @@ class IntelligenceConfig:
             geography_backfill_batch_size=_env_int("ENTITY_GEOGRAPHY_BACKFILL_BATCH_SIZE", 50, minimum=1, maximum=500),
             geospatial_features_enabled=_env_bool("ENTITY_GEOSPATIAL_FEATURES_ENABLED", True),
             geospatial_feature_batch_size=_env_int("ENTITY_GEOSPATIAL_FEATURE_BATCH_SIZE", 100, minimum=1, maximum=500),
+            world_graph_enabled=_env_bool("ENTITY_WORLD_GRAPH_ENABLED", True),
+            world_graph_batch_size=_env_int("ENTITY_WORLD_GRAPH_BATCH_SIZE", 100, minimum=2, maximum=500),
             world_bank_enabled=_env_bool("ENTITY_WORLD_BANK_ENABLED", True),
             world_bank_countries=_env_csv(
                 os.getenv("ENTITY_WORLD_BANK_COUNTRIES"), ("WLD",)

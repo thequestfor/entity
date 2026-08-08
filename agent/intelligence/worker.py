@@ -40,6 +40,7 @@ from agent.intelligence.claim_grounding import ClaimGroundingEngine
 from agent.intelligence.ensemble_training import EnsembleTrainer
 from agent.intelligence.aircraft import AdsbLolAircraftMonitor
 from agent.intelligence.geospatial_intelligence import GeospatialIntelligenceEngine
+from agent.intelligence.world_graph import WorldEventGraphEngine
 
 
 @dataclass(frozen=True)
@@ -76,7 +77,8 @@ class IntelligenceWorker:
         on_activity=None,
         aircraft_monitor=None,
         geography_batch_size=50,
-        geospatial_engine=None
+        geospatial_engine=None,
+        world_graph_engine=None
     ):
         self.store = store
         self.connectors = list(connectors)
@@ -120,6 +122,7 @@ class IntelligenceWorker:
         self.aircraft_monitor = aircraft_monitor
         self.geography_batch_size = max(1, min(500, int(geography_batch_size)))
         self.geospatial_engine = geospatial_engine
+        self.world_graph_engine = world_graph_engine
         self._stop = threading.Event()
         self._thread = None
 
@@ -381,6 +384,10 @@ class IntelligenceWorker:
             store, enabled=config.geospatial_features_enabled,
             batch_size=config.geospatial_feature_batch_size
         )
+        world_graph_engine = WorldEventGraphEngine(
+            store, enabled=config.world_graph_enabled,
+            batch_size=config.world_graph_batch_size
+        )
         return cls(
             store=store,
             connectors=connectors,
@@ -404,7 +411,8 @@ class IntelligenceWorker:
             activity_watchdog_seconds=config.activity_watchdog_seconds,
             aircraft_monitor=aircraft_monitor,
             geography_batch_size=config.geography_backfill_batch_size,
-            geospatial_engine=geospatial_engine
+            geospatial_engine=geospatial_engine,
+            world_graph_engine=world_graph_engine
         )
 
     @property
@@ -526,6 +534,12 @@ class IntelligenceWorker:
         finally:
             if update_watchdog:
                 update_watchdog.cancel()
+
+        if self.world_graph_engine is not None:
+            try:
+                self.world_graph_engine.run_batch()
+            except Exception as exc:
+                print("World event graph cycle failed:", type(exc).__name__)
 
         try:
             if force or now >= self._next_forecast_at:

@@ -149,6 +149,31 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             ))
             return
 
+        if parsed.path == "/api/intelligence/world-graph":
+            self._send_json(self.server.intelligence_store.world_graph_overview())
+            return
+
+        if parsed.path == "/api/intelligence/world-events":
+            query = parse_qs(parsed.query)
+            bbox = _query_bbox(query) if "bbox" in query else None
+            self._send_json({"events":self.server.intelligence_store.list_world_events(
+                limit=_query_int(query,"limit",100),
+                status=(query.get("status") or [None])[0],
+                event_type=(query.get("type") or [None])[0],
+                country=(query.get("country") or [None])[0],bbox=bbox
+            )})
+            return
+
+        world_event_prefix = "/api/intelligence/world-events/"
+        if parsed.path.startswith(world_event_prefix):
+            event_id = unquote(parsed.path[len(world_event_prefix):])
+            detail = self.server.intelligence_store.get_world_event(event_id)
+            if detail is None:
+                self._send_json({"error":"World event not found."}, status=HTTPStatus.NOT_FOUND)
+            else:
+                self._send_json(detail)
+            return
+
         if parsed.path == "/api/intelligence/aircraft":
             query = parse_qs(parsed.query)
             self._send_json({"aircraft": self.server.intelligence_store.list_aircraft_states(

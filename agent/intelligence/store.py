@@ -982,6 +982,100 @@ class IntelligenceStore:
             result.append(item)
         return result
 
+    def world_graph_overview(self):
+        with self._connect() as connection:
+            counts = connection.execute(
+                """SELECT
+                   (SELECT COUNT(*) FROM world_entities) entities,
+                   (SELECT COUNT(*) FROM world_events) events,
+                   (SELECT COUNT(*) FROM world_event_observations) observations,
+                   (SELECT COUNT(*) FROM world_event_relations) relations,
+                   (SELECT COUNT(*) FROM infrastructure_assets) infrastructure,
+                   (SELECT COUNT(*) FROM world_change_signals WHERE status='active') active_changes,
+                   (SELECT COUNT(*) FROM world_alerts WHERE status='pending') pending_alerts"""
+            ).fetchone()
+            states = connection.execute(
+                "SELECT * FROM world_graph_backfill_state ORDER BY lane"
+            ).fetchall()
+        return {**dict(counts), "backfill": [dict(row) for row in states]}
+
+    def list_world_events(self, limit=100, status=None, event_type=None,
+                          country=None, bbox=None):
+        query = "SELECT * FROM world_events"
+        conditions = []
+        params = []
+        if status:
+            conditions.append("status=?")
+            params.append(str(status)[:30])
+        if event_type:
+            conditions.append("event_type=?")
+            params.append(str(event_type)[:80])
+        if country:
+            conditions.append("country_name=?")
+            params.append(str(country)[:120])
+        if bbox:
+            west, south, east, north = bbox
+            conditions.append("latitude BETWEEN ? AND ?")
+            params.extend([south, north])
+            if west <= east:
+                conditions.append("longitude BETWEEN ? AND ?")
+            else:
+                conditions.append("(longitude>=? OR longitude<=?)")
+            params.extend([west, east])
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+        query += " ORDER BY status='contested' DESC,severity DESC,confidence DESC,last_seen_at DESC LIMIT ?"
+        params.append(max(1, min(1000, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["geometry"] = self._json_load(item.get("geometry"), {})
+            item["properties"] = self._json_load(item.get("properties"), {})
+            output.append(item)
+        return output
+
+    def get_world_event(self, event_id):
+        with self._connect() as connection:
+            event = connection.execute(
+                "SELECT * FROM world_events WHERE id=?", (str(event_id)[:100],)
+            ).fetchone()
+            if not event:
+                return None
+            observations = connection.execute(
+                """SELECT observations.*,sources.name source_name,
+                          documents.title document_title,documents.url
+                   FROM world_event_observations observations
+                   JOIN sources ON sources.id=observations.source_id
+                   JOIN documents ON documents.id=observations.document_id
+                   WHERE observations.world_event_id=?
+                   ORDER BY observations.captured_at DESC LIMIT 200""",
+                (event_id,)
+            ).fetchall()
+            relations = connection.execute(
+                """SELECT * FROM world_event_relations
+                   WHERE (subject_kind='event' AND subject_id=?)
+                      OR (object_kind='event' AND object_id=?)
+                   ORDER BY confidence DESC LIMIT 200""", (event_id,event_id)
+            ).fetchall()
+        item = dict(event)
+        item["geometry"] = self._json_load(item.get("geometry"), {})
+        item["properties"] = self._json_load(item.get("properties"), {})
+        observation_items = []
+        for row in observations:
+            value = dict(row)
+            value["geometry"] = self._json_load(value.get("geometry"), {})
+            value["properties"] = self._json_load(value.get("properties"), {})
+            observation_items.append(value)
+        relation_items = []
+        for row in relations:
+            value = dict(row)
+            value["evidence"] = self._json_load(value.get("evidence"), [])
+            relation_items.append(value)
+        return {"event":item,"observations":observation_items,
+                "relations":relation_items}
+
     def list_geo_cells(self, bbox=(-180, -90, 180, 90), layers=(),
                        since_at=None, limit=1000):
         west, south, east, north = bbox

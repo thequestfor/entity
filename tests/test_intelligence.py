@@ -49,6 +49,7 @@ from agent.intelligence.aircraft import AdsbLolAircraftMonitor
 from agent.intelligence.geospatial_intelligence import (
     GeospatialIntelligenceEngine, GeospatialPredictionFeatures
 )
+from agent.intelligence.world_graph import WorldEventGraphEngine
 from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
@@ -110,7 +111,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(22, version)
+        self.assertEqual(23, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -225,6 +226,31 @@ class IntelligenceStoreTests(unittest.TestCase):
         self.assertGreaterEqual(features["linked_hazard_count"], 1)
         self.assertEqual(1, len(feature_ids))
         self.assertEqual(64, len(digest))
+
+    def test_world_graph_projects_versions_without_claiming_causation(self):
+        self.store.ingest_items("fixture", [SourceItem(
+            "graph-one", "Port disruption in Testland",
+            "https://example.test/graph-one", summary="A port disruption was reported.",
+            category="humanitarian", latitude=12.0, longitude=24.0,
+            metadata={"country":"Testland"}
+        )])
+        UnderstandingEngine(self.store).analyze_pending()
+        result = WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        overview = self.store.world_graph_overview()
+        events = self.store.list_world_events(country="Testland")
+        detail = self.store.get_world_event(events[0]["id"])
+
+        self.assertGreaterEqual(result.events, 1)
+        self.assertEqual(1, overview["observations"])
+        self.assertEqual("humanitarian", events[0]["event_type"])
+        self.assertEqual("direct-world-graph-projection-v1", events[0]["method"])
+        self.assertEqual("noncausal", detail["relations"][0]["causal_status"])
+        self.assertEqual("located_in", detail["relations"][0]["predicate"])
+        self.assertEqual(1, len(detail["observations"]))
+
+        repeated = WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        self.assertEqual(0, repeated.observations)
+        self.assertEqual(1, self.store.world_graph_overview()["observations"])
 
     def test_claim_migration_materializes_non_null_defaults_for_legacy_rows(self):
         legacy_path = Path(self.temporary_directory.name) / "legacy.db"
