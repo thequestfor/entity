@@ -156,6 +156,15 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             )})
             return
 
+        if parsed.path == "/api/intelligence/map-commentary":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.map_commentary(
+                kind=(query.get("type") or [""])[0],
+                identifier=(query.get("id") or [""])[0],
+                country=(query.get("country") or [""])[0]
+            ))
+            return
+
         situation_prefix = "/api/intelligence/situations/"
         if parsed.path.startswith(situation_prefix):
             situation_id = unquote(parsed.path[len(situation_prefix):])
@@ -202,8 +211,9 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; connect-src 'self'; style-src 'self'; "
-            "script-src 'self'; img-src 'self' data:"
+            "default-src 'self'; connect-src 'self' https://raw.githubusercontent.com; "
+            "style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' https://unpkg.com; "
+            "img-src 'self' data: https://tile.openstreetmap.org https://unpkg.com"
         )
         super().end_headers()
 

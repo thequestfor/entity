@@ -16,6 +16,8 @@ const elements = {
   mapCountryFilter: document.querySelector("#map-country-filter"),
   mapLabelsToggle: document.querySelector("#map-labels-toggle"),
   mapAircraftToggle: document.querySelector("#map-aircraft-toggle"),
+  mapCommentaryToggle: document.querySelector("#map-commentary-toggle"),
+  mapCommentary: document.querySelector("#map-commentary"),
   countryBreakdown: document.querySelector("#country-breakdown"),
   situationList: document.querySelector("#situation-list"),
   situationDetail: document.querySelector("#situation-detail"),
@@ -45,8 +47,17 @@ let selectedCategory = "";
 let selectedSituationId = "";
 let mapPriority = "priority";
 let mapCountry = "";
-let mapLabels = true;
+let mapLabels = false;
 let aircraft = [];
+let intelligenceMap;
+let situationMapLayer;
+let aircraftMapLayer;
+let countryMapLayer;
+let countryRollups = new Map();
+let countryLayers = new Map();
+let commentaryTimer;
+const commentaryCache = new Map();
+const COUNTRY_BOUNDARIES_URL = "https://raw.githubusercontent.com/johan/world.geo.json/34c96bba9c07d2ceb30696c599bb51a5b939b20f/countries.geo.json";
 
 async function request(path) {
   const response = await fetch(path, {
@@ -161,7 +172,7 @@ function renderSituations(situations) {
 }
 
 function renderMap(situations) {
-  elements.worldMap.replaceChildren();
+  if (!initializeMap()) return;
   const located = situations.filter((situation) =>
     Number.isFinite(situation.latitude) && Number.isFinite(situation.longitude)
   );
@@ -170,45 +181,90 @@ function renderMap(situations) {
   elements.mapStatus.textContent = displayed.length
     ? `${displayed.length} shown · ${countryLocated.length} in view · ${located.length} located`
     : "No located situations in this view";
-  if (!displayed.length) {
-    const empty = document.createElement("p");
-    empty.className = "map-empty";
-    empty.textContent = "No located situations are available in this view.";
-    elements.worldMap.append(empty);
-    return;
-  }
-  for (const group of clusterMapSituations(displayed)) {
+  situationMapLayer.clearLayers();
+  aircraftMapLayer.clearLayers();
+  for (const group of clusterMapSituations(displayed, intelligenceMap.getZoom())) {
     const situation = group.items[0];
-    const point = document.createElement("button");
-    point.type = "button";
-    point.className = `map-point map-hazard-${group.kind}` + (group.items.length > 1 ? " map-cluster" : "");
-    point.dataset.status = situation.status;
-    point.dataset.situationId = situation.id;
-    point.dataset.selected = String(situation.id === selectedSituationId);
-    point.style.left = `${((group.longitude + 180) / 360) * 100}%`;
-    point.style.top = `${((90 - group.latitude) / 180) * 100}%`;
-    point.title = group.items.length > 1 ? `${group.items.length} nearby situations · select highest priority` : `${situation.title} · ${Math.round(situation.confidence * 100)}%`;
-    point.setAttribute("aria-label", point.title);
-    if (group.items.length > 1) point.textContent = group.items.length;
-    point.addEventListener("click", () => selectSituation(situation.id));
-    elements.worldMap.append(point);
-    if (mapLabels && group.items.length === 1 && (situation.location_label || situation.location_country_name)) {
-      const label = document.createElement("span");
-      label.className = "map-label";
-      label.style.left = point.style.left;
-      label.style.top = point.style.top;
-      label.textContent = situation.location_label || situation.location_country_name;
-      elements.worldMap.append(label);
+    if (group.items.length > 1) {
+      const cluster = L.marker([group.latitude, group.longitude], {
+        icon: L.divIcon({
+          className: "map-cluster-wrap",
+          html: `<span class="map-cluster map-symbol-${group.kind}">${group.items.length}</span>`,
+          iconSize: [30, 30], iconAnchor: [15, 15]
+        }), keyboard: true
+      });
+      cluster.bindTooltip(clusterTooltip(group.items), { sticky: true, className: "entity-map-tooltip" });
+      cluster.on("click", () => {
+        if (intelligenceMap.getZoom() < 8) intelligenceMap.setView([group.latitude, group.longitude], intelligenceMap.getZoom() + 2);
+        else selectSituation(situation.id);
+      });
+      cluster.on("mouseover", () => scheduleCommentary("situation", situation.id));
+      cluster.addTo(situationMapLayer);
+      continue;
     }
+    addSituationMarker(situation, group.kind);
   }
   if (elements.mapAircraftToggle.checked) renderAircraft();
 }
 
-function clusterMapSituations(situations) {
+function initializeMap() {
+  if (intelligenceMap) return true;
+  if (!window.L) {
+    elements.mapStatus.textContent = "Interactive map library unavailable";
+    return false;
+  }
+  intelligenceMap = L.map(elements.worldMap, {
+    center: [20, 0], zoom: 2, minZoom: 2, maxZoom: 11,
+    worldCopyJump: true, zoomControl: true, preferCanvas: true
+  });
+  L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'
+  }).addTo(intelligenceMap);
+  countryMapLayer = L.layerGroup().addTo(intelligenceMap);
+  situationMapLayer = L.layerGroup().addTo(intelligenceMap);
+  aircraftMapLayer = L.layerGroup().addTo(intelligenceMap);
+  intelligenceMap.on("zoomend", () => renderMap(lastMapSituations));
+  loadCountryBoundaries();
+  return true;
+}
+
+async function loadCountryBoundaries() {
+  try {
+    const response = await fetch(COUNTRY_BOUNDARIES_URL, { cache: "force-cache" });
+    if (!response.ok) throw new Error(`Country boundaries ${response.status}`);
+    const geojson = await response.json();
+    const boundaries = L.geoJSON(geojson, {
+      style: () => ({ color: "#74aaa5", weight: .65, opacity: .55, fillColor: "#163238", fillOpacity: .08 }),
+      onEachFeature: (feature, layer) => {
+        const name = feature.properties?.name || "Unknown territory";
+        countryLayers.set(normalizeCountry(name), layer);
+        layer.bindTooltip(() => countryTooltip(name), { sticky: true, className: "entity-map-tooltip" });
+        layer.on("mouseover", () => {
+          layer.setStyle({ weight: 1.5, color: "#8cf4e8", fillOpacity: .18 });
+          scheduleCommentary("country", matchingCountryName(name) || name);
+        });
+        layer.on("mouseout", () => boundaries.resetStyle(layer));
+        layer.on("click", () => {
+          mapCountry = matchingCountryName(name);
+          elements.mapCountryFilter.value = mapCountry;
+          intelligenceMap.fitBounds(layer.getBounds(), { padding: [20, 20] });
+          renderMap(lastMapSituations);
+        });
+      }
+    });
+    boundaries.addTo(countryMapLayer);
+  } catch (error) {
+    elements.mapStatus.textContent += " · country boundaries unavailable";
+  }
+}
+
+function clusterMapSituations(situations, zoom = 2) {
   const buckets = new Map();
+  const cellDegrees = Math.max(.4, 22 / Math.pow(2, Math.max(0, zoom - 2)));
   for (const item of situations) {
     const kind = hazardKind(item);
-    const key = `${kind}:${Math.floor((item.longitude + 180) / 20)}:${Math.floor((item.latitude + 90) / 15)}`;
+    const key = `${kind}:${Math.floor((item.longitude + 180) / cellDegrees)}:${Math.floor((item.latitude + 90) / cellDegrees)}`;
     const bucket = buckets.get(key) ?? [];
     bucket.push(item); buckets.set(key, bucket);
   }
@@ -216,6 +272,50 @@ function clusterMapSituations(situations) {
     items.sort((a, b) => mapPriorityScore(b) - mapPriorityScore(a));
     return { items, kind: hazardKind(items[0]), longitude: items.reduce((sum, item) => sum + item.longitude, 0) / items.length, latitude: items.reduce((sum, item) => sum + item.latitude, 0) / items.length };
   });
+}
+
+function addSituationMarker(situation, kind) {
+  const coordinates = [situation.latitude, situation.longitude];
+  if (kind === "wildfire") {
+    const precisionKm = Math.max(8, Math.min(180, Number(situation.location_precision_km || 35)));
+    L.circle(coordinates, { radius: precisionKm * 1000, className: "wildfire-area", color: "#ef5038", weight: 1, fillColor: "#dc321e", fillOpacity: .18, interactive: false }).addTo(situationMapLayer);
+  }
+  const marker = L.marker(coordinates, {
+    icon: L.divIcon({
+      className: "map-symbol-wrap",
+      html: `<span class="map-symbol map-symbol-${kind}" aria-hidden="true">${hazardGlyph(kind)}</span>`,
+      iconSize: [24, 24], iconAnchor: [12, 12]
+    }), keyboard: true,
+    title: situation.title
+  });
+  marker.bindTooltip(situationTooltip(situation), { sticky: !mapLabels, permanent: mapLabels, direction: "top", className: mapLabels ? "map-place-label" : "entity-map-tooltip" });
+  marker.on("mouseover", () => scheduleCommentary("situation", situation.id));
+  marker.on("click", () => selectSituation(situation.id));
+  marker.addTo(situationMapLayer);
+}
+
+function hazardGlyph(kind) {
+  return { wildfire: "▲", earthquake: "◆", flood: "≈", storm: "●", other: "·" }[kind] || "·";
+}
+
+function situationTooltip(situation) {
+  const node = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = situation.title;
+  const detail = document.createElement("span");
+  detail.textContent = `${situation.category} · ${Math.round(Number(situation.confidence || 0) * 100)}% confidence · ${situation.evidence_count || 0} evidence`;
+  node.append(title, detail);
+  return node;
+}
+
+function clusterTooltip(items) {
+  const node = document.createElement("div");
+  const title = document.createElement("strong");
+  title.textContent = `${items.length} nearby ${hazardKind(items[0])} situations`;
+  const detail = document.createElement("span");
+  detail.textContent = items.slice(0, 3).map((item) => item.title).join(" · ");
+  node.append(title, detail);
+  return node;
 }
 
 function hazardKind(situation) {
@@ -230,17 +330,19 @@ function hazardKind(situation) {
 function renderAircraft() {
   for (const state of aircraft) {
     if (!Number.isFinite(state.latitude) || !Number.isFinite(state.longitude)) continue;
-    const marker = document.createElement("span");
-    marker.className = "aircraft-point";
-    marker.style.left = `${((state.longitude + 180) / 360) * 100}%`;
-    marker.style.top = `${((90 - state.latitude) / 180) * 100}%`;
-    marker.style.transform = `translate(-50%, -50%) rotate(${Number(state.heading_degrees || 0)}deg)`;
-    marker.title = `${state.callsign || state.icao24} · ${state.origin_country || "origin unknown"}`;
-    elements.worldMap.append(marker);
+    const heading = Number(state.heading_degrees || 0);
+    const marker = L.marker([state.latitude, state.longitude], {
+      icon: L.divIcon({ className: "aircraft-marker-wrap", html: `<span class="aircraft-marker" style="transform:rotate(${heading}deg)">▲</span>`, iconSize: [20, 20], iconAnchor: [10, 10] }),
+      keyboard: true, title: state.callsign || state.icao24
+    });
+    const altitude = Number.isFinite(state.altitude_m) ? `${Math.round(state.altitude_m)} m` : "altitude unavailable";
+    marker.bindTooltip(`${state.callsign || state.icao24} · ${altitude} · ADSB.lol`, { sticky: true, className: "entity-map-tooltip" });
+    marker.addTo(aircraftMapLayer);
   }
 }
 
 function renderCountries(countries) {
+  countryRollups = new Map(countries.map((item) => [normalizeCountry(item.country_name), item]));
   const current = elements.mapCountryFilter.value;
   elements.mapCountryFilter.replaceChildren(new Option("All countries", ""));
   for (const country of countries) elements.mapCountryFilter.add(new Option(`${country.country_name} · ${country.active} active`, country.country_name));
@@ -249,21 +351,84 @@ function renderCountries(countries) {
   for (const country of countries.slice(0, 12)) {
     const button = document.createElement("button"); button.type = "button"; button.className = "country-row";
     button.textContent = `${country.country_name}  ${country.active} active · ${country.situations} total`;
-    button.addEventListener("click", () => { elements.mapCountryFilter.value = country.country_name; mapCountry = country.country_name; renderMap(lastMapSituations); });
+    button.addEventListener("click", () => {
+      elements.mapCountryFilter.value = country.country_name; mapCountry = country.country_name;
+      const layer = countryLayers.get(normalizeCountry(country.country_name));
+      if (layer) intelligenceMap.fitBounds(layer.getBounds(), { padding: [20, 20] });
+      renderMap(lastMapSituations);
+    });
     elements.countryBreakdown.append(button);
   }
 }
 let lastMapSituations = [];
 
+function normalizeCountry(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function matchingCountryName(boundaryName) {
+  const normalized = normalizeCountry(boundaryName);
+  const aliases = { unitedstatesofamerica: "unitedstates", russianfederation: "russia", syrianarabrepublic: "syria", iranislamicrepublicof: "iran" };
+  const wanted = aliases[normalized] || normalized;
+  return countryRollups.get(wanted)?.country_name || "";
+}
+
+function countryTooltip(name) {
+  const rollup = countryRollups.get(normalizeCountry(matchingCountryName(name) || name));
+  const node = document.createElement("div");
+  const title = document.createElement("strong"); title.textContent = name;
+  const detail = document.createElement("span");
+  detail.textContent = rollup ? `${rollup.active} active · ${rollup.contested} contested · ${rollup.situations} total` : "No country-attributed situations in this view";
+  node.append(title, detail);
+  return node;
+}
+
+function scheduleCommentary(type, value) {
+  if (!elements.mapCommentaryToggle.checked) return;
+  clearTimeout(commentaryTimer);
+  commentaryTimer = setTimeout(() => loadMapCommentary(type, value), 450);
+}
+
+async function loadMapCommentary(type, value) {
+  const key = `${type}:${value}`;
+  elements.mapCommentary.hidden = false;
+  elements.mapCommentary.textContent = "Entity is reading the current evidence…";
+  try {
+    let payload = commentaryCache.get(key);
+    if (!payload) {
+      const query = new URLSearchParams({ type });
+      query.set(type === "country" ? "country" : "id", value);
+      payload = await request(`/api/intelligence/map-commentary?${query}`);
+      commentaryCache.set(key, payload);
+    }
+    elements.mapCommentary.replaceChildren();
+    const title = document.createElement("strong"); title.textContent = payload.headline;
+    const body = document.createElement("span"); body.textContent = payload.commentary;
+    const note = document.createElement("small");
+    note.textContent = `Evidence-based ${payload.basis || "readout"}${Number.isFinite(payload.confidence) ? ` · ${Math.round(payload.confidence * 100)}% situation confidence` : ""}`;
+    elements.mapCommentary.append(title, body, note);
+  } catch (error) {
+    elements.mapCommentary.textContent = "Entity could not assemble commentary for this map feature.";
+  }
+}
+
 function selectMapSituations(situations) {
   if (mapPriority === "all") return situations;
   const active = situations.filter((situation) => situation.status === "active");
   if (mapPriority === "active") return active.slice(0, 75);
-  return active
+  const ranked = active
     .map((situation) => ({ situation, score: mapPriorityScore(situation) }))
     .sort((left, right) => right.score - left.score)
-    .slice(0, 30)
     .map((item) => item.situation);
+  const selected = [];
+  const counts = new Map();
+  for (const situation of ranked) {
+    const kind = hazardKind(situation);
+    if ((counts.get(kind) || 0) >= 10) continue;
+    selected.push(situation); counts.set(kind, (counts.get(kind) || 0) + 1);
+    if (selected.length === 30) break;
+  }
+  return selected;
 }
 
 function mapPriorityScore(situation) {
@@ -591,9 +756,25 @@ elements.mapPriorityFilter.addEventListener("change", () => {
   mapPriority = elements.mapPriorityFilter.value;
   refresh();
 });
-elements.mapCountryFilter.addEventListener("change", () => { mapCountry = elements.mapCountryFilter.value; renderMap(lastMapSituations); });
+elements.mapCountryFilter.addEventListener("change", () => {
+  mapCountry = elements.mapCountryFilter.value;
+  const layer = countryLayers.get(normalizeCountry(mapCountry));
+  if (layer && mapCountry) intelligenceMap.fitBounds(layer.getBounds(), { padding: [20, 20] });
+  else if (intelligenceMap && !mapCountry) intelligenceMap.setView([20, 0], 2);
+  renderMap(lastMapSituations);
+});
 elements.mapLabelsToggle.addEventListener("change", () => { mapLabels = elements.mapLabelsToggle.checked; renderMap(lastMapSituations); });
 elements.mapAircraftToggle.addEventListener("change", () => renderMap(lastMapSituations));
+elements.mapCommentaryToggle.addEventListener("change", () => {
+  clearTimeout(commentaryTimer);
+  if (!elements.mapCommentaryToggle.checked) {
+    elements.mapCommentary.hidden = true;
+    elements.mapCommentary.replaceChildren();
+  } else {
+    elements.mapCommentary.hidden = false;
+    elements.mapCommentary.textContent = "Hover over a country or situation for Entity's evidence-based readout.";
+  }
+});
 
 refresh();
 setInterval(refresh, 5000);

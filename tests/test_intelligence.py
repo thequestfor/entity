@@ -2603,6 +2603,11 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ) as response:
                     aircraft = json.loads(response.read())
                 with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/map-commentary?type=situation&id="
+                    + situations[0]["id"], timeout=2
+                ) as response:
+                    map_commentary = json.loads(response.read())
+                with urllib.request.urlopen(
                     dashboard.url
                     + "api/intelligence/situations/"
                     + situations[0]["id"],
@@ -2635,6 +2640,8 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertEqual(35.0, located_situations[0]["latitude"])
                 self.assertIn("countries", geography)
                 self.assertEqual([], aircraft["aircraft"])
+                self.assertEqual("stored-worldview", map_commentary["basis"])
+                self.assertEqual("Dashboard evidence", map_commentary["headline"])
                 self.assertGreater(len(situation_detail["claims"]), 0)
                 self.assertEqual(1, briefing["situation_count"])
                 self.assertIn("reputations", reputations)

@@ -849,6 +849,76 @@ class IntelligenceStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def map_commentary(self, kind, identifier="", country=""):
+        """Produce a cheap, auditable hover readout from the stored worldview."""
+        kind = str(kind or "").strip().lower()
+        now = utc_now()
+        if kind == "situation" and identifier:
+            with self._connect() as connection:
+                row = connection.execute(
+                    """SELECT situations.*,
+                       COUNT(DISTINCT situation_documents.document_id) evidence_count,
+                       COUNT(DISTINCT COALESCE(NULLIF(documents.reporting_family_key,''),
+                         NULLIF(documents.publisher_key,''),documents.source_id)) source_count
+                       FROM situations
+                       LEFT JOIN situation_documents ON situation_documents.situation_id=situations.id
+                       LEFT JOIN documents ON documents.id=situation_documents.document_id
+                       WHERE situations.id=? GROUP BY situations.id""",
+                    (str(identifier)[:100],)
+                ).fetchone()
+            if not row:
+                return {"headline": "Situation unavailable", "commentary": "The referenced situation is no longer available.", "updated_at": now}
+            item = dict(row)
+            place = item.get("location_label") or item.get("location_country_name") or "the reported location"
+            worldview = str(item.get("worldview") or "").strip()
+            if worldview:
+                commentary = worldview[:700]
+            else:
+                commentary = (
+                    f"Entity currently treats this as {item['status']} around {place}, "
+                    f"with {item['evidence_count']} evidence record(s) across "
+                    f"{item['source_count']} reporting family or source(s)."
+                )
+            return {
+                "headline": item["title"], "commentary": commentary,
+                "confidence": round(float(item.get("confidence") or 0), 4),
+                "location_confidence": round(float(item.get("location_confidence") or 0), 4),
+                "updated_at": item.get("updated_at") or now,
+                "basis": "stored-worldview"
+            }
+        if kind == "country" and country:
+            name = str(country).strip()[:120]
+            with self._connect() as connection:
+                totals = connection.execute(
+                    """SELECT COUNT(*) situations,
+                       SUM(status='active') active,SUM(status='contested') contested,
+                       AVG(confidence) confidence
+                       FROM situations WHERE location_country_name=?""",
+                    (name,)
+                ).fetchone()
+                top = connection.execute(
+                    """SELECT title,category,status,confidence FROM situations
+                       WHERE location_country_name=?
+                       ORDER BY status='contested' DESC,confidence DESC,updated_at DESC LIMIT 3""",
+                    (name,)
+                ).fetchall()
+            count = int(totals["situations"] or 0)
+            if not count:
+                commentary = "Entity has no country-attributed situations in the current geographic evidence set."
+            else:
+                topics = "; ".join(f"{row['title']} ({row['status']})" for row in top)
+                commentary = (
+                    f"Entity has {count} country-attributed situation(s): "
+                    f"{int(totals['active'] or 0)} active and {int(totals['contested'] or 0)} contested. "
+                    f"Highest-priority items: {topics}."
+                )
+            return {
+                "headline": name, "commentary": commentary,
+                "confidence": round(float(totals["confidence"] or 0), 4),
+                "updated_at": now, "basis": "country-rollup"
+            }
+        return {"headline": "Map commentary", "commentary": "Hover over a country or situation for Entity's evidence-based readout.", "updated_at": now}
+
     def get_situation(self, situation_id):
         with self._connect() as connection:
             situation = connection.execute(
