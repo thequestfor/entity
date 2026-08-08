@@ -79,7 +79,10 @@ class ReputationEngine:
                 ORDER BY COALESCE(attempts.next_attempt_at,
                                   documents.published_at,
                                   documents.retrieved_at)
-                LIMIT 1000
+                -- Keep each background trust pass bounded. Unresolved evidence
+                -- is retried through publisher_verification_attempts, so later
+                -- slices are not lost when a large historical backlog exists.
+                LIMIT 100
                 """,
                 (cutoff, now_text)
             ).fetchall()

@@ -344,16 +344,25 @@ class IntelligenceWorker:
                 update_watchdog = self._start_update_watchdog(changed)
                 self.last_analysis_result = self.understanding.analyze_pending()
                 self._next_analysis_at = now + self.analysis_poll_seconds
-            if force or now >= self._next_forecast_at:
-                self.last_forecast_result = self.forecasting.run_cycle()
-                self._next_forecast_at = now + self.forecast_poll_seconds
-            if analysis_due:
-                self.last_reputation_result = self.reputation.evaluate()
         except Exception as exc:
             print("Intelligence understanding cycle failed:", exc)
         finally:
             if update_watchdog:
                 update_watchdog.cancel()
+
+        try:
+            if force or now >= self._next_forecast_at:
+                self.last_forecast_result = self.forecasting.run_cycle()
+                self._next_forecast_at = now + self.forecast_poll_seconds
+        except Exception as exc:
+            print("Intelligence forecasting cycle failed:", exc)
+
+        try:
+            if analysis_due:
+                self.last_reputation_result = self.reputation.evaluate()
+        except Exception as exc:
+            print("Intelligence reputation cycle failed:", exc)
+        finally:
             if activity_started:
                 self._emit_activity(
                     "intelligence_finished",
