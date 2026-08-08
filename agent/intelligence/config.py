@@ -29,6 +29,7 @@ class IntelligenceConfig:
     dashboard_enabled: bool = True
     dashboard_open_browser: bool = False
     worker_poll_seconds: int = 30
+    activity_watchdog_seconds: int = 90
     analysis_poll_seconds: int = 300
     forecast_poll_seconds: int = 900
     worldview_synthesis_per_cycle: int = 12
@@ -134,6 +135,11 @@ class IntelligenceConfig:
                 "ENTITY_INTELLIGENCE_WORKER_POLL_SECONDS",
                 30,
                 minimum=5
+            ),
+            activity_watchdog_seconds=_env_int(
+                "ENTITY_INTELLIGENCE_ACTIVITY_WATCHDOG_SECONDS",
+                90,
+                minimum=15, maximum=900
             ),
             analysis_poll_seconds=_env_int(
                 "ENTITY_INTELLIGENCE_ANALYSIS_POLL_SECONDS",

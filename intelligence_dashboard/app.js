@@ -11,6 +11,7 @@ const elements = {
   briefingHeadline: document.querySelector("#briefing-headline"),
   briefingPeriod: document.querySelector("#briefing-period"),
   worldMap: document.querySelector("#world-map"),
+  mapStatus: document.querySelector("#map-status"),
   situationList: document.querySelector("#situation-list"),
   situationDetail: document.querySelector("#situation-detail"),
   documentFeed: document.querySelector("#document-feed"),
@@ -127,6 +128,9 @@ function renderMap(situations) {
   const located = situations.filter((situation) =>
     Number.isFinite(situation.latitude) && Number.isFinite(situation.longitude)
   );
+  elements.mapStatus.textContent = located.length
+    ? `${located.length} located situation${located.length === 1 ? "" : "s"} in this view`
+    : "No located situations in this view";
   if (!located.length) {
     const empty = document.createElement("p");
     empty.className = "map-empty";
@@ -363,14 +367,20 @@ function renderForecasts(forecasts, calibration) {
 
 async function refresh() {
   try {
-    const category = selectedCategory
-      ? `?category=${encodeURIComponent(selectedCategory)}`
+    const categoryQuery = new URLSearchParams();
+    if (selectedCategory) categoryQuery.set("category", selectedCategory);
+    const category = categoryQuery.toString()
+      ? `?${categoryQuery.toString()}`
       : "";
-    const [overview, documents, sources, situations, briefing, reputations, forecasts] = await Promise.all([
+    const mapQuery = new URLSearchParams(categoryQuery);
+    mapQuery.set("located", "1");
+    mapQuery.set("limit", "200");
+    const [overview, documents, sources, situations, mapSituations, briefing, reputations, forecasts] = await Promise.all([
       request("/api/intelligence/overview"),
       request(`/api/intelligence/documents${category}`),
       request("/api/intelligence/sources"),
       request(`/api/intelligence/situations${category}`),
+      request(`/api/intelligence/situations?${mapQuery.toString()}`),
       request("/api/intelligence/briefing"),
       request("/api/intelligence/reputations"),
       request("/api/intelligence/forecasts")
@@ -379,7 +389,7 @@ async function refresh() {
     renderDocuments(documents.documents ?? []);
     renderSources(sources.sources ?? []);
     renderSituations(situations.situations ?? []);
-    renderMap(situations.situations ?? []);
+    renderMap(mapSituations.situations ?? []);
     renderBriefing(briefing);
     renderReputations(reputations.reputations ?? []);
     renderForecasts(forecasts.forecasts ?? [], forecasts.calibration ?? {});

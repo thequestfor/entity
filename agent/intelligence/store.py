@@ -638,7 +638,9 @@ class IntelligenceStore:
             outcomes.append(item)
         return outcomes
 
-    def list_situations(self, limit=50, category=None, status=None):
+    def list_situations(
+        self, limit=50, category=None, status=None, located_only=False
+    ):
         limit = max(1, min(200, int(limit)))
         query = """
             SELECT situations.*,
@@ -668,6 +670,11 @@ class IntelligenceStore:
         if status:
             conditions.append("situations.status = ?")
             params.append(str(status).strip().lower())
+        if located_only:
+            conditions.append(
+                "situations.latitude IS NOT NULL "
+                "AND situations.longitude IS NOT NULL"
+            )
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += """

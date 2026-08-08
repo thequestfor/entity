@@ -64,6 +64,7 @@ const lifecycleModes: Record<string, Mode> = {
   autonomous: "autonomous_goal",
   intelligence_collecting: "autonomous_goal",
   world_model_updating: "thinking",
+  intelligence_delayed: "thinking",
   waiting_confirmation: "waiting_confirmation",
   recovering: "service_issue",
   service_error: "service_issue",
@@ -78,6 +79,7 @@ const lifecycleEnergy: Record<string, number> = {
   transcribing: 65, thinking: 76, tool_started: 82, tool_finished: 58,
   speaking: 88, autonomous: 70, intelligence_collecting: 74,
   world_model_updating: 78, waiting_confirmation: 54,
+  intelligence_delayed: 62,
   recovering: 72, service_error: 78, error: 88, idle: 42,
   stopping: 14, stopped: 0
 };

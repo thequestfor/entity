@@ -53,6 +53,7 @@ class IntelligenceWorker:
         analysis_poll_seconds=300,
         forecast_poll_seconds=900,
         source_backoff_max_seconds=21600,
+        activity_watchdog_seconds=90,
         on_activity=None
     ):
         self.store = store
@@ -75,6 +76,9 @@ class IntelligenceWorker:
         self.forecast_poll_seconds = max(60, int(forecast_poll_seconds))
         self.source_backoff_max_seconds = max(
             60, int(source_backoff_max_seconds)
+        )
+        self.activity_watchdog_seconds = max(
+            15, min(900, int(activity_watchdog_seconds))
         )
         self._next_analysis_at = 0.0
         self._next_forecast_at = 0.0
@@ -267,7 +271,8 @@ class IntelligenceWorker:
             forecast_per_cycle=config.forecast_per_cycle,
             analysis_poll_seconds=config.analysis_poll_seconds,
             forecast_poll_seconds=config.forecast_poll_seconds,
-            source_backoff_max_seconds=config.source_backoff_max_seconds
+            source_backoff_max_seconds=config.source_backoff_max_seconds,
+            activity_watchdog_seconds=config.activity_watchdog_seconds
         )
 
     @property
@@ -296,6 +301,7 @@ class IntelligenceWorker:
 
     def run_once(self, force=False):
         now = time.monotonic()
+        cycle_started = now
         outcomes = []
         due = [
             connector for connector in self.connectors
@@ -303,29 +309,38 @@ class IntelligenceWorker:
             and (force or self.store.source_due(connector.source_id))
             and (force or self._source_ready(connector.source_id, now))
         ]
+        activity_started = False
         if due:
             self._emit_activity(
                 "intelligence_collecting",
                 message=f"Gathering intelligence from {len(due)} source(s)",
                 sources=[connector.source_id for connector in due]
             )
+            activity_started = True
         for connector in due:
             outcome = self._poll_connector(connector)
             outcomes.append(outcome)
             self._record_source_outcome(connector, outcome, now)
 
-        if due:
-            self._emit_activity(
-                "world_model_updating",
-                message="Comparing evidence and updating the world model"
-            )
         self.last_analysis_result = AnalysisResult()
         self.last_reputation_result = ReputationResult()
         self.last_forecast_result = {"created": 0, "resolved": 0}
         changed = sum(outcome.result.changed for outcome in outcomes)
         analysis_due = changed or force or now >= self._next_analysis_at
+        update_watchdog = None
         try:
             if analysis_due:
+                self._emit_activity(
+                    "world_model_updating",
+                    message=(
+                        f"Analyzing {changed} changed document(s) and "
+                        "updating the world model"
+                    ),
+                    changed_documents=changed,
+                    watchdog_seconds=self.activity_watchdog_seconds
+                )
+                activity_started = True
+                update_watchdog = self._start_update_watchdog(changed)
                 self.last_analysis_result = self.understanding.analyze_pending()
                 self._next_analysis_at = now + self.analysis_poll_seconds
             if force or now >= self._next_forecast_at:
@@ -336,7 +351,9 @@ class IntelligenceWorker:
         except Exception as exc:
             print("Intelligence understanding cycle failed:", exc)
         finally:
-            if due:
+            if update_watchdog:
+                update_watchdog.cancel()
+            if activity_started:
                 self._emit_activity(
                     "intelligence_finished",
                     message=self._cycle_message(changed, outcomes),
@@ -352,7 +369,8 @@ class IntelligenceWorker:
                     ),
                     forecasts_created=self.last_forecast_result["created"],
                     forecasts_resolved=self.last_forecast_result["resolved"],
-                    errors=sum(bool(outcome.error) for outcome in outcomes)
+                    errors=sum(bool(outcome.error) for outcome in outcomes),
+                    elapsed_seconds=round(time.monotonic() - cycle_started, 1)
                 )
 
         return outcomes
@@ -414,6 +432,25 @@ class IntelligenceWorker:
             self.on_activity(state, **details)
         except Exception as exc:
             print("Intelligence activity callback failed:", exc)
+
+    def _start_update_watchdog(self, changed_documents):
+        def report_delay():
+            self._emit_activity(
+                "intelligence_delayed",
+                message=(
+                    "World-model update is taking longer than expected; "
+                    "collection has completed and analysis is continuing"
+                ),
+                stage="world_model_updating",
+                changed_documents=changed_documents,
+                elapsed_seconds=self.activity_watchdog_seconds,
+                watchdog_seconds=self.activity_watchdog_seconds
+            )
+
+        watchdog = threading.Timer(self.activity_watchdog_seconds, report_delay)
+        watchdog.daemon = True
+        watchdog.start()
+        return watchdog
 
     def _run(self):
         while not self._stop.is_set():

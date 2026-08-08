@@ -1648,6 +1648,24 @@ class IntelligenceWorkerTests(unittest.TestCase):
                 events[-1][1]["message"]
             )
 
+    def test_worker_finishes_a_scheduled_analysis_without_due_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = IntelligenceStore(Path(directory) / "scheduled.db")
+            events = []
+            worker = IntelligenceWorker(
+                store, [],
+                on_activity=lambda state, **details: events.append(
+                    (state, details)
+                )
+            )
+
+            worker.run_once(force=True)
+
+            self.assertEqual(
+                ["world_model_updating", "intelligence_finished"],
+                [state for state, _ in events]
+            )
+
 
 class IntelligenceDashboardTests(unittest.TestCase):
     def test_dashboard_opens_browser_when_enabled(self):
@@ -1686,7 +1704,9 @@ class IntelligenceDashboardTests(unittest.TestCase):
                         external_id="one",
                         title="Dashboard evidence",
                         url="https://example.test/evidence",
-                        summary="Evidence summary"
+                        summary="Evidence summary",
+                        latitude=35.0,
+                        longitude=-80.0
                     )
                 ]
             )
@@ -1720,6 +1740,12 @@ class IntelligenceDashboardTests(unittest.TestCase):
                     situations = json.loads(response.read())["situations"]
                 with urllib.request.urlopen(
                     dashboard.url
+                    + "api/intelligence/situations?located=1",
+                    timeout=2
+                ) as response:
+                    located_situations = json.loads(response.read())["situations"]
+                with urllib.request.urlopen(
+                    dashboard.url
                     + "api/intelligence/situations/"
                     + situations[0]["id"],
                     timeout=2
@@ -1747,6 +1773,8 @@ class IntelligenceDashboardTests(unittest.TestCase):
                     payload["documents"][0]["title"]
                 )
                 self.assertEqual(1, len(situations))
+                self.assertEqual(1, len(located_situations))
+                self.assertEqual(35.0, located_situations[0]["latitude"])
                 self.assertGreater(len(situation_detail["claims"]), 0)
                 self.assertEqual(1, briefing["situation_count"])
                 self.assertIn("reputations", reputations)

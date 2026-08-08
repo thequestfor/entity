@@ -93,7 +93,8 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
                     "situations": self.server.intelligence_store.list_situations(
                         limit=_query_int(query, "limit", 50),
                         category=(query.get("category") or [None])[0],
-                        status=(query.get("status") or [None])[0]
+                        status=(query.get("status") or [None])[0],
+                        located_only=_query_bool(query, "located")
                     )
                 }
             )
@@ -233,3 +234,8 @@ def _query_int(query, name, default):
         return int((query.get(name) or [default])[0])
     except (TypeError, ValueError):
         return default
+
+
+def _query_bool(query, name, default=False):
+    value = str((query.get(name) or [default])[0]).strip().lower()
+    return value in {"1", "true", "yes", "on"}
