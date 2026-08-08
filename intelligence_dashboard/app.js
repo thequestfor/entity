@@ -29,6 +29,10 @@ const elements = {
   verificationTaskCount: document.querySelector("#verification-task-count"),
   intelligenceGapCount: document.querySelector("#intelligence-gap-count"),
   reasoningJobCount: document.querySelector("#reasoning-job-count"),
+  groundingCount: document.querySelector("#grounding-count"),
+  directCheckCount: document.querySelector("#direct-check-count"),
+  shadowModelCount: document.querySelector("#shadow-model-count"),
+  epistemicHealth: document.querySelector("#epistemic-health"),
   documentTemplate: document.querySelector("#document-template"),
   situationTemplate: document.querySelector("#situation-template")
 };
@@ -90,6 +94,9 @@ function renderOverview(overview) {
   );
   elements.intelligenceGapCount.textContent = overview.intelligence_gaps ?? 0;
   elements.reasoningJobCount.textContent = overview.pending_reasoning_jobs ?? 0;
+  elements.groundingCount.textContent = overview.claim_groundings ?? 0;
+  elements.directCheckCount.textContent = overview.verification_observations ?? 0;
+  elements.shadowModelCount.textContent = overview.shadow_ensemble_models ?? 0;
   const processed = overview.epistemic_backfill_processed ?? 0;
   elements.epistemicBackfillStatus.textContent = overview.epistemic_backfill_complete
     ? `Historical epistemic backfill complete · ${processed} records reviewed`
@@ -431,8 +438,37 @@ function renderForecasts(forecasts, calibration) {
       ? `${forecast.actual_outcome ? "occurred" : "did not occur"} · Brier ${Number(forecast.brier_score).toFixed(3)}`
       : forecast.predicted_outcome;
     card.append(title, detail, outcome);
+    if ((forecast.components ?? []).length) {
+      const components = document.createElement("small");
+      components.textContent = "Probability inputs: " + forecast.components
+        .map((item) => `${item.component} ${Math.round(item.probability * 100)}% × ${Math.round(item.weight * 100)}%`)
+        .join(" · ");
+      card.append(components);
+    }
     elements.forecastList.append(card);
   }
+}
+
+function renderEpistemicHealth(health) {
+  elements.epistemicHealth.replaceChildren();
+  const card = (titleText, detailText) => {
+    const node = document.createElement("div");
+    node.className = "source-card";
+    const title = document.createElement("strong");
+    title.textContent = titleText;
+    const detail = document.createElement("span");
+    detail.textContent = detailText;
+    node.append(title, detail);
+    return node;
+  };
+  const ready = (health.verification_targets ?? []).find((item) => item.target_status === "ready")?.count ?? 0;
+  const unresolvable = (health.verification_targets ?? []).find((item) => item.target_status === "unresolvable")?.count ?? 0;
+  const targetSummary = card("Verification funnel", `${ready} queryable · ${unresolvable} unresolvable`);
+  const calibration = health.calibration ?? {};
+  const forecastSummary = card("V2 forecast maturity", `${calibration.v2_resolved ?? 0} resolved · ${Math.round((calibration.v2_resolution_coverage ?? 0) * 100)}% resolution coverage`);
+  const model = (health.models ?? [])[0];
+  const modelSummary = card("Learned ensemble", model ? `${model.status} · ${model.sample_count} training samples` : "awaiting independently resolved forecasts");
+  elements.epistemicHealth.append(targetSummary, forecastSummary, modelSummary);
 }
 
 async function refresh() {
@@ -445,7 +481,7 @@ async function refresh() {
     const mapQuery = new URLSearchParams(categoryQuery);
     mapQuery.set("located", "1");
     mapQuery.set("limit", "200");
-    const [overview, documents, sources, situations, mapSituations, briefing, reputations, forecasts] = await Promise.all([
+    const [overview, documents, sources, situations, mapSituations, briefing, reputations, forecasts, epistemicHealth] = await Promise.all([
       request("/api/intelligence/overview"),
       request(`/api/intelligence/documents${category}`),
       request("/api/intelligence/sources"),
@@ -453,7 +489,8 @@ async function refresh() {
       request(`/api/intelligence/situations?${mapQuery.toString()}`),
       request("/api/intelligence/briefing"),
       request("/api/intelligence/reputations"),
-      request("/api/intelligence/forecasts")
+      request("/api/intelligence/forecasts"),
+      request("/api/intelligence/epistemic-health")
     ]);
     renderOverview(overview);
     renderDocuments(documents.documents ?? []);
@@ -463,6 +500,7 @@ async function refresh() {
     renderBriefing(briefing);
     renderReputations(reputations.reputations ?? []);
     renderForecasts(forecasts.forecasts ?? [], forecasts.calibration ?? {});
+    renderEpistemicHealth(epistemicHealth);
     setConnection(true);
   } catch (error) {
     setConnection(false);

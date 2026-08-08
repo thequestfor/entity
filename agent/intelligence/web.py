@@ -94,6 +94,10 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             ))
             return
 
+        if parsed.path == "/api/intelligence/epistemic-health":
+            self._send_json(self.server.intelligence_store.epistemic_health())
+            return
+
         if parsed.path == "/api/intelligence/reasoning":
             query=parse_qs(parsed.query)
             self._send_json(self.server.intelligence_store.reasoning_overview(

@@ -36,6 +36,8 @@ from agent.intelligence.reasoning_budget import ReasoningBudget, BudgetedModelRo
 from agent.intelligence.reasoning_jobs import ReasoningJobQueue
 from agent.intelligence.acquisition import ActiveAcquisitionEngine
 from agent.intelligence.verification import VerificationEngine
+from agent.intelligence.claim_grounding import ClaimGroundingEngine
+from agent.intelligence.ensemble_training import EnsembleTrainer
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,8 @@ class IntelligenceWorker:
         reputation=None,
         belief_revision=None,
         verification=None,
+        grounding=None,
+        ensemble_trainer=None,
         hypothesis_competition=None,
         evaluation=None,
         acquisition=None,
@@ -81,6 +85,8 @@ class IntelligenceWorker:
         self.reputation = reputation or ReputationEngine(store)
         self.belief_revision = belief_revision or BeliefRevisionEngine(store)
         self.verification = verification or VerificationEngine(store)
+        self.grounding = grounding or ClaimGroundingEngine(store)
+        self.ensemble_trainer = ensemble_trainer
         self.hypothesis_competition = (
             hypothesis_competition or HypothesisCompetitionEngine(store)
         )
@@ -322,6 +328,12 @@ class IntelligenceWorker:
             connectors=connectors,
             remote_per_cycle=config.verification_remote_per_cycle
         )
+        grounding = ClaimGroundingEngine(
+            store, router=bounded_router.for_lane("grounding"),
+            enabled=config.claim_grounding_enabled,
+            batch_size=config.claim_grounding_batch_size,
+            model_enabled=config.model_claim_grounding_enabled
+        )
         hypothesis_competition = HypothesisCompetitionEngine(
             store, enabled=config.hypothesis_competition_enabled,
             batch_size=config.hypothesis_batch_size,
@@ -338,7 +350,14 @@ class IntelligenceWorker:
             store, router=bounded_router.for_lane("forecast"),
             max_active=config.forecast_max_active,
             per_cycle=config.forecast_per_cycle,
-            mode=config.forecast_v2_mode,queue=queue,durable_jobs=True
+            mode=config.forecast_v2_mode,queue=queue,durable_jobs=True,
+            resolution_per_cycle=config.forecast_resolution_per_cycle,
+            learned_ensemble_mode=config.learned_ensemble_mode
+        )
+        ensemble_trainer = EnsembleTrainer(
+            store, enabled=config.ensemble_training_enabled,
+            minimum_samples=config.ensemble_min_training_samples,
+            minimum_validation=config.ensemble_min_validation_samples
         )
         acquisition = ActiveAcquisitionEngine(
             store, enabled=config.active_acquisition_enabled,
@@ -352,6 +371,8 @@ class IntelligenceWorker:
             reputation=reputation,
             belief_revision=belief_revision,
             verification=verification,
+            grounding=grounding,
+            ensemble_trainer=ensemble_trainer,
             hypothesis_competition=hypothesis_competition,
             evaluation=evaluation,
             acquisition=acquisition,
@@ -422,6 +443,10 @@ class IntelligenceWorker:
         except Exception as exc:
             print("Intelligence belief revision cycle failed:", exc)
         try:
+            self.grounding.run_batch()
+        except Exception as exc:
+            print("Intelligence claim grounding cycle failed:", exc)
+        try:
             self.verification.run_batch()
             self.belief_revision.apply_verification_results()
         except Exception as exc:
@@ -473,6 +498,8 @@ class IntelligenceWorker:
                 self.last_forecast_result = self.forecasting.run_cycle()
                 if self.evaluation is not None:
                     self.evaluation.run()
+                if self.ensemble_trainer is not None:
+                    self.ensemble_trainer.train_if_ready()
                 self._next_forecast_at = now + self.forecast_poll_seconds
         except Exception as exc:
             print("Intelligence forecasting cycle failed:", exc)

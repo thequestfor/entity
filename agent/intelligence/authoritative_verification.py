@@ -14,7 +14,13 @@ SOURCE_BY_ADAPTER = {
     "cisa-kev": "cisa_known_exploited_vulnerabilities",
     "github-advisories": "github_security_advisories",
     "world-bank": "world_bank_indicators",
-    "fred": "fred_economic_indicators"
+    "fred": "fred_economic_indicators",
+    "eonet": "nasa_eonet",
+    "gdacs": "gdacs",
+    "who-outbreaks": "who_outbreaks",
+    "reliefweb": "reliefweb",
+    "firms": "nasa_firms_wildfires",
+    "noaa-swpc": "noaa_space_weather_alerts"
 }
 
 
@@ -33,9 +39,10 @@ class AuthoritativeVerificationRegistry:
     def safe_error(self, error):
         message = str(error)
         for connector in self.connectors.values():
-            secret = str(getattr(connector, "api_key", "") or "")
-            if secret:
-                message = message.replace(secret, "[REDACTED]")
+            for attribute in ("api_key", "map_key", "token"):
+                secret = str(getattr(connector, attribute, "") or "")
+                if secret:
+                    message = message.replace(secret, "[REDACTED]")
         return message[:500]
 
     def query(self, target):
@@ -57,6 +64,24 @@ class AuthoritativeVerificationRegistry:
             snapshot, observed, closed = self._world_bank(connector, query)
         elif adapter == "fred":
             snapshot, observed, closed = self._fred(connector, query)
+        elif adapter == "eonet":
+            snapshot, observed, closed = self._eonet(connector, query)
+        elif adapter == "gdacs":
+            snapshot, observed, closed = self._feed_record(
+                connector, query, "event_id", "external_id", False
+            )
+        elif adapter == "who-outbreaks":
+            snapshot, observed, closed = self._feed_record(
+                connector, query, "notice_id", "external_id", False
+            )
+        elif adapter == "reliefweb":
+            snapshot, observed, closed = self._reliefweb(connector, query)
+        elif adapter == "firms":
+            snapshot, observed, closed = self._firms(connector, query)
+        elif adapter == "noaa-swpc":
+            snapshot, observed, closed = self._feed_record(
+                connector, query, "message_id", "external_id", False
+            )
         else:
             return None
         outcome, revision, confidence, reason = compare_observation(
@@ -197,6 +222,88 @@ class AuthoritativeVerificationRegistry:
                   "value":(match or {}).get("value")}
         return {"match":match},observed,bool(date)
 
+    def _eonet(self, connector, query):
+        event_id = _identifier(query.get("event_id"), 3, 200)
+        payload = connector.fetch_json(
+            connector.base_url.rstrip("/") + "/"
+            + urllib.parse.quote(event_id, safe="")
+        )
+        event = payload.get("event") if isinstance(payload, dict) else None
+        event = event or payload
+        categories = [
+            str(item.get("title") or item.get("id") or "")
+            for item in (event.get("categories") or [])
+        ]
+        observed = {
+            "found": bool(event and event.get("id")),
+            "event_id": event.get("id"), "status": (
+                "closed" if event.get("closed") else "open"
+            ), "closed": bool(event.get("closed")),
+            "categories": categories, "title": event.get("title")
+        }
+        return payload, observed, True
+
+    def _reliefweb(self, connector, query):
+        report_id = _identifier(query.get("report_id"), 1, 100)
+        parameters = urllib.parse.urlencode({
+            "appname": connector.appname, "profile": "full"
+        })
+        payload = connector.fetch_json(
+            connector.base_url.rstrip("/") + "/"
+            + urllib.parse.quote(report_id, safe="") + "?" + parameters
+        )
+        rows = payload.get("data") or []
+        match = rows[0] if rows else None
+        fields = (match or {}).get("fields") or {}
+        observed = {"found": bool(match), "report_id": report_id,
+                    "title": fields.get("title"),
+                    "countries": _names(fields.get("country")),
+                    "disasters": _names(fields.get("disaster"))}
+        return {"match": match}, observed, True
+
+    def _feed_record(self, connector, query, query_key, item_key,
+                     closed_world=False):
+        identifier = _identifier(query.get(query_key), 1, 300)
+        batch = connector.poll()
+        rows = [_source_item(item) for item in (batch.items or [])]
+        match = next((item for item in rows
+                      if str(item.get(item_key) or "") == identifier), None)
+        metadata = (match or {}).get("metadata") or {}
+        observed = {"found": bool(match), query_key: identifier,
+                    "title": (match or {}).get("title"),
+                    "status": metadata.get("status"),
+                    "alert_level": metadata.get("alert_level"),
+                    "event_type": metadata.get("event_type"),
+                    "country": metadata.get("country")}
+        return {"match": match, "records_examined": len(rows)}, observed, closed_world
+
+    def _firms(self, connector, query):
+        latitude = _bounded_float(query.get("latitude"), -90, 90)
+        longitude = _bounded_float(query.get("longitude"), -180, 180)
+        radius_km = _bounded_float(query.get("radius_km", 25), 1, 100)
+        observed_at = _parse_time(query.get("observed_at"))
+        if observed_at is None:
+            raise ValueError("FIRMS lookup requires an observation time")
+        batch = connector.poll()
+        matches = []
+        for raw in batch.items or []:
+            item = _source_item(raw)
+            if item.get("latitude") is None or item.get("longitude") is None:
+                continue
+            distance = _distance_km(
+                latitude, longitude, float(item["latitude"]),
+                float(item["longitude"])
+            )
+            published = _parse_time(item.get("published_at"))
+            if distance <= radius_km and published is not None \
+                    and abs((published-observed_at).total_seconds()) <= 86400:
+                matches.append({**item, "distance_km": round(distance, 2)})
+        best = min(matches, key=lambda item: item["distance_km"]) if matches else None
+        observed = {"found": bool(best), "latitude": latitude,
+                    "longitude": longitude,
+                    "detection": best, "match_count": len(matches)}
+        return {"matches": matches[:10]}, observed, False
+
 
 def compare_observation(expected, observed, closed_world=False):
     predicate = str(expected.get("predicate") or "")
@@ -208,7 +315,8 @@ def compare_observation(expected, observed, closed_world=False):
     key = {
         "seismic.magnitude":"magnitude", "event.status":"status",
         "event.alert_level":"alert_level", "economic.value":"value",
-        "cyber.known_exploited":"known_exploited"
+        "cyber.known_exploited":"known_exploited",
+        "seismic.tsunami":"tsunami", "event.closed":"closed"
     }.get(predicate)
     if not key:
         return "supports", "", .92, "An exact authoritative record exists for the typed identifier."
@@ -260,3 +368,38 @@ def _number(value):
 
 
 def _normalize(value): return re.sub(r"\s+"," ",str(value or "").strip().lower())
+
+
+def _identifier(value, minimum, maximum):
+    value = str(value or "").strip()
+    if not minimum <= len(value) <= maximum \
+            or not re.fullmatch(r"[A-Za-z0-9:/?&=._-]+", value):
+        raise ValueError("Invalid authoritative record identifier")
+    return value
+
+
+def _source_item(item):
+    if isinstance(item, dict):
+        return dict(item)
+    return {key: getattr(item, key) for key in (
+        "external_id", "title", "url", "summary", "content", "published_at",
+        "category", "latitude", "longitude", "metadata"
+    ) if hasattr(item, key)}
+
+
+def _names(value):
+    if not value:
+        return []
+    result = []
+    for item in value if isinstance(value, list) else [value]:
+        result.append(str((item.get("name") or item.get("id"))
+                          if isinstance(item, dict) else item))
+    return result
+
+
+def _distance_km(lat_a, lon_a, lat_b, lon_b):
+    lat_a, lat_b = math.radians(lat_a), math.radians(lat_b)
+    delta_lat = lat_b-lat_a
+    delta_lon = math.radians(lon_b-lon_a)
+    value = math.sin(delta_lat/2)**2 + math.cos(lat_a)*math.cos(lat_b)*math.sin(delta_lon/2)**2
+    return 6371.0*2*math.atan2(math.sqrt(value), math.sqrt(max(0.0, 1-value)))

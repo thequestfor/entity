@@ -514,6 +514,15 @@ class IntelligenceStore:
                      WHERE target_status='ready') AS ready_verification_targets,
                     (SELECT COUNT(*) FROM verification_observations)
                      AS verification_observations,
+                    (SELECT COUNT(*) FROM claim_groundings)
+                     AS claim_groundings,
+                    (SELECT COUNT(*) FROM verification_targets
+                     WHERE target_status='unresolvable')
+                     AS unresolvable_verification_targets,
+                    (SELECT COUNT(*) FROM ensemble_training_runs)
+                     AS ensemble_training_runs,
+                    (SELECT COUNT(*) FROM forecast_model_versions
+                     WHERE status='shadow') AS shadow_ensemble_models,
                     (SELECT COUNT(*) FROM intelligence_gaps
                      WHERE status = 'open') AS intelligence_gaps,
                     ((SELECT COUNT(*) FROM active_acquisition_attempts) +
@@ -641,6 +650,12 @@ class IntelligenceStore:
             rows = connection.execute(
                 """
                 SELECT publisher_reputation.*,
+                       profiles.factual_accuracy,
+                       profiles.attribution_quality,
+                       profiles.revision_discipline,
+                       profiles.independence_confidence,
+                       profiles.framing_signal,
+                       profiles.factual_samples,
                        (SELECT outcome FROM publisher_outcomes
                         WHERE publisher_key = publisher_reputation.publisher_key
                         ORDER BY evaluated_at DESC LIMIT 1) AS latest_outcome,
@@ -651,6 +666,8 @@ class IntelligenceStore:
                         WHERE publisher_key = publisher_reputation.publisher_key
                         ORDER BY evaluated_at DESC LIMIT 1) AS latest_outcome_at
                 FROM publisher_reputation
+                LEFT JOIN publisher_epistemic_profiles profiles
+                  ON profiles.publisher_key=publisher_reputation.publisher_key
                 ORDER BY evaluated_count DESC, learned_credibility DESC,
                          publisher_label
                 LIMIT ?
@@ -658,6 +675,48 @@ class IntelligenceStore:
                 (max(1, min(1000, int(limit))),)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def epistemic_health(self):
+        with self._connect() as connection:
+            target_status = connection.execute(
+                "SELECT target_status,COUNT(*) count FROM verification_targets "
+                "GROUP BY target_status ORDER BY count DESC"
+            ).fetchall()
+            observation_outcomes = connection.execute(
+                "SELECT outcome,COUNT(*) count FROM verification_observations "
+                "GROUP BY outcome ORDER BY count DESC"
+            ).fetchall()
+            groundings = connection.execute(
+                "SELECT grounding_type,COUNT(*) count FROM claim_groundings "
+                "GROUP BY grounding_type ORDER BY count DESC LIMIT 20"
+            ).fetchall()
+            models = connection.execute(
+                "SELECT id,method,sample_count,training_cutoff_at,status,"
+                "brier_score,log_loss,created_at,promoted_at "
+                "FROM forecast_model_versions ORDER BY created_at DESC LIMIT 10"
+            ).fetchall()
+            training = connection.execute(
+                "SELECT * FROM ensemble_training_runs "
+                "ORDER BY id DESC LIMIT 10"
+            ).fetchall()
+            portfolio = connection.execute(
+                "SELECT * FROM forecast_portfolio_state "
+                "ORDER BY target_share DESC"
+            ).fetchall()
+            grounding_state = connection.execute(
+                "SELECT * FROM grounding_backfill_state ORDER BY updated_at DESC"
+            ).fetchall()
+        return {
+            "verification_targets": [dict(row) for row in target_status],
+            "verification_observations": [dict(row) for row in observation_outcomes],
+            "groundings": [dict(row) for row in groundings],
+            "grounding_backfills": [dict(row) for row in grounding_state],
+            "forecast_portfolio": [dict(row) for row in portfolio],
+            "models": [dict(row) for row in models],
+            "training_runs": [dict(row) for row in training],
+            "calibration": self.forecast_calibration(),
+            "evaluations": self.intelligence_evaluations(limit=1)
+        }
 
     def list_publisher_outcomes(self, publisher_key=None, limit=100):
         query = """
@@ -980,8 +1039,8 @@ class IntelligenceStore:
                     method, status, created_at,hypothesis_id,forecast_kind,
                     category,horizon_bucket,evidence_cutoff_at,evidence_snapshot_hash,
                     base_rate,base_rate_source,model_probability,ensemble_probability,
-                    shadow,generation_job_id
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    shadow,generation_job_id,portfolio_slot
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     forecast["id"], forecast["situation_id"], forecast["question"],
@@ -998,7 +1057,7 @@ class IntelligenceStore:
                     forecast.get("base_rate"),forecast.get("base_rate_source",""),
                     forecast.get("model_probability"),
                     forecast.get("ensemble_probability"),int(bool(forecast.get("shadow"))),
-                    forecast.get("generation_job_id")
+                    forecast.get("generation_job_id"),forecast.get("portfolio_slot","")
                 )
             )
             now=forecast["created_at"]
@@ -1006,7 +1065,7 @@ class IntelligenceStore:
                 connection.execute(
                     "INSERT OR IGNORE INTO forecast_component_predictions VALUES (?,?,?,?,?,?)",
                     (forecast["id"],component["component"],component["probability"],
-                     component["weight"],"fixed-log-odds-v1",now)
+                     component["weight"],forecast.get("ensemble_method","fixed-log-odds-v1"),now)
                 )
             for claim_id in forecast.get("claim_ids",[]):
                 connection.execute(
@@ -1015,6 +1074,12 @@ class IntelligenceStore:
                     "VALUES (?,?,NULL,'snapshot',?,?)",
                     (forecast["id"],claim_id,now,
                      forecast.get("evidence_snapshot_hash",""))
+                )
+            if forecast.get("portfolio_slot"):
+                connection.execute(
+                    "UPDATE forecast_portfolio_state SET generated_count="
+                    "generated_count+1,updated_at=? WHERE horizon_bucket=?",
+                    (now,forecast["portfolio_slot"])
                 )
 
     def list_forecasts(self, limit=50, status=None):
@@ -1027,13 +1092,31 @@ class IntelligenceStore:
         params.append(max(1, min(200, int(limit))))
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
-        return [self._forecast_from_row(row) for row in rows]
+            ids=[row["id"] for row in rows]
+            component_rows=[]
+            if ids:
+                component_rows=connection.execute(
+                    "SELECT * FROM forecast_component_predictions WHERE "
+                    "forecast_id IN (%s) ORDER BY forecast_id,component"
+                    % ",".join("?" for _ in ids), ids
+                ).fetchall()
+        components={}
+        for row in component_rows:
+            components.setdefault(row["forecast_id"],[]).append(dict(row))
+        result=[]
+        for row in rows:
+            item=self._forecast_from_row(row)
+            item["components"]=components.get(item["id"],[])
+            result.append(item)
+        return result
 
     def due_forecasts(self, now, limit=20):
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM forecasts WHERE status = 'active' AND target_at <= ? ORDER BY target_at LIMIT ?",
-                (now, max(1, min(100, int(limit))))
+                "SELECT * FROM forecasts WHERE status = 'active' AND target_at <= ? "
+                "AND (next_resolution_at IS NULL OR next_resolution_at<=?) "
+                "ORDER BY target_at LIMIT ?",
+                (now, now, max(1, min(100, int(limit))))
             ).fetchall()
         return [self._forecast_from_row(row) for row in rows]
 
@@ -1058,11 +1141,36 @@ class IntelligenceStore:
                 (now, actual, str(summary)[:3000], self._json(evidence), score,
                  float(confidence or 0),str(resolver_method),forecast_id)
             )
+            connection.execute(
+                "UPDATE forecast_portfolio_state SET resolved_count="
+                "resolved_count+1,updated_at=? WHERE horizon_bucket=("
+                "SELECT horizon_bucket FROM forecasts WHERE id=?)",
+                (now,forecast_id)
+            )
         return True
 
     def note_forecast_unresolved(self, forecast_id):
         with self._connect() as connection:
-            connection.execute("UPDATE forecasts SET resolution_attempts = resolution_attempts + 1 WHERE id = ? AND status = 'active'", (forecast_id,))
+            row=connection.execute(
+                "SELECT resolution_attempts,target_at FROM forecasts "
+                "WHERE id=? AND status='active'",(forecast_id,)
+            ).fetchone()
+            if not row:
+                return
+            attempts=int(row["resolution_attempts"] or 0)+1
+            if attempts>=8:
+                connection.execute(
+                    "UPDATE forecasts SET status='expired',resolution_attempts=?,"
+                    "terminal_reason='Insufficient post-cutoff evidence after eight "
+                    "bounded resolution attempts' WHERE id=?",
+                    (attempts,forecast_id)
+                )
+            else:
+                connection.execute(
+                    "UPDATE forecasts SET resolution_attempts=?,"
+                    "next_resolution_at=datetime('now','+6 hours') WHERE id=?",
+                    (attempts,forecast_id)
+                )
 
     def record_forecast_resolution_attempt(self, forecast_id, outcome,
                                            confidence, summary, evidence,

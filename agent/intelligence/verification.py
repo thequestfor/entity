@@ -20,7 +20,9 @@ SOURCE_KIND_BY_TOPIC = {
     "public-health": "who-outbreaks", "health": "who-outbreaks",
     "wildfire": "firms", "economics": "world-bank",
     "economic-indicator": "world-bank", "humanitarian": "reliefweb",
-    "disaster": "gdacs", "natural-disaster": "gdacs"
+    "disaster": "gdacs", "natural-disaster": "gdacs",
+    "natural-event": "eonet", "volcanoes": "eonet",
+    "disease-outbreak": "who-outbreaks", "space-weather": "noaa-swpc"
 }
 
 SOURCE_IDS_BY_KIND = {
@@ -35,6 +37,7 @@ SOURCE_IDS_BY_KIND = {
     "world-bank": {"world_bank_indicators"},
     "fred": {"fred_economic_indicators"},
     "firms": {"nasa_firms_wildfires"},
+    "noaa-swpc": {"noaa_space_weather_alerts"},
 }
 
 AUTHORITATIVE_SOURCE_IDS = set().union(*SOURCE_IDS_BY_KIND.values())
@@ -64,6 +67,8 @@ class VerificationPlanner:
                 "SELECT * FROM claims WHERE id = ?", (claim_id,)
             ).fetchone()
             if not claim or claim["verifiability"] != "checkable":
+                continue
+            if claim["predicate"] in {"event.reported", "event.category"}:
                 continue
             if claim["truth_status"] in {"corroborated", "refuted"}:
                 continue
@@ -147,8 +152,10 @@ class VerificationEngine:
         recorded = postponed = remote_used = 0
         queried_sources = set()
         for task in tasks:
-            with self.store._connect() as connection:
-                target = self.targets.ensure(connection, task)
+            target = None
+            if task["desired_source_kind"] != "independent-public":
+                with self.store._connect() as connection:
+                    target = self.targets.ensure(connection, task)
             decision = None
             if (
                 target and target["target_status"] == "ready"
@@ -175,7 +182,8 @@ class VerificationEngine:
                                     "expected_value": target["expected_value"],
                                     "response_hash": observation["response_hash"],
                                     "revision_kind": observation["revision_kind"],
-                                    "closed_world": observation["closed_world"]
+                                    "closed_world": observation["closed_world"],
+                                    "verifier_source_id": observation["source_id"]
                                 }
                     except Exception as exc:
                         with self.store._connect() as connection:
@@ -198,8 +206,8 @@ class VerificationEngine:
                       task_id,claim_id,result,confidence,authority_level,
                       document_version_id,reason,method,created_at,basis,
                       observed_value,expected_value,response_hash,revision_kind,
-                      closed_world
-                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                      closed_world,verifier_source_id
+                    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (task["id"], task["claim_id"], decision["result"],
                      decision["confidence"], decision["authority_level"],
@@ -209,7 +217,8 @@ class VerificationEngine:
                      self.store._json(decision.get("expected_value",{})),
                      decision.get("response_hash",""),
                      decision.get("revision_kind",""),
-                     int(bool(decision.get("closed_world"))))
+                     int(bool(decision.get("closed_world"))),
+                     decision.get("verifier_source_id", ""))
                 )
                 connection.execute(
                     "UPDATE claim_verification_tasks SET status='completed',"
@@ -337,7 +346,8 @@ class VerificationEngine:
             return {
                 "confidence": round(max(.8, min(.99, float(best["credibility"]))), 4),
                 "authority_level": "primary",
-                "document_version_id": best["document_version_id"]
+                "document_version_id": best["document_version_id"],
+                "verifier_source_id": best["source_id"]
             }
         authoritative = [
             row for row in evidence if row["source_id"] in AUTHORITATIVE_SOURCE_IDS
@@ -348,7 +358,8 @@ class VerificationEngine:
             return {
                 "confidence": round(max(.8, min(.99, float(best["credibility"]))), 4),
                 "authority_level": "primary",
-                "document_version_id": best["document_version_id"]
+                "document_version_id": best["document_version_id"],
+                "verifier_source_id": best["source_id"]
             }
         families = {}
         for row in evidence:
@@ -361,5 +372,7 @@ class VerificationEngine:
         return {
             "confidence": round(confidence, 4),
             "authority_level": "secondary",
-            "document_version_id": best["document_version_id"]
+            "document_version_id": best["document_version_id"],
+            "verifier_source_id": best["source_id"],
+            "independent_family_count": len(families)
         }

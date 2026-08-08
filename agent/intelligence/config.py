@@ -39,6 +39,9 @@ class IntelligenceConfig:
     prose_claim_extraction_enabled: bool = True
     model_claim_extraction_enabled: bool = False
     claim_extraction_max_claims: int = 20
+    claim_grounding_enabled: bool = True
+    claim_grounding_batch_size: int = 100
+    model_claim_grounding_enabled: bool = False
     epistemic_backfill_enabled: bool = True
     epistemic_backfill_batch_size: int = 50
     belief_revision_enabled: bool = True
@@ -78,7 +81,12 @@ class IntelligenceConfig:
     reputation_min_evaluated_outcomes: int = 12
     forecast_max_active: int = 12
     forecast_per_cycle: int = 2
+    forecast_resolution_per_cycle: int = 4
     forecast_v2_mode: str = "shadow"
+    ensemble_training_enabled: bool = True
+    ensemble_min_training_samples: int = 100
+    ensemble_min_validation_samples: int = 30
+    learned_ensemble_mode: str = "shadow"
     reliefweb_appname: str = ""
     reliefweb_enabled: bool = True
     usgs_enabled: bool = True
@@ -203,6 +211,16 @@ class IntelligenceConfig:
             claim_extraction_max_claims=_env_int(
                 "ENTITY_CLAIM_EXTRACTION_MAX_CLAIMS", 20,
                 minimum=2, maximum=50
+            ),
+            claim_grounding_enabled=_env_bool(
+                "ENTITY_CLAIM_GROUNDING_ENABLED", True
+            ),
+            claim_grounding_batch_size=_env_int(
+                "ENTITY_CLAIM_GROUNDING_BATCH_SIZE", 100,
+                minimum=1, maximum=500
+            ),
+            model_claim_grounding_enabled=_env_bool(
+                "ENTITY_MODEL_CLAIM_GROUNDING_ENABLED", False
             ),
             epistemic_backfill_enabled=_env_bool(
                 "ENTITY_EPISTEMIC_BACKFILL_ENABLED", True
@@ -344,8 +362,26 @@ class IntelligenceConfig:
             forecast_per_cycle=_env_int(
                 "ENTITY_FORECAST_PER_CYCLE", 2, minimum=1
             ),
+            forecast_resolution_per_cycle=_env_int(
+                "ENTITY_FORECAST_RESOLUTION_PER_CYCLE", 4,
+                minimum=1, maximum=50
+            ),
             forecast_v2_mode=os.getenv(
                 "ENTITY_FORECAST_V2_MODE", "shadow"
+            ).strip().lower() or "shadow",
+            ensemble_training_enabled=_env_bool(
+                "ENTITY_ENSEMBLE_TRAINING_ENABLED", True
+            ),
+            ensemble_min_training_samples=_env_int(
+                "ENTITY_ENSEMBLE_MIN_TRAINING_SAMPLES", 100,
+                minimum=50, maximum=10000
+            ),
+            ensemble_min_validation_samples=_env_int(
+                "ENTITY_ENSEMBLE_MIN_VALIDATION_SAMPLES", 30,
+                minimum=20, maximum=5000
+            ),
+            learned_ensemble_mode=os.getenv(
+                "ENTITY_LEARNED_ENSEMBLE_MODE", "shadow"
             ).strip().lower() or "shadow",
             reliefweb_appname=os.getenv(
                 "ENTITY_RELIEFWEB_APPNAME",

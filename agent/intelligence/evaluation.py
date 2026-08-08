@@ -12,9 +12,10 @@ from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.intelligence.store import IntelligenceStore, utc_now
 from agent.intelligence.verification import VerificationEngine
 from agent.intelligence.authoritative_verification import compare_observation
+from agent.intelligence.ensemble_training import EnsembleTrainer, FEATURES
 
 
-SUITE_VERSION="blinded-intelligence-v3"
+SUITE_VERSION="blinded-intelligence-v4"
 
 
 @dataclass(frozen=True)
@@ -103,6 +104,41 @@ class IntelligenceEvaluationEngine:
              "normalized_value":"4.8"},
             {"found":True,"magnitude":4.9},closed_world=True
         )
+        closed_absence,_,_,_=compare_observation(
+            {"predicate":"cyber.known_exploited","value":"true"},
+            {"found":False},closed_world=True
+        )
+        synthetic=[
+            {"situation_id":f"s-{index//2}","created_at":f"{index:04d}"}
+            for index in range(80)
+        ]
+        trainer=EnsembleTrainer(
+            self.store,minimum_samples=50,minimum_validation=20
+        )
+        train,validation=trainer._out_of_time_split(synthetic)
+        train_situations={item["situation_id"] for item in train}
+        validation_situations={item["situation_id"] for item in validation}
+        with self.store._connect() as c:
+            future_evidence=c.execute("""
+              SELECT COUNT(*) FROM forecast_evidence evidence
+              JOIN forecasts ON forecasts.id=evidence.forecast_id
+              WHERE forecasts.evidence_cutoff_at IS NOT NULL
+                AND evidence.observed_at>forecasts.evidence_cutoff_at
+            """).fetchone()[0]
+            invented_authority=c.execute(
+                "SELECT COUNT(*) FROM claim_groundings WHERE "
+                "method='schema_model_grounding' AND "
+                "grounding_type='authority_record'"
+            ).fetchone()[0]
+            self_verified=c.execute("""
+              SELECT COUNT(*) FROM publisher_claim_outcomes outcomes
+              JOIN claim_evidence evidence ON evidence.claim_id=outcomes.claim_id
+              JOIN document_versions versions
+                ON versions.id=evidence.document_version_id
+              JOIN documents ON documents.id=versions.document_id
+              WHERE outcomes.verifier_source_id!=''
+                AND outcomes.verifier_source_id=documents.source_id
+            """).fetchone()[0]
         return [
             EvaluationCase("component-order-symmetry","symmetry",abs(left-right)<=.03,True,abs(left-right)),
             EvaluationCase("publisher-label-blinding","bias",masked==swapped,True,0,{"masked":masked}),
@@ -113,7 +149,15 @@ class IntelligenceEvaluationEngine:
             EvaluationCase("authority-id-is-allowlisted","provenance",forged_authority is None,True),
             EvaluationCase("directional-complement-symmetry","symmetry",abs((left+inverse)-1)<=.03,True,abs((left+inverse)-1)),
             EvaluationCase("absence-is-not-generic-refutation","truth-maintenance",missing_outcome=="inconclusive",True),
-            EvaluationCase("authoritative-revision-is-not-refutation","truth-maintenance",revision_outcome=="revises",True)
+            EvaluationCase("authoritative-revision-is-not-refutation","truth-maintenance",revision_outcome=="revises",True),
+            EvaluationCase("closed-catalog-absence-can-refute","truth-maintenance",closed_absence=="refutes",True),
+            EvaluationCase("forecast-evidence-cutoff","leakage",future_evidence==0,True,float(future_evidence)),
+            EvaluationCase("situation-grouped-time-split","leakage",not (train_situations & validation_situations),True),
+            EvaluationCase("model-cannot-invent-authority-ids","grounding",invented_authority==0,True,float(invented_authority)),
+            EvaluationCase("authority-does-not-self-award","reliability",self_verified==0,True,float(self_verified)),
+            EvaluationCase("source-identity-not-training-feature","bias",all("source" not in name and "publisher" not in name for name in FEATURES),True),
+            EvaluationCase("framing-not-factual-component","bias","framing_signal" not in FEATURES,True),
+            EvaluationCase("portfolio-probability-bounds","calibration",.05<=inverse<=.95,False)
         ]
 
     def _update_gates(self,c,run_id,critical,failed,now):
@@ -134,6 +178,22 @@ class IntelligenceEvaluationEngine:
         forecast_ready=(not critical and resolved>=50 and brier is not None and float(brier)<=.23 and float(calibration.get("v2_resolution_coverage") or 0)>=.7)
         c.execute("UPDATE intelligence_feature_gates SET status=?,reason=?,evaluation_run_id=?,sample_count=?,metric=?,required_metric=.23,updated_at=? WHERE feature='forecast_v2'",
                   ("active" if forecast_ready else "shadow","Promotion criteria met" if forecast_ready else "Awaiting 50 resolved forecasts, coverage, and Brier gate",run_id,resolved,brier,now))
+        shadow_model=c.execute(
+            "SELECT id FROM forecast_model_versions WHERE status='shadow' "
+            "ORDER BY promoted_at DESC LIMIT 1"
+        ).fetchone()
+        learned_status="shadow" if shadow_model and not critical else "blocked"
+        learned_reason=(
+            "Validated candidate is available in shadow mode"
+            if learned_status=="shadow" else
+            "Awaiting 100 training forecasts, 30 out-of-time validation forecasts, and safe improvement"
+        )
+        c.execute(
+            "UPDATE intelligence_feature_gates SET status=?,reason=?,"
+            "evaluation_run_id=?,sample_count=?,updated_at=? "
+            "WHERE feature='learned_ensemble'",
+            (learned_status,learned_reason,run_id,resolved,now)
+        )
 
 
 def main():

@@ -85,6 +85,7 @@ class BeliefRevisionEngine:
             cells = self._recalculate_reliability(connection, now)
             if int(state["processed"] or 0) % 500 == 0:
                 self._refresh_content_profiles(connection, now)
+                self._refresh_epistemic_profiles(connection, now)
             connection.execute(
                 """
                 UPDATE epistemic_backfill_state SET cursor_rowid=?,
@@ -188,6 +189,7 @@ class BeliefRevisionEngine:
                 applied += 1
             if applied:
                 self._recalculate_reliability(connection, now)
+                self._refresh_epistemic_profiles(connection, now)
         return applied
 
     def _materialize_revision(self, connection, claim, result, confidence, now):
@@ -234,7 +236,10 @@ class BeliefRevisionEngine:
         evidence = connection.execute(
             """
             SELECT DISTINCT documents.publisher_key,documents.id AS document_id,
-              evidence.document_version_id
+              evidence.document_version_id,documents.source_id,
+              COALESCE(NULLIF(documents.reporting_family_key,''),
+                       NULLIF(documents.publisher_key,''),documents.source_id)
+                AS family_key
             FROM claim_evidence evidence
             JOIN document_versions versions
               ON versions.id=evidence.document_version_id
@@ -246,14 +251,24 @@ class BeliefRevisionEngine:
         ).fetchall()
         for item in evidence:
             # A publisher never earns an accuracy outcome from its own document.
-            if item["document_version_id"] == result["document_version_id"]:
+            if (item["document_version_id"] == result["document_version_id"]
+                    or (result["verifier_source_id"]
+                        and item["source_id"] == result["verifier_source_id"])):
                 continue
+            basis = str(result["basis"] or "corroboration")
+            weight = {
+                "authoritative-query": 1.0,
+                "authoritative-ingested-evidence": .85,
+                "independent-family-corroboration": .55,
+                "corroboration": .5
+            }.get(basis, .4)
             connection.execute(
                 """
                 INSERT OR IGNORE INTO publisher_claim_outcomes (
                   publisher_key,claim_id,topic,claim_type,outcome,confidence,
-                  evidence_document_ids,method,evaluated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?)
+                  evidence_document_ids,method,evaluated_at,evidence_basis,
+                  outcome_weight,verifier_source_id,independent_family_count
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (item["publisher_key"], claim["id"],
                  normalize_topic(claim["topic"]), claim["claim_type"],
@@ -262,7 +277,8 @@ class BeliefRevisionEngine:
                  self.store._json(
                      [result["document_id"]]
                      if result["document_id"] else []
-                 ), "verification-result-v1", now)
+                 ), "verification-result-v2", now, basis, weight,
+                 result["verifier_source_id"], 1)
             )
 
     def _ensure_publishers(self, connection, now):
@@ -455,14 +471,16 @@ class BeliefRevisionEngine:
                 """
                 INSERT OR IGNORE INTO publisher_claim_outcomes (
                   publisher_key,claim_id,topic,claim_type,outcome,confidence,
-                  evidence_document_ids,method,evaluated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?)
+                  evidence_document_ids,method,evaluated_at,evidence_basis,
+                  outcome_weight,verifier_source_id,independent_family_count
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (item["publisher_key"], claim["id"],
                  normalize_topic(claim["topic"]), claim["claim_type"], outcome,
                  confidence, self.store._json([row["document_id"] for row in evidence
                                                if row["family_key"] != item["family_key"]]),
-                 self.method, now)
+                 self.method, now, "independent-family-corroboration", .55,
+                 "", len(others))
             )
 
     def _recalculate_reliability(self, connection, now):
@@ -473,8 +491,10 @@ class BeliefRevisionEngine:
               SUM(outcomes.outcome='confirmed') confirmed,
               SUM(outcomes.outcome='refuted') refuted,
               SUM(outcomes.outcome='mixed') mixed,
-              SUM(CASE WHEN outcomes.outcome='confirmed' THEN outcomes.confidence ELSE 0 END) success_weight,
-              SUM(CASE WHEN outcomes.outcome='refuted' THEN outcomes.confidence ELSE 0 END) failure_weight,
+              SUM(CASE WHEN outcomes.outcome='confirmed' THEN
+                    outcomes.confidence*outcomes.outcome_weight ELSE 0 END) success_weight,
+              SUM(CASE WHEN outcomes.outcome='refuted' THEN
+                    outcomes.confidence*outcomes.outcome_weight ELSE 0 END) failure_weight,
               COUNT(*) evaluated
             FROM publisher_claim_outcomes outcomes
             JOIN publisher_reputation reputation USING(publisher_key)
@@ -516,7 +536,7 @@ class BeliefRevisionEngine:
                 (row["publisher_key"],row["topic"],row["claim_type"],baseline,
                  alpha,beta,round(learned,4),round(max(0,mean-1.64*deviation),4),
                  round(min(1,mean+1.64*deviation),4),row["confirmed"],row["refuted"],
-                 row["mixed"],row["evaluated"],"topic-type-beta-v1",now)
+                 row["mixed"],row["evaluated"],"topic-type-beta-v2",now)
             )
             if previous is None or abs(float(previous[0])-learned) >= .0001:
                 updated += 1
@@ -543,6 +563,75 @@ class BeliefRevisionEngine:
                      row["claim_type"])
                 )
         return updated
+
+    def _refresh_epistemic_profiles(self, connection, now):
+        rows = connection.execute(
+            """
+            SELECT reputation.publisher_key,
+              COALESCE(SUM(CASE WHEN outcomes.outcome='confirmed' THEN
+                outcomes.confidence*outcomes.outcome_weight ELSE 0 END),0) good,
+              COALESCE(SUM(CASE WHEN outcomes.outcome='refuted' THEN
+                outcomes.confidence*outcomes.outcome_weight ELSE 0 END),0) bad,
+              COUNT(outcomes.id) factual_samples,
+              COALESCE(content.syndication_share,0) syndication_share,
+              COALESCE(content.interpretation_share,0) interpretation_share,
+              COALESCE(content.causal_claim_share,0) causal_share,
+              COALESCE((
+                SELECT AVG(CASE WHEN claims.claim_type='attributed_assertion'
+                  THEN claims.attributed_to!='' ELSE 1 END)
+                FROM documents d
+                JOIN document_versions v ON v.document_id=d.id
+                JOIN claim_evidence e ON e.document_version_id=v.id
+                JOIN claims ON claims.id=e.claim_id
+                WHERE d.publisher_key=reputation.publisher_key
+              ),.5) attribution_quality,
+              COALESCE((
+                SELECT COUNT(*) FROM documents d
+                JOIN document_versions v ON v.document_id=d.id
+                JOIN claim_evidence e ON e.document_version_id=v.id
+                JOIN claims ON claims.id=e.claim_id
+                WHERE d.publisher_key=reputation.publisher_key
+                  AND claims.status='superseded'
+              ),0) revisions
+            FROM publisher_reputation reputation
+            LEFT JOIN publisher_claim_outcomes outcomes
+              ON outcomes.publisher_key=reputation.publisher_key
+            LEFT JOIN publisher_content_profiles content
+              ON content.publisher_key=reputation.publisher_key
+            GROUP BY reputation.publisher_key
+            """
+        ).fetchall()
+        for row in rows:
+            samples=int(row["factual_samples"] or 0)
+            good=float(row["good"] or 0); bad=float(row["bad"] or 0)
+            accuracy=(good+1)/(good+bad+2)
+            revisions=int(row["revisions"] or 0)
+            revision_discipline=.5 if not revisions else max(.2,1-bad/max(1,revisions))
+            connection.execute(
+                """
+                INSERT INTO publisher_epistemic_profiles (
+                  publisher_key,factual_accuracy,attribution_quality,
+                  revision_discipline,independence_confidence,framing_signal,
+                  factual_samples,revision_samples,method,updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(publisher_key) DO UPDATE SET
+                  factual_accuracy=excluded.factual_accuracy,
+                  attribution_quality=excluded.attribution_quality,
+                  revision_discipline=excluded.revision_discipline,
+                  independence_confidence=excluded.independence_confidence,
+                  framing_signal=excluded.framing_signal,
+                  factual_samples=excluded.factual_samples,
+                  revision_samples=excluded.revision_samples,
+                  method=excluded.method,updated_at=excluded.updated_at
+                """,
+                (row["publisher_key"],round(accuracy,4),
+                 round(float(row["attribution_quality"] or .5),4),
+                 round(max(0,min(1,revision_discipline)),4),
+                 round(max(0,1-float(row["syndication_share"] or 0)),4),
+                 round(min(1,float(row["interpretation_share"] or 0)
+                           +float(row["causal_share"] or 0)),4),
+                 samples,revisions,"epistemic-profile-v1",now)
+            )
 
     def _refresh_content_profiles(self, connection, now):
         rows = connection.execute(

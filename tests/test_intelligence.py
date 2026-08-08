@@ -32,6 +32,7 @@ from agent.connectors.world_bank import WorldBankIndicatorsConnector
 from agent.connectors.x import XConnector
 from agent.intelligence.config import IntelligenceConfig
 from agent.intelligence.claim_extraction import HybridClaimExtractor
+from agent.intelligence.claim_grounding import ClaimGroundingEngine
 from agent.intelligence.epistemic_backfill import EpistemicBackfill, dry_run as epistemic_dry_run
 from agent.intelligence.belief_revision import BeliefRevisionEngine
 from agent.intelligence.hypotheses import HypothesisCompetitionEngine
@@ -40,7 +41,11 @@ from agent.intelligence.reasoning_jobs import ReasoningJobQueue
 from agent.intelligence.reasoning_budget import ReasoningBudget, BudgetedModelRouter
 from agent.intelligence.acquisition import ActiveAcquisitionEngine
 from agent.intelligence.verification import VerificationEngine
-from agent.intelligence.authoritative_verification import compare_observation
+from agent.intelligence.authoritative_verification import (
+    AuthoritativeVerificationRegistry, compare_observation
+)
+from agent.intelligence.ensemble_training import EnsembleTrainer
+from agent.intelligence.prediction_ensemble import PredictionEnsemble
 from agent.models.base import ModelUnavailable
 from agent.intelligence.models import ConnectorBatch, SourceItem
 from agent.intelligence.reputation import ReputationEngine
@@ -101,7 +106,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(18, version)
+        self.assertEqual(20, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -588,6 +593,134 @@ class UnderstandingEngineTests(unittest.TestCase):
         self.assertEqual("inconclusive",outcome)
         self.assertLess(confidence,.5)
         self.assertEqual("refutes",cisa_outcome)
+
+    def test_claim_grounding_creates_queryable_geo_target_and_skips_metadata_tasks(self):
+        now=datetime.now(UTC).isoformat()
+        self.store.ingest_items("source-a",[SourceItem(
+            external_id="grounded-quake",title="M 3.4 near Test City",
+            summary="A magnitude 3.4 earthquake occurred near Test City.",
+            url="https://a.test/grounded-quake",category="earthquake",
+            latitude=35,longitude=-110,published_at=now,
+            metadata={"magnitude":3.4}
+        )])
+        self.engine.analyze_pending()
+        BeliefRevisionEngine(self.store,batch_size=100).run_batch()
+        result=ClaimGroundingEngine(self.store,batch_size=100).run_batch()
+        VerificationEngine(
+            self.store,batch_size=20,remote_per_cycle=0
+        ).run_batch()
+        with self.store._connect() as connection:
+            groundings=connection.execute(
+                "SELECT * FROM claim_groundings"
+            ).fetchall()
+            target=connection.execute(
+                "SELECT * FROM verification_targets WHERE adapter='usgs' "
+                "AND target_status='ready' LIMIT 1"
+            ).fetchone()
+            bookkeeping=connection.execute(
+                """
+                SELECT COUNT(*) FROM claim_verification_tasks tasks
+                JOIN claims ON claims.id=tasks.claim_id
+                WHERE tasks.status='pending' AND
+                  claims.predicate IN ('event.reported','event.category')
+                """
+            ).fetchone()[0]
+
+        self.assertGreater(result.groundings_created,0)
+        self.assertTrue(any(row["grounding_type"]=="geo_time_window"
+                            for row in groundings))
+        self.assertIsNotNone(target)
+        self.assertEqual(0,bookkeeping)
+
+    def test_eonet_direct_adapter_uses_fixed_record_endpoint(self):
+        class FakeEonet:
+            source_id="nasa_eonet"
+            enabled=True
+            base_url="https://eonet.gsfc.nasa.gov/api/v3/events"
+            def fetch_json(self,url):
+                self.url=url
+                return {"id":"EONET_42","title":"Test fire",
+                        "closed":None,"categories":[{"title":"Wildfires"}]}
+
+        connector=FakeEonet()
+        registry=AuthoritativeVerificationRegistry([connector])
+        observation=registry.query({
+            "adapter":"eonet","target_status":"ready",
+            "query_parameters":{"event_id":"EONET_42"},
+            "expected_value":{"predicate":"event.status","value":"open"}
+        })
+
+        self.assertEqual("supports",observation["outcome"])
+        self.assertTrue(observation["closed_world"])
+        self.assertEqual(
+            "https://eonet.gsfc.nasa.gov/api/v3/events/EONET_42",
+            connector.url
+        )
+
+    def test_authoritative_registry_redacts_all_connector_key_types(self):
+        class KeyedConnector:
+            source_id="nasa_firms_wildfires"
+            enabled=True
+            map_key="never-print-this-map-key"
+
+        registry=AuthoritativeVerificationRegistry([KeyedConnector()])
+        message=registry.safe_error(
+            RuntimeError("request failed: never-print-this-map-key")
+        )
+
+        self.assertNotIn("never-print-this-map-key",message)
+        self.assertIn("[REDACTED]",message)
+
+    def test_shadow_ensemble_trains_only_after_grouped_out_of_time_gate(self):
+        start=datetime(2025,1,1,tzinfo=UTC)
+        with self.store._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            for index in range(140):
+                created=(start+timedelta(hours=index)).isoformat()
+                situation_id=f"train-situation-{index}"
+                forecast_id=f"train-forecast-{index}"
+                outcome=index%2
+                signal=.82 if outcome else .18
+                connection.execute(
+                    "INSERT INTO situations (id,title,category,confidence,"
+                    "first_seen_at,last_seen_at,created_at,updated_at) "
+                    "VALUES (?,?, 'test',.5,?,?,?,?)",
+                    (situation_id,situation_id,created,created,created,created)
+                )
+                connection.execute(
+                    """
+                    INSERT INTO forecasts (
+                      id,situation_id,question,predicted_outcome,probability,
+                      target_at,resolution_criteria,evidence,method,status,
+                      created_at,resolved_at,actual_outcome,brier_score,
+                      resolution_confidence,base_rate,model_probability,
+                      ensemble_probability,category,horizon_bucket,shadow
+                    ) VALUES (?,?,?,?,?,?,?,?,?,'resolved',?,?,?,?,?,?,?,?,?,?,1)
+                    """,
+                    (forecast_id,situation_id,f"Question {index}","yes",.5,
+                     created,"fixture",json.dumps([{"independence_key":f"f-{index}"}]),
+                     "hypothesis-forecast-v2",created,created,outcome,.25,.95,
+                     signal,signal,.5,"test","0-1d")
+                )
+                for component in ("base_rate","hypothesis","reasoning"):
+                    connection.execute(
+                        "INSERT INTO forecast_component_predictions VALUES "
+                        "(?,?,?,?,?,?)",
+                        (forecast_id,component,signal,1/3,
+                         "fixed-log-odds-v1",created)
+                    )
+        IntelligenceEvaluationEngine(self.store).run()
+        result=EnsembleTrainer(
+            self.store,minimum_samples=100,minimum_validation=30
+        ).train_if_ready()
+        learned,_=PredictionEnsemble(
+            self.store,mode="shadow"
+        ).combine({"base_rate":.8,"hypothesis":.8,"reasoning":.8})
+
+        self.assertTrue(result.promoted,result)
+        self.assertEqual(110,result.training_samples)
+        self.assertEqual(30,result.validation_samples)
+        self.assertGreater(learned,.5)
 
     def test_typed_authority_revision_supersedes_without_refuting_publisher(self):
         class FakeUsgs:
