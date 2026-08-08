@@ -1,6 +1,7 @@
 import json
 import base64
 import re
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -91,9 +92,54 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-            self.assertEqual(9, version)
+            self.assertEqual(10, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
+
+    def test_claim_migration_materializes_non_null_defaults_for_legacy_rows(self):
+        legacy_path = Path(self.temporary_directory.name) / "legacy.db"
+        legacy_migrations = Path(self.temporary_directory.name) / "legacy-migrations"
+        legacy_migrations.mkdir()
+        migration_root = Path("agent/intelligence/migrations")
+        for migration in sorted(migration_root.glob("00[1-8]_*.sql")):
+            shutil.copy2(migration, legacy_migrations / migration.name)
+        legacy_store = IntelligenceStore(
+            legacy_path, migrations=legacy_migrations
+        )
+        now = "2026-08-08T12:00:00Z"
+        with legacy_store._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO situations (
+                  id, title, category, first_seen_at, last_seen_at,
+                  created_at, updated_at
+                ) VALUES ('legacy-situation', 'Legacy', 'test', ?, ?, ?, ?)
+                """,
+                (now, now, now, now)
+            )
+            connection.execute(
+                """
+                INSERT INTO claims (
+                  id, situation_id, subject, predicate, object,
+                  normalized_object, first_seen_at, last_seen_at,
+                  created_at, updated_at
+                ) VALUES (
+                  'legacy-claim', 'legacy-situation', 'situation',
+                  'event.reported', 'yes', 'yes', ?, ?, ?, ?
+                )
+                """,
+                (now, now, now, now)
+            )
+
+        upgraded = IntelligenceStore(legacy_path)
+        with upgraded._connect() as connection:
+            integrity = connection.execute("PRAGMA integrity_check").fetchone()[0]
+            confidence = connection.execute(
+                "SELECT extraction_confidence FROM claims WHERE id = 'legacy-claim'"
+            ).fetchone()[0]
+
+        self.assertEqual("ok", integrity)
+        self.assertEqual(0.5, confidence)
 
     def test_ingest_deduplicates_and_versions_changed_documents(self):
         first = SourceItem(
