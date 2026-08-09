@@ -29,6 +29,8 @@ const elements = {
   countryBreakdown: document.querySelector("#country-breakdown"),
   situationList: document.querySelector("#situation-list"),
   situationDetail: document.querySelector("#situation-detail"),
+  earlyReportList: document.querySelector("#early-report-list"),
+  canonicalEventList: document.querySelector("#canonical-event-list"),
   documentFeed: document.querySelector("#document-feed"),
   sourceList: document.querySelector("#source-list"),
   reputationList: document.querySelector("#reputation-list"),
@@ -841,6 +843,111 @@ function renderDocuments(documents) {
   }
 }
 
+function renderEarlyReports(reports) {
+  elements.earlyReportList.replaceChildren();
+  if (!reports.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No public-channel reports have been collected yet.";
+    elements.earlyReportList.append(empty);
+    return;
+  }
+  for (const report of reports) {
+    const card = document.createElement("article");
+    card.className = "document early-report";
+    const meta = document.createElement("div");
+    meta.className = "document-meta";
+    const category = document.createElement("span");
+    category.className = "category";
+    category.textContent = report.enriched_category || report.category || "general";
+    const source = document.createElement("span");
+    source.className = "source";
+    source.textContent = report.publisher_label || report.publisher_key || "Telegram";
+    const time = document.createElement("time");
+    time.textContent = formatTime(report.event_time || report.published_at || report.retrieved_at);
+    meta.append(category, source, time);
+
+    const title = document.createElement("h3");
+    title.textContent = report.translated_title || report.title;
+    const summary = document.createElement("p");
+    summary.textContent = report.translated_summary || report.summary || "No text summary was available.";
+
+    const assessment = document.createElement("small");
+    const trust = report.learned_credibility == null
+      ? "trust uncalibrated"
+      : `${Math.round(report.learned_credibility * 100)}% effective factual credibility`;
+    const framing = report.framing_signal == null
+      ? "framing not configured"
+      : `${Math.round(report.framing_signal * 100)}% framing signal`;
+    const place = report.location_label || report.country_name || "location unresolved";
+    assessment.textContent = `${place} · ${trust} · ${framing}`;
+
+    const correlation = document.createElement("small");
+    correlation.className = "early-report-correlation";
+    correlation.textContent = report.world_event_id
+      ? `Correlated: ${report.world_event_title || "canonical event"} · ${report.independent_family_count || 0} independent reporting families`
+      : "Uncorrelated early signal—not independently confirmed";
+
+    card.append(meta, title, summary, assessment, correlation);
+    const safeUrl = safeExternalUrl(report.url);
+    if (safeUrl) {
+      const link = document.createElement("a");
+      link.href = safeUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open original post";
+      card.append(link);
+    }
+    elements.earlyReportList.append(card);
+  }
+}
+
+function renderCanonicalEvents(events) {
+  elements.canonicalEventList.replaceChildren();
+  if (!events.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "Canonical event assessments are being built.";
+    elements.canonicalEventList.append(empty);
+    return;
+  }
+  for (const event of events) {
+    const card = document.createElement("article");
+    card.className = "document canonical-event";
+    const meta = document.createElement("div");
+    meta.className = "document-meta";
+    const status = document.createElement("span");
+    status.className = "event-status";
+    status.textContent = event.assessment_status || "awaiting-assessment";
+    const category = document.createElement("span");
+    category.textContent = event.category || event.event_type;
+    const time = document.createElement("time");
+    time.textContent = formatTime(event.evidence_cutoff_at || event.last_seen_at);
+    meta.append(status, category, time);
+    const title = document.createElement("h3");
+    title.textContent = event.assessment_headline || event.title;
+    const evidence = document.createElement("p");
+    const confidence = Number(event.assessment_confidence ?? event.confidence ?? 0);
+    evidence.textContent =
+      `${Math.round(confidence * 100)}% assessment confidence · ` +
+      `${event.assessment_family_count ?? event.source_count ?? 0} independent reporting families · ` +
+      `${event.direct_observation_count ?? 0} direct observations`;
+    card.append(meta, title, evidence);
+    for (const fact of (event.established_facts ?? []).slice(0, 3)) {
+      const line = document.createElement("small");
+      line.textContent = `Established: ${fact.text || `${fact.kind} ${fact.country || ""}`}`;
+      card.append(line);
+    }
+    if ((event.unknowns ?? []).length) {
+      const unknowns = document.createElement("small");
+      unknowns.className = "event-unknowns";
+      unknowns.textContent = `Unknown: ${(event.unknowns ?? []).join(" ")}`;
+      card.append(unknowns);
+    }
+    elements.canonicalEventList.append(card);
+  }
+}
+
 function renderSources(sources) {
   elements.sourceList.replaceChildren();
   for (const source of sources) {
@@ -875,10 +982,14 @@ function renderReputations(reputations) {
     const title = document.createElement("strong");
     title.textContent = reputation.publisher_label;
     const score = document.createElement("span");
-    const evaluated = Number(reputation.evaluated_count ?? 0);
-    const learned = Number(reputation.learned_credibility ?? 0);
-    const salt = evaluated < 12
-      ? `provisional (${evaluated}/12 factual checks) — large grain of salt`
+    const evaluated = Number(
+      reputation.assessment_factual_samples ?? reputation.evaluated_count ?? 0
+    );
+    const learned = Number(
+      reputation.effective_credibility ?? reputation.learned_credibility ?? 0
+    );
+    const salt = reputation.maturity_status === "provisional" || evaluated < 12
+      ? `provisional (${evaluated}/12 independent factual checks) — large grain of salt`
       : learned >= 0.8
         ? "strong track record — small grain of salt"
         : learned >= 0.6
@@ -886,15 +997,16 @@ function renderReputations(reputations) {
           : "weak or mixed track record — large grain of salt";
     score.textContent =
       `${Math.round(reputation.baseline_credibility * 100)}% baseline → ` +
-      `${Math.round(learned * 100)}% learned · ` +
-      `${Math.round(reputation.reliability_lower_bound * 100)}–` +
-      `${Math.round(reputation.reliability_upper_bound * 100)}% range`;
+      `${Math.round(learned * 100)}% effective · evidence estimate ` +
+      `${Math.round(Number(reputation.evidence_estimate ?? learned) * 100)}% · ` +
+      `${Math.round(Number(reputation.assessment_lower_bound ?? reputation.reliability_lower_bound) * 100)}–` +
+      `${Math.round(Number(reputation.assessment_upper_bound ?? reputation.reliability_upper_bound) * 100)}% range`;
     const outcomes = document.createElement("small");
     outcomes.textContent =
-      `${reputation.confirmed_count} confirmed · ` +
-      `${reputation.contradicted_count} contradicted · ` +
-      `${reputation.deleted_unverified_count} deleted/unverified · ` +
-      `${reputation.early_confirmation_count} reported early · ${salt}`;
+      `${reputation.assessment_confirmed_count ?? reputation.confirmed_count ?? 0} confirmed · ` +
+      `${reputation.assessment_refuted_count ?? reputation.contradicted_count ?? 0} refuted · ` +
+      `${reputation.assessment_mixed_count ?? 0} mixed · ` +
+      `${Math.round(Number(reputation.assessment_framing_signal ?? reputation.framing_prior ?? 0) * 100)}% framing signal · ${salt}`;
     outcomes.title = reputation.latest_outcome_reason ||
       "This measures corroborated factual reporting, not neutrality or framing.";
     card.append(title, score, outcomes);
@@ -940,7 +1052,7 @@ function renderForecasts(forecasts, calibration) {
   }
 }
 
-function renderEpistemicHealth(health) {
+function renderEpistemicHealth(health, enrichment = {}, budget = {}) {
   elements.epistemicHealth.replaceChildren();
   const card = (titleText, detailText) => {
     const node = document.createElement("div");
@@ -959,7 +1071,21 @@ function renderEpistemicHealth(health) {
   const forecastSummary = card("V2 forecast maturity", `${calibration.v2_resolved ?? 0} resolved · ${Math.round((calibration.v2_resolution_coverage ?? 0) * 100)}% resolution coverage`);
   const model = (health.models ?? [])[0];
   const modelSummary = card("Learned ensemble", model ? `${model.status} · ${model.sample_count} training samples` : "awaiting independently resolved forecasts");
-  elements.epistemicHealth.append(targetSummary, forecastSummary, modelSummary);
+  const enrichmentTotals = enrichment.totals ?? {};
+  const enrichmentSummary = card(
+    "Open-source enrichment",
+    `${enrichmentTotals.processed ?? 0} processed · ${enrichmentTotals.translated ?? 0} translated · ${enrichmentTotals.grounded_locations ?? 0} grounded places · ${enrichmentTotals.needs_model ?? 0} awaiting model review`
+  );
+  const hourly = (budget.usage ?? []).find((item) => item.bucket_type === "hour");
+  const daily = (budget.usage ?? []).find((item) => item.bucket_type === "day");
+  const denied = (budget.attempts_24h ?? [])
+    .filter((item) => item.status === "budget-denied")
+    .reduce((sum, item) => sum + Number(item.count || 0), 0);
+  const budgetSummary = card(
+    "Reasoning capacity",
+    `${hourly?.model_calls ?? 0} calls this hour · ${daily?.model_calls ?? 0} today · ${denied} denied in 24h · daily reset ${formatTime(budget.next_daily_reset_at)}`
+  );
+  elements.epistemicHealth.append(targetSummary, forecastSummary, modelSummary, enrichmentSummary, budgetSummary);
 }
 
 async function refresh() {
@@ -972,7 +1098,7 @@ async function refresh() {
     const mapQuery = new URLSearchParams(categoryQuery);
     mapQuery.set("located", "1");
     mapQuery.set("limit", "200");
-    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, aircraftResponse, fusion] = await Promise.all([
+    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, enrichment, budget, earlyReports, canonicalEvents, aircraftResponse, fusion] = await Promise.all([
       request("/api/intelligence/overview"),
       request(`/api/intelligence/documents${category}`),
       request("/api/intelligence/sources"),
@@ -982,6 +1108,10 @@ async function refresh() {
       request("/api/intelligence/reputations"),
       request("/api/intelligence/forecasts"),
       request("/api/intelligence/epistemic-health"),
+      request("/api/intelligence/open-source-enrichment"),
+      request("/api/intelligence/reasoning-budget"),
+      request("/api/intelligence/early-reports?limit=30"),
+      request("/api/intelligence/world-events?limit=30"),
       request("/api/intelligence/aircraft?limit=300"),
       request("/api/intelligence/event-fusion")
     ]);
@@ -998,7 +1128,9 @@ async function refresh() {
     renderBriefing(briefing);
     renderReputations(reputations.reputations ?? []);
     renderForecasts(forecasts.forecasts ?? [], forecasts.calibration ?? {});
-    renderEpistemicHealth(epistemicHealth);
+    renderEpistemicHealth(epistemicHealth, enrichment, budget);
+    renderEarlyReports(earlyReports.reports ?? []);
+    renderCanonicalEvents(canonicalEvents.events ?? []);
     setConnection(true);
   } catch (error) {
     setConnection(false);

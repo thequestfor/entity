@@ -600,7 +600,8 @@ class BeliefRevisionEngine:
               COALESCE(content.interpretation_share,0) interpretation_share,
               COALESCE(content.causal_claim_share,0) causal_share,
               COALESCE(claims.attribution_quality,.5) attribution_quality,
-              COALESCE(claims.revisions,0) revisions
+              COALESCE(claims.revisions,0) revisions,
+              priors.framing_signal framing_prior
             FROM publisher_reputation reputation
             LEFT JOIN outcome_summary outcomes
               ON outcomes.publisher_key=reputation.publisher_key
@@ -608,6 +609,8 @@ class BeliefRevisionEngine:
               ON content.publisher_key=reputation.publisher_key
             LEFT JOIN claim_summary claims
               ON claims.publisher_key=reputation.publisher_key
+            LEFT JOIN publisher_profile_priors priors
+              ON priors.publisher_key=reputation.publisher_key
             """
         ).fetchall()
         for row in rows:
@@ -616,6 +619,15 @@ class BeliefRevisionEngine:
             accuracy=(good+1)/(good+bad+2)
             revisions=int(row["revisions"] or 0)
             revision_discipline=.5 if not revisions else max(.2,1-bad/max(1,revisions))
+            observed_framing = min(
+                1, float(row["interpretation_share"] or 0)
+                + float(row["causal_share"] or 0)
+            )
+            framing = (
+                float(row["framing_prior"])
+                if row["framing_prior"] is not None and samples < 20
+                else observed_framing
+            )
             connection.execute(
                 """
                 INSERT INTO publisher_epistemic_profiles (
@@ -637,8 +649,7 @@ class BeliefRevisionEngine:
                  round(float(row["attribution_quality"] or .5),4),
                  round(max(0,min(1,revision_discipline)),4),
                  round(max(0,1-float(row["syndication_share"] or 0)),4),
-                 round(min(1,float(row["interpretation_share"] or 0)
-                           +float(row["causal_share"] or 0)),4),
+                 round(framing,4),
                  samples,revisions,"epistemic-profile-v1",now)
             )
 

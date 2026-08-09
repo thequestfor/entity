@@ -10,8 +10,8 @@ from datetime import UTC, datetime
 from agent.intelligence.store import utc_now
 
 
-METHOD = "deterministic-event-fusion-v1"
-FEATURE_VERSION = "event-fusion-features-v1"
+METHOD = "deterministic-event-fusion-v2"
+FEATURE_VERSION = "event-fusion-features-v2"
 LANE = "world-event-observations-v1"
 EXCLUDED_SOURCE_KINDS = {
     "private_mail", "prediction_market", "weather_forecast",
@@ -63,7 +63,8 @@ class EventFusionEngine:
             recent_limit = min(20, max(1, self.batch_size // 5)) if self.batch_size > 1 else 0
             historical_limit = self.batch_size - recent_limit
             selection = """SELECT observations.*,versions.id version_id,
-                       documents.title document_title,documents.summary document_summary,
+                       COALESCE(json_extract(observations.properties,'$.title'),documents.title) document_title,
+                       COALESCE(json_extract(observations.properties,'$.summary'),documents.summary) document_summary,
                        documents.category document_category,documents.publisher_key,
                        documents.reporting_family_key,documents.status document_status,
                        sources.kind source_kind,sources.credibility source_credibility,
@@ -414,14 +415,24 @@ class EventFusionEngine:
 
     def _recompute(self, connection, event_id, now, reason):
         rows = connection.execute(
-            """SELECT observations.*,documents.title document_title,
-                      documents.category document_category,sources.credibility,
+            """SELECT observations.*,
+                      COALESCE(json_extract(observations.properties,'$.title'),documents.title) document_title,
+                      documents.category document_category,
+                      COALESCE(assessment.effective_credibility,
+                               reputation.learned_credibility,
+                               sources.credibility) credibility,
                       policies.evidence_role
                FROM world_event_memberships memberships
                JOIN world_event_observations observations
                  ON observations.id=memberships.observation_id
                JOIN documents ON documents.id=observations.document_id
                JOIN sources ON sources.id=observations.source_id
+               LEFT JOIN publisher_reputation reputation
+                 ON reputation.publisher_key=documents.publisher_key
+               LEFT JOIN publisher_assessments assessment
+                 ON assessment.publisher_key=documents.publisher_key
+                AND assessment.scope_kind='global'
+                AND assessment.scope_value=''
                LEFT JOIN source_policies policies ON policies.source_id=sources.id
                WHERE memberships.world_event_id=? AND memberships.active=1
                  AND observations.status='active'

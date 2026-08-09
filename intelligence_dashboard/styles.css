@@ -108,6 +108,12 @@ main { padding-block: 30px 60px; }
 .briefing-panel > p:last-child,
 .last-retrieval { margin: 0; color: #789693; font-size: 11px; }
 .evidence-panel { margin-top: 20px; }
+.early-reports-panel { margin: 20px 0; }
+.canonical-events-panel { margin: 20px 0; }
+.canonical-event .event-unknowns { color: #d0a46e; }
+.canonical-event .event-status { color: #66bfb6; text-transform: uppercase; }
+.early-report small { color: #76918f; font-size: 11px; line-height: 1.5; }
+.early-report .early-report-correlation { color: #66bfb6; }
 .map-panel { margin-bottom: 20px; }
 .map-controls { display: flex; flex-wrap: wrap; justify-content: end; align-items: end; gap: 10px; }
 .map-controls > span { color: #668683; font-size: 10px; }

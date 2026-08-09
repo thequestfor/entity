@@ -388,6 +388,18 @@ class UnderstandingEngine:
                 "publisher_baseline": round(float(
                     document.get("baseline_credibility") or 0.0
                 ), 4),
+                "publisher_factual_accuracy": (
+                    round(float(document["publisher_factual_accuracy"]), 4)
+                    if document.get("publisher_factual_accuracy") is not None
+                    else None
+                ),
+                "publisher_framing_signal": round(float(
+                    document.get("publisher_framing_signal") or 0.0
+                ), 4),
+                "publisher_affiliation": document.get("publisher_affiliation") or "",
+                "publisher_profile_rationale": (
+                    document.get("publisher_profile_rationale") or ""
+                ),
                 "title": document.get("title", ""),
                 "summary": document.get("summary", "")[:1400],
                 "content": document.get("content", "")[:1000],
@@ -461,7 +473,11 @@ class UnderstandingEngine:
                            NULLIF(documents.publisher_key, ''),
                            documents.source_id
                        )) AS publisher_count,
-                       COALESCE(AVG(sources.credibility), 0.5)
+                       COALESCE(AVG(COALESCE(
+                           publisher_assessments.effective_credibility,
+                           publisher_reputation.learned_credibility,
+                           sources.credibility
+                       )), 0.5)
                            AS average_credibility,
                        COUNT(DISTINCT CASE WHEN claims.status = 'contested'
                                           THEN claims.id END)
@@ -476,6 +492,12 @@ class UnderstandingEngine:
                 LEFT JOIN documents
                   ON documents.id = situation_documents.document_id
                 LEFT JOIN sources ON sources.id = documents.source_id
+                LEFT JOIN publisher_reputation
+                  ON publisher_reputation.publisher_key=documents.publisher_key
+                LEFT JOIN publisher_assessments
+                  ON publisher_assessments.publisher_key=documents.publisher_key
+                 AND publisher_assessments.scope_kind='global'
+                 AND publisher_assessments.scope_value=''
                 LEFT JOIN claims ON claims.situation_id = situations.id
                 LEFT JOIN forecasts ON forecasts.situation_id = situations.id
                 WHERE situations.id IN ({placeholders})
@@ -678,6 +700,9 @@ class UnderstandingEngine:
             "fact, source, quote, event, or causal link. A source count of one "
             "cannot be described as corroborated. Prediction markets are "
             "signals about expectations, not facts. Return JSON only.\n\n"
+            "Treat publisher factual reliability and framing signal as separate "
+            "priors. A high framing signal calls for scrutiny of selection and "
+            "characterization; it does not by itself refute a factual claim. "
             "Return exactly this shape:\n"
             "{\n"
             '  "conclusion": "short evidence-grounded conclusion",\n'
@@ -841,7 +866,8 @@ class UnderstandingEngine:
             rows = connection.execute(
                 """
                 SELECT documents.*,
-                       COALESCE(publisher_reputation.learned_credibility,
+                       COALESCE(publisher_assessments.effective_credibility,
+                                publisher_reputation.learned_credibility,
                                 sources.credibility) AS source_credibility,
                        versions.id AS document_version_id,
                        versions.version AS document_version
@@ -849,6 +875,10 @@ class UnderstandingEngine:
                 JOIN sources ON sources.id = documents.source_id
                 LEFT JOIN publisher_reputation
                   ON publisher_reputation.publisher_key = documents.publisher_key
+                LEFT JOIN publisher_assessments
+                  ON publisher_assessments.publisher_key=documents.publisher_key
+                 AND publisher_assessments.scope_kind='global'
+                 AND publisher_assessments.scope_value=''
                 JOIN document_versions AS versions
                   ON versions.document_id = documents.id
                  AND versions.version = (

@@ -712,12 +712,31 @@ class IntelligenceStore:
             rows = connection.execute(
                 """
                 SELECT publisher_reputation.*,
+                       assessments.evidence_estimate,
+                       assessments.effective_credibility,
+                       assessments.reliability_lower_bound
+                         AS assessment_lower_bound,
+                       assessments.reliability_upper_bound
+                         AS assessment_upper_bound,
+                       assessments.confirmed_count AS assessment_confirmed_count,
+                       assessments.refuted_count AS assessment_refuted_count,
+                       assessments.mixed_count AS assessment_mixed_count,
+                       assessments.factual_samples AS assessment_factual_samples,
+                       assessments.maturity_status,
+                       assessments.framing_signal AS assessment_framing_signal,
+                       assessments.observed_framing,
+                       assessments.method AS assessment_method,
+                       assessments.updated_at AS assessment_updated_at,
                        profiles.factual_accuracy,
                        profiles.attribution_quality,
                        profiles.revision_discipline,
                        profiles.independence_confidence,
                        profiles.framing_signal,
                        profiles.factual_samples,
+                       priors.framing_signal AS framing_prior,
+                       priors.affiliation,
+                       priors.rationale AS profile_rationale,
+                       priors.configured_by AS profile_configured_by,
                        (SELECT outcome FROM publisher_outcomes
                         WHERE publisher_key = publisher_reputation.publisher_key
                         ORDER BY evaluated_at DESC LIMIT 1) AS latest_outcome,
@@ -728,15 +747,66 @@ class IntelligenceStore:
                         WHERE publisher_key = publisher_reputation.publisher_key
                         ORDER BY evaluated_at DESC LIMIT 1) AS latest_outcome_at
                 FROM publisher_reputation
+                LEFT JOIN publisher_assessments assessments
+                  ON assessments.publisher_key=publisher_reputation.publisher_key
+                 AND assessments.scope_kind='global'
+                 AND assessments.scope_value=''
                 LEFT JOIN publisher_epistemic_profiles profiles
                   ON profiles.publisher_key=publisher_reputation.publisher_key
-                ORDER BY evaluated_count DESC, learned_credibility DESC,
+                LEFT JOIN publisher_profile_priors priors
+                  ON priors.publisher_key=publisher_reputation.publisher_key
+                ORDER BY COALESCE(assessments.factual_samples,0) DESC,
+                         COALESCE(assessments.effective_credibility,
+                                  learned_credibility) DESC,
                          publisher_label
                 LIMIT ?
                 """,
                 (max(1, min(1000, int(limit))),)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def reasoning_budget_overview(self):
+        now = datetime.now(UTC)
+        hour = now.strftime("%Y-%m-%dT%H:00:00Z")
+        day = now.strftime("%Y-%m-%dT00:00:00Z")
+        next_hour = (now.replace(minute=0, second=0, microsecond=0)
+                     + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+        next_day = (now.replace(hour=0, minute=0, second=0, microsecond=0)
+                    + timedelta(days=1)).isoformat().replace("+00:00", "Z")
+        with self._connect() as connection:
+            policies = connection.execute(
+                "SELECT * FROM intelligence_budget_lane_policies ORDER BY lane"
+            ).fetchall()
+            usage = connection.execute(
+                """SELECT bucket_type,bucket_start,model_calls,
+                          estimated_input_tokens,estimated_output_tokens
+                   FROM intelligence_budget_usage
+                   WHERE (bucket_type='hour' AND bucket_start=?) OR
+                         (bucket_type='day' AND bucket_start=?)
+                   ORDER BY bucket_type""", (hour, day)
+            ).fetchall()
+            lanes = connection.execute(
+                """SELECT bucket_type,bucket_start,lane,model_calls,
+                          estimated_input_tokens,estimated_output_tokens
+                   FROM intelligence_budget_lane_usage
+                   WHERE (bucket_type='hour' AND bucket_start=?) OR
+                         (bucket_type='day' AND bucket_start=?)
+                   ORDER BY bucket_type,lane""", (hour, day)
+            ).fetchall()
+            attempts = connection.execute(
+                """SELECT lane,status,COUNT(*) count,MAX(started_at) latest
+                   FROM intelligence_model_attempts
+                   WHERE julianday(started_at)>=julianday('now','-24 hours')
+                   GROUP BY lane,status ORDER BY lane,status"""
+            ).fetchall()
+        return {
+            "policies": [dict(row) for row in policies],
+            "usage": [dict(row) for row in usage],
+            "lane_usage": [dict(row) for row in lanes],
+            "attempts_24h": [dict(row) for row in attempts],
+            "next_hourly_reset_at": next_hour,
+            "next_daily_reset_at": next_day,
+        }
 
     def epistemic_health(self):
         with self._connect() as connection:
@@ -1043,6 +1113,152 @@ class IntelligenceStore:
             result.append(item)
         return result
 
+    def open_source_enrichment_overview(self):
+        with self._connect() as connection:
+            totals = connection.execute(
+                """SELECT COUNT(*) processed,
+                   COALESCE(SUM(status='complete'),0) complete,
+                   COALESCE(SUM(status='needs-model'),0) needs_model,
+                   COALESCE(SUM(translated_content!=''),0) translated,
+                   COALESCE(SUM(location_label!=''),0) grounded_locations,
+                   COALESCE(SUM(forward_origin_key!=''),0) attributed_forwards,
+                   COALESCE(SUM(extracted_urls!='[]'),0) with_urls
+                   FROM document_enrichments"""
+            ).fetchone()
+            languages = connection.execute(
+                """SELECT detected_language language,COUNT(*) count
+                   FROM document_enrichments GROUP BY detected_language
+                   ORDER BY count DESC,language LIMIT 20"""
+            ).fetchall()
+            channels = connection.execute(
+                """SELECT documents.publisher_key,
+                   MAX(documents.publisher_label) publisher_label,
+                   COUNT(*) documents,
+                   MAX(COALESCE(assessment.effective_credibility,
+                                reputation.learned_credibility)) learned_credibility,
+                   MAX(COALESCE(assessment.framing_signal,
+                                priors.framing_signal)) framing_signal,
+                   MAX(priors.affiliation) affiliation,
+                   SUM(enrichment.status='needs-model') needs_model,
+                   SUM(enrichment.translated_content!='') translated
+                   FROM documents
+                   LEFT JOIN document_enrichments enrichment
+                     ON enrichment.document_id=documents.id
+                   LEFT JOIN publisher_reputation reputation
+                     ON reputation.publisher_key=documents.publisher_key
+                   LEFT JOIN publisher_assessments assessment
+                     ON assessment.publisher_key=documents.publisher_key
+                    AND assessment.scope_kind='global'
+                    AND assessment.scope_value=''
+                   LEFT JOIN publisher_profile_priors priors
+                     ON priors.publisher_key=documents.publisher_key
+                   WHERE documents.source_id='telegram_public'
+                   GROUP BY documents.publisher_key
+                   ORDER BY documents DESC,publisher_label"""
+            ).fetchall()
+            state = connection.execute(
+                "SELECT * FROM open_source_enrichment_state WHERE lane=?",
+                ("public-report-versions-v1",),
+            ).fetchone()
+        return {
+            "totals": dict(totals) if totals else {},
+            "languages": [dict(row) for row in languages],
+            "channels": [dict(row) for row in channels],
+            "state": dict(state) if state else {},
+        }
+
+    def list_early_reports(self, limit=50):
+        """Return recent public-channel reports with provenance and fusion state."""
+        limit = max(1, min(200, int(limit)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """WITH latest_enrichment AS (
+                     SELECT enrichment.*,
+                            ROW_NUMBER() OVER (
+                              PARTITION BY enrichment.document_id
+                              ORDER BY enrichment.document_version_id DESC,
+                                       enrichment.id DESC
+                            ) AS enrichment_rank
+                     FROM document_enrichments enrichment
+                   ), latest_observation AS (
+                     SELECT observation.*,
+                            ROW_NUMBER() OVER (
+                              PARTITION BY observation.document_id
+                              ORDER BY observation.document_version_id DESC,
+                                       observation.created_at DESC
+                            ) AS observation_rank
+                     FROM world_event_observations observation
+                   )
+                   SELECT documents.id AS document_id,documents.source_id,
+                          documents.publisher_key,documents.publisher_label,
+                          documents.title,documents.summary,documents.url,
+                          documents.category,documents.published_at,
+                          documents.retrieved_at,documents.latitude,
+                          documents.longitude,documents.reporting_family_key,
+                          enrichment.detected_language,
+                          enrichment.translated_title,
+                          enrichment.translated_summary,
+                          enrichment.enriched_category,
+                          enrichment.event_time,enrichment.location_label,
+                          enrichment.country_name,enrichment.actors,
+                          enrichment.quoted_sources,
+                          enrichment.forward_origin_key,
+                          enrichment.forward_origin_label,
+                          enrichment.media_evidence,
+                          enrichment.confidence AS enrichment_confidence,
+                          enrichment.status AS enrichment_status,
+                          COALESCE(assessment.effective_credibility,
+                                   reputation.learned_credibility)
+                            AS learned_credibility,
+                          COALESCE(assessment.framing_signal,
+                                   priors.framing_signal) AS framing_signal,
+                          assessment.evidence_estimate,
+                          assessment.factual_samples,
+                          assessment.maturity_status,
+                          priors.affiliation,
+                          membership.world_event_id,
+                          events.title AS world_event_title,
+                          events.confidence AS world_event_confidence,
+                          events.source_count AS independent_family_count,
+                          events.observation_count AS correlated_report_count
+                   FROM documents
+                   JOIN sources ON sources.id=documents.source_id
+                   LEFT JOIN latest_enrichment enrichment
+                     ON enrichment.document_id=documents.id
+                    AND enrichment.enrichment_rank=1
+                   LEFT JOIN publisher_reputation reputation
+                     ON reputation.publisher_key=documents.publisher_key
+                   LEFT JOIN publisher_assessments assessment
+                     ON assessment.publisher_key=documents.publisher_key
+                    AND assessment.scope_kind='global'
+                    AND assessment.scope_value=''
+                   LEFT JOIN publisher_profile_priors priors
+                     ON priors.publisher_key=documents.publisher_key
+                   LEFT JOIN latest_observation observation
+                     ON observation.document_id=documents.id
+                    AND observation.observation_rank=1
+                   LEFT JOIN world_event_memberships membership
+                     ON membership.observation_id=observation.id
+                    AND membership.active=1
+                   LEFT JOIN world_events events
+                     ON events.id=membership.world_event_id
+                   WHERE sources.kind='social_signal'
+                   ORDER BY COALESCE(documents.published_at,
+                                     documents.retrieved_at) DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        reports = []
+        for row in rows:
+            item = dict(row)
+            for field in ("actors", "quoted_sources"):
+                item[field] = self._json_load(item.get(field), [])
+            item["media_evidence"] = self._json_load(
+                item.get("media_evidence"), {}
+            )
+            reports.append(item)
+        return reports
+
     def world_graph_overview(self):
         with self._connect() as connection:
             counts = connection.execute(
@@ -1153,36 +1369,55 @@ class IntelligenceStore:
 
     def list_world_events(self, limit=100, status=None, event_type=None,
                           country=None, bbox=None):
-        query = "SELECT * FROM world_events"
+        query = """SELECT world_events.*,
+                          assessments.assessment_status,
+                          assessments.headline AS assessment_headline,
+                          assessments.confidence AS assessment_confidence,
+                          assessments.independent_family_count
+                            AS assessment_family_count,
+                          assessments.direct_observation_count,
+                          assessments.established_facts,
+                          assessments.reported_claims,
+                          assessments.disputes,assessments.hypotheses,
+                          assessments.unknowns,
+                          assessments.evidence_cutoff_at,
+                          assessments.epistemic_policy_version,
+                          assessments.updated_at AS assessment_updated_at
+                   FROM world_events
+                   LEFT JOIN world_event_assessments assessments
+                     ON assessments.world_event_id=world_events.id"""
         conditions = []
         params = []
         if status:
-            conditions.append("status=?")
+            conditions.append("world_events.status=?")
             params.append(str(status)[:30])
         else:
-            conditions.append("status!='merged'")
+            conditions.append("world_events.status!='merged'")
             conditions.append(
-                "id NOT IN (SELECT alias_event_id FROM world_event_aliases "
+                "world_events.id NOT IN (SELECT alias_event_id FROM world_event_aliases "
                 "WHERE status='active')"
             )
         if event_type:
-            conditions.append("event_type=?")
+            conditions.append("world_events.event_type=?")
             params.append(str(event_type)[:80])
         if country:
-            conditions.append("country_name=?")
+            conditions.append("world_events.country_name=?")
             params.append(str(country)[:120])
         if bbox:
             west, south, east, north = bbox
-            conditions.append("latitude BETWEEN ? AND ?")
+            conditions.append("world_events.latitude BETWEEN ? AND ?")
             params.extend([south, north])
             if west <= east:
-                conditions.append("longitude BETWEEN ? AND ?")
+                conditions.append("world_events.longitude BETWEEN ? AND ?")
             else:
-                conditions.append("(longitude>=? OR longitude<=?)")
+                conditions.append("(world_events.longitude>=? OR world_events.longitude<=?)")
             params.extend([west, east])
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
-        query += " ORDER BY status='contested' DESC,severity DESC,confidence DESC,last_seen_at DESC LIMIT ?"
+        query += " ORDER BY world_events.status='contested' DESC," \
+                 "world_events.severity DESC," \
+                 "COALESCE(assessments.confidence,world_events.confidence) DESC," \
+                 "world_events.last_seen_at DESC LIMIT ?"
         params.append(max(1, min(1000, int(limit))))
         with self._connect() as connection:
             rows = connection.execute(query, params).fetchall()
@@ -1191,6 +1426,11 @@ class IntelligenceStore:
             item = dict(row)
             item["geometry"] = self._json_load(item.get("geometry"), {})
             item["properties"] = self._json_load(item.get("properties"), {})
+            for field in (
+                "established_facts", "reported_claims", "disputes",
+                "hypotheses", "unknowns",
+            ):
+                item[field] = self._json_load(item.get(field), [])
             output.append(item)
         return output
 
@@ -1247,6 +1487,15 @@ class IntelligenceStore:
                    WHERE memberships.world_event_id=?
                    ORDER BY decisions.created_at DESC LIMIT 200""", (event_id,)
             ).fetchall()
+            assessment = connection.execute(
+                "SELECT * FROM world_event_assessments WHERE world_event_id=?",
+                (event_id,),
+            ).fetchone()
+            assessment_history = connection.execute(
+                """SELECT * FROM world_event_assessment_history
+                   WHERE world_event_id=? ORDER BY id DESC LIMIT 50""",
+                (event_id,),
+            ).fetchall()
         item = dict(event)
         item["geometry"] = self._json_load(item.get("geometry"), {})
         item["properties"] = self._json_load(item.get("properties"), {})
@@ -1272,9 +1521,27 @@ class IntelligenceStore:
             value["components"] = self._json_load(value.get("components"), {})
             value["vetoes"] = self._json_load(value.get("vetoes"), [])
             decision_items.append(value)
+        assessment_fields = (
+            "established_facts", "reported_claims", "disputes", "hypotheses",
+            "unknowns", "evidence_document_ids",
+        )
+        assessment_item = dict(assessment) if assessment else None
+        if assessment_item:
+            for field in assessment_fields:
+                assessment_item[field] = self._json_load(
+                    assessment_item.get(field), []
+                )
+        assessment_history_items = []
+        for row in assessment_history:
+            value = dict(row)
+            for field in assessment_fields:
+                value[field] = self._json_load(value.get(field), [])
+            assessment_history_items.append(value)
         return {"event":item,"observations":observation_items,
                 "relations":relation_items,"versions":version_items,
                 "fusion_decisions":decision_items,
+                "assessment":assessment_item,
+                "assessment_history":assessment_history_items,
                 "requested_event_id":requested_event_id,
                 "resolved_alias":bool(alias)}
 
@@ -1518,14 +1785,31 @@ class IntelligenceStore:
                 SELECT documents.*, sources.name AS source_name,
                        sources.kind AS source_kind,
                        sources.credibility AS baseline_credibility,
-                       COALESCE(publisher_reputation.learned_credibility,
-                                sources.credibility) AS source_credibility
+                       COALESCE(assessments.effective_credibility,
+                                publisher_reputation.learned_credibility,
+                                sources.credibility) AS source_credibility,
+                       profiles.factual_accuracy AS publisher_factual_accuracy,
+                       CASE WHEN COALESCE(profiles.factual_samples,0)>=20
+                            THEN profiles.framing_signal
+                            ELSE COALESCE(priors.framing_signal,
+                                          profiles.framing_signal,0) END
+                         AS publisher_framing_signal,
+                       priors.affiliation AS publisher_affiliation,
+                       priors.rationale AS publisher_profile_rationale
                 FROM situation_documents
                 JOIN documents
                   ON documents.id = situation_documents.document_id
                 JOIN sources ON sources.id = documents.source_id
                 LEFT JOIN publisher_reputation
                   ON publisher_reputation.publisher_key = documents.publisher_key
+                LEFT JOIN publisher_assessments assessments
+                  ON assessments.publisher_key=documents.publisher_key
+                 AND assessments.scope_kind='global'
+                 AND assessments.scope_value=''
+                LEFT JOIN publisher_epistemic_profiles profiles
+                  ON profiles.publisher_key=documents.publisher_key
+                LEFT JOIN publisher_profile_priors priors
+                  ON priors.publisher_key=documents.publisher_key
                 WHERE situation_documents.situation_id = ?
                 ORDER BY COALESCE(documents.published_at,
                                   documents.retrieved_at) DESC

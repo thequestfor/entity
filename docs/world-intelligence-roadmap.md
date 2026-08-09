@@ -17,7 +17,7 @@ agent.
 Jarvis Mode must never replace the primary assistant, bypass action controls,
 or turn raw intelligence signals directly into physical actions.
 
-## Fifteen-step implementation plan
+## Sixteen-step implementation plan
 
 1. [x] Add the universal world-event graph.
 2. [x] Add the licensed source registry and connector contracts.
@@ -25,15 +25,16 @@ or turn raw intelligence signals directly into physical actions.
 4. [x] Add global weather and infrastructure layers.
 5. [ ] Add maritime activity intelligence. *(Deferred; not required for the current MVP.)*
 6. [x] Fuse observations into evolving world events.
-7. [ ] Learn bounded regional activity baselines.
-8. [ ] Generate evidence-linked world change signals.
-9. [ ] Add the autonomous predictive world engine.
-10. [ ] Calibrate forecasts by domain, region, and horizon.
-11. [ ] Add the separate Jarvis timeline and intelligence-map interface.
-12. [ ] Add Jarvis viewport briefings and watchlists.
-13. [ ] Deliver selected intelligence alerts through Entity Core.
-14. [ ] Add historical replay, bias, and false-alert evaluations.
-15. [ ] Enforce source licensing, security, and workload limits end to end.
+7. [ ] Enrich and correlate open-source reports. *(Text-first enrichment, batched translation, location, lineage, unified credibility, protected model capacity, canonical assessments, and engineering feeds delivered; bounded media derivation remains.)*
+8. [ ] Learn bounded regional activity baselines.
+9. [ ] Generate evidence-linked world change signals.
+10. [ ] Add the autonomous predictive world engine.
+11. [ ] Calibrate forecasts by domain, region, and horizon.
+12. [ ] Add the separate Jarvis timeline and intelligence-map interface.
+13. [ ] Add Jarvis viewport briefings and watchlists.
+14. [ ] Deliver selected intelligence alerts through Entity Core.
+15. [ ] Add historical replay, bias, and false-alert evaluations.
+16. [ ] Enforce source licensing, security, and workload limits end to end.
 
 ## Target situation monitor
 
@@ -115,7 +116,7 @@ presence as evidence of its operating status.
 - Add immutable asset versions and stable `(source_id, external_id)` identity so
   renamed, removed, and superseded assets remain auditable.
 - Expose bounded viewport APIs and simple toggles in the current engineering
-  dashboard.  The dedicated situation-monitor experience remains step 11.
+  dashboard.  The dedicated situation-monitor experience remains step 12.
 
 **Acceptance:** fixture-backed connectors are idempotent; issue time and valid
 time cannot be confused; static assets and forecasts cannot corroborate factual
@@ -250,7 +251,7 @@ at world zoom; provider failure cannot block the main intelligence worker.
 - Add an off-by-default `Vessels` toggle to the existing engineering map.
   Render current/stale states distinctly, draw a selected vessel's limited
   trail only at suitable zoom, and state that positions may be delayed or
-  incomplete.  The synchronized operational timeline remains step 11.
+  incomplete.  The synchronized operational timeline remains step 12.
 
 **Delivery slices**
 
@@ -440,7 +441,7 @@ is cutoff-safe and migration/backfill work is resumable.
   Human decisions and explicit separation constraints are durable inputs to
   future candidate generation.
 - Expose mutation operations only through an internal service/CLI initially.
-  Public dashboard endpoints remain read-only until step 12 introduces
+  Public dashboard endpoints remain read-only until step 13 introduces
   authenticated, same-origin mutation patterns.
 
 **Worker order and failure isolation**
@@ -468,7 +469,7 @@ is cutoff-safe and migration/backfill work is resumable.
   redistributed to explain the decision.
 - Extend the engineering dashboard with fusion health, pending reviews, merge
   aliases, and an observation-membership inspector.  The synchronized public
-  timeline and polished operational interaction remain step 11.
+  timeline and polished operational interaction remain step 12.
 
 **Delivery slices**
 
@@ -515,7 +516,87 @@ Step 6 is complete only after all four slices pass this matrix and a replay set
 containing duplicates, syndication, corrections, close-but-distinct incidents,
 ambiguous candidates, merges, and splits remains deterministic.
 
-### 7. Learn bounded regional activity baselines
+### 7. Enrich and correlate open-source reports
+
+**Outcome:** turn sparse text-first Telegram and similar public reports into
+grounded, channel-aware evidence that can join the same events as news and
+authoritative feeds without mistaking repetition, political framing, or model
+output for confirmation.
+
+**Delivered foundation:**
+
+- Telegram documents already carry channel-specific publisher identities rather
+  than sharing one platform-wide reputation.
+- Grounded document-location inference now runs before clustering.  It prefers
+  source metadata and local infrastructure references, may use one bounded model
+  extraction with a verbatim evidence span, and resolves eligible place names
+  through a free geocoder.  It stores method, confidence, precision, and the
+  evidence excerpt separately from the immutable captured source version.
+- Operator-configured channel profiles can set factual-reliability and framing
+  priors independently without publishing the selected accounts. Delayed
+  independent outcomes may move factual reliability in either direction, and no
+  prior proves or refutes an individual claim.
+- Ambiguous location text remains unresolved and is retried.  Corpus audit
+  fixtures include adversarial place-name collisions such as Lebanon the country
+  versus municipalities named Lebanon.
+- A versioned enrichment lane detects scripts/languages, stores model/provider,
+  input hash, confidence and evidence spans, and writes English translations as
+  derived fields without replacing captured text.  Model use is bounded and
+  reports that still require it remain explicitly queued.
+- Event category, actors, event time, place candidates, URLs, quoted authorities,
+  forward origin, and media metadata are extracted and deterministically
+  validated against captured evidence.  Media is not downloaded.
+- Exact reposts and known forwards receive shared reporting-family lineage and
+  auditable document relationships.  They cannot inflate independent-source
+  counts merely by being repeated across channels.
+- Enrichment invalidates affected derived features, refreshes world-event
+  observations, and reruns versioned, reversible event fusion so historical
+  Telegram posts can join canonical events shared with news and authoritative
+  feeds.
+- The engineering dashboard exposes a first-class early-report feed with the
+  original post, derived translation/category/location, channel trust and framing,
+  and canonical-event/independent-family correlation status.
+- A conservative unified publisher assessment now combines configured baselines
+  with independently eligible claim outcomes.  Positive movement remains locked
+  until maturity, refutations can lower confidence immediately, every changed
+  input creates immutable history, and framing remains a separate signal.
+- Reasoning capacity is partitioned into worldview, grounding, and forecast lanes
+  with per-lane reserves and maxima.  Enrichment batches several reports per call,
+  while completed, failed, invalid, abandoned, and budget-denied attempts are
+  auditable without retaining prompt text.
+- Canonical fused events receive deterministic epistemic assessments that keep
+  direct observations, corroborated reports, early signals, disputes, competing
+  hypotheses, and unknowns distinct under `truth-seeking-v1`.  This assessment,
+  rather than a generated narrative, is the new engineering world-picture layer.
+
+**Remaining implementation:**
+
+- Add bounded media enrichment for public captions, images, video keyframes, and
+  audio.  OCR or transcription is derived evidence with confidence and exact
+  media provenance, not a direct observation.  Unsupported, oversized, deleted,
+  or unavailable media remains explicit.
+- Separate factual accuracy, attribution quality, revision discipline,
+  independence, timeliness, and framing in channel profiles.  Topic-specific
+  reliability requires sufficient independently resolved samples and otherwise
+  shrinks to the configured channel and platform priors.
+- Expand the engineering view with dedicated unresolved queues, copied-family
+  drill-down, profile rationale, and the evidence behind each learned-score
+  change.  The polished synchronized feed remains step 12.
+
+**Acceptance:** English and non-English fixtures join the same event when their
+grounded facts agree; ambiguous locations do not receive coordinates; forwarded
+or copied posts count as one reporting family; media-only posts never become
+specific claims without derived evidence; high-bias sources may contribute true
+facts without being treated as neutral; high-reliability sources can be
+contradicted; all learned adjustments reconstruct from independent outcomes;
+historical re-correlation is resumable, reversible, cutoff-safe, and idempotent.
+
+Step 7 is complete only after translation, attribution, media enrichment,
+cross-source re-correlation, channel-profile auditability, and adversarial replay
+fixtures pass these acceptance conditions.  Location inference and channel priors
+alone do not close the step.
+
+### 8. Learn bounded regional activity baselines
 
 **Outcome:** estimate what the collected system normally observes by region,
 event type, season, and time bucket while separating real-world activity from
@@ -537,7 +618,7 @@ collection coverage.
 outages do not appear as calm; sparse cells fall back conservatively; minimum
 sample and coverage gates are enforced; rebuilding a version is deterministic.
 
-### 8. Generate evidence-linked world change signals
+### 9. Generate evidence-linked world change signals
 
 **Outcome:** identify material deviations and state transitions for human review
 without turning statistical novelty into a factual or causal conclusion.
@@ -554,14 +635,14 @@ without turning statistical novelty into a factual or causal conclusion.
 - Display the signal as "change detected by Entity" rather than as an event or
   cause.  Models may summarize prioritized signals but may not invent them.
 - Keep signals internal in this step; watchlist matching and delivery occur in
-  steps 12 and 13.
+  steps 13 and 14.
 
 **Acceptance:** synthetic spikes are detected; collection outages are labeled as
 coverage changes; ordinary seasonal activity is suppressed; every score can be
 reconstructed; corrections retract rather than delete a signal; no alert is
 delivered externally.
 
-### 9. Add the autonomous predictive world engine
+### 10. Add the autonomous predictive world engine
 
 **Outcome:** extend the existing experimental forecasting stack into a bounded,
 portfolio-driven engine over fused events and change signals.
@@ -579,14 +660,14 @@ portfolio-driven engine over fused events and change signals.
 - Combine base rate, deterministic features, market signal when applicable, and
   bounded model judgment as separately inspectable components.  No component is
   allowed to masquerade as factual evidence.
-- Run in shadow mode until step-10 calibration and resolution-coverage gates
+- Run in shadow mode until step-11 calibration and resolution-coverage gates
   promote a version.  Forecasts never directly create notifications or actions.
 
 **Acceptance:** jobs are idempotent and leased; budgets and reserved lanes hold
 under failure; forecasts are cutoff-safe and resolvable; unsupported or vague
 questions are rejected; portfolio caps hold; no forecast enters factual claims.
 
-### 10. Calibrate forecasts by domain, region, and horizon
+### 11. Calibrate forecasts by domain, region, and horizon
 
 **Outcome:** measure and correct predictive performance at useful subgroups
 without overfitting sparse outcomes or hiding poor resolution coverage.
@@ -610,7 +691,7 @@ probabilities remain bounded and monotonic; sparse subgroups shrink to broader
 priors; worst-group regressions block promotion; all metrics reproduce from
 stored forecasts and resolutions.
 
-### 11. Add the separate Jarvis timeline and intelligence-map interface
+### 12. Add the separate Jarvis timeline and intelligence-map interface
 
 **Outcome:** deliver the dedicated situation monitor while keeping the existing
 dashboard available as an engineering and epistemic-inspection surface.
@@ -639,7 +720,7 @@ every card reaches its evidence; stale and uncertain data are obvious; dense
 world views remain bounded; reconnect resumes without duplication; no interface
 control can trigger an external action.
 
-### 12. Add Jarvis viewport briefings and watchlists
+### 13. Add Jarvis viewport briefings and watchlists
 
 **Outcome:** let the operator ask "what matters here?" and persist bounded areas
 or topics of interest without automatically notifying them.
@@ -664,7 +745,7 @@ watchlist queries are rejected; dateline-crossing regions work; repeated matches
 deduplicate; empty coverage is reported honestly; creating a watchlist causes no
 external delivery.
 
-### 13. Deliver selected intelligence alerts through Entity Core
+### 14. Deliver selected intelligence alerts through Entity Core
 
 **Outcome:** deliver explicitly opted-in, high-value watchlist matches through
 the personal assistant's existing presence, importance, notification, and audit
@@ -688,7 +769,7 @@ controls.
 produce a public alert; cooldowns survive restart; presence and quiet hours are
 honored; retries are idempotent; all delivery paths pass through Entity Core.
 
-### 14. Add historical replay, bias, and false-alert evaluations
+### 15. Add historical replay, bias, and false-alert evaluations
 
 **Outcome:** test the entire monitor as it would have behaved at a past cutoff
 and quantify misses, false alarms, latency, calibration, and coverage inequity.
@@ -713,7 +794,7 @@ byte-for-byte unaffected; future source revisions cannot leak backward; critical
 symmetry and false-alert regressions block promotion; reports expose missing
 labels and weak geographic coverage rather than silently excluding them.
 
-### 15. Enforce licensing, security, and workload limits end to end
+### 16. Enforce licensing, security, and workload limits end to end
 
 **Outcome:** convert the existing local safeguards and source contracts into
 system-wide, continuously tested enforcement suitable for sustained operation.
@@ -751,14 +832,16 @@ The numbered order is also the dependency order:
 
 1. Steps 4 and 5 add contextual and movement layers without interpretation.
 2. Step 6 establishes the stable fused event unit consumed downstream.
-3. Steps 7 and 8 turn event history into bounded, evidence-linked change.
-4. Steps 9 and 10 predict and calibrate only after fused events and baselines
+3. Step 7 grounds and correlates text-first reports before they can shape a
+   regional baseline.
+4. Steps 8 and 9 turn event history into bounded, evidence-linked change.
+5. Steps 10 and 11 predict and calibrate only after fused events and baselines
    exist, while continuing to run in shadow mode.
-5. Steps 11 and 12 expose the operational picture, briefings, and opt-in
+6. Steps 12 and 13 expose the operational picture, briefings, and opt-in
    watchlists without delivery.
-6. Step 13 crosses into Entity Core only through its existing policy-controlled
+7. Step 14 crosses into Entity Core only through its existing policy-controlled
    delivery path.
-7. Step 14 supplies promotion evidence, and step 15 makes all accumulated
+8. Step 15 supplies promotion evidence, and step 16 makes all accumulated
    contracts and limits enforceable end to end.
 
 Steps may add hidden schemas, shadow computation, fixture APIs, or engineering

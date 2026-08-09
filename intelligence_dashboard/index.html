@@ -117,6 +117,28 @@
         <p class="map-disclaimer">Hazard marks are based on Entity’s authoritative event feeds where available. Weather cells are model forecasts, not observations or alerts. Infrastructure marks are reference locations and do not establish operating status. Aircraft are approximate crowd-sourced ADS-B state vectors, not air-traffic-control data.</p>
       </section>
 
+      <section class="panel canonical-events-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">CANONICAL WORLD PICTURE</p>
+            <h2>Evidence-backed evolving events</h2>
+          </div>
+          <span class="last-retrieval">Facts, reports, disputes, and unknowns remain distinct</span>
+        </div>
+        <div class="feed" id="canonical-event-list" aria-live="polite"></div>
+      </section>
+
+      <section class="panel early-reports-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">EARLY OPEN-SOURCE REPORTS</p>
+            <h2>Public-channel signals under assessment</h2>
+          </div>
+          <span class="last-retrieval">Derived fields never replace the original post</span>
+        </div>
+        <div class="feed" id="early-report-list" aria-live="polite"></div>
+      </section>
+
       <section class="layout">
         <article class="panel situation-panel">
           <div class="panel-heading">

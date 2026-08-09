@@ -26,7 +26,8 @@ class ReputationEngine:
         max_adjustment=0.15,
         confirmation_floor=0.75,
         prior_strength=8.0,
-        min_evaluated_outcomes=12
+        min_evaluated_outcomes=12,
+        publisher_profiles=(),
     ):
         self.store = store
         self.enabled = bool(enabled)
@@ -37,6 +38,15 @@ class ReputationEngine:
         self.min_evaluated_outcomes = max(
             3, min(100, int(min_evaluated_outcomes))
         )
+        self.publisher_profiles = {
+            str(item[0]).strip().lower(): {
+                "baseline": max(0.0, min(1.0, float(item[1]))),
+                "framing": max(0.0, min(1.0, float(item[2]))),
+                "affiliation": str(item[3] if len(item) > 3 else "")[:120],
+                "rationale": str(item[4] if len(item) > 4 else "")[:500],
+            }
+            for item in publisher_profiles if len(item) >= 3 and item[0]
+        }
 
     def evaluate(self):
         if not self.enabled:
@@ -46,23 +56,7 @@ class ReputationEngine:
         cutoff = _timestamp(now - timedelta(hours=self.maturity_hours))
         recorded = 0
         with self.store._connect() as connection:
-            publishers = connection.execute(
-                """
-                SELECT documents.publisher_key,
-                       MAX(documents.publisher_label) AS publisher_label,
-                       MAX(documents.source_id) AS source_id,
-                       MAX(sources.credibility) AS baseline_credibility
-                FROM documents
-                JOIN sources ON sources.id = documents.source_id
-                WHERE sources.kind NOT IN (
-                  'private_mail', 'prediction_market', 'weather_forecast',
-                  'infrastructure_reference'
-                )
-                GROUP BY documents.publisher_key
-                """
-            ).fetchall()
-            for row in publishers:
-                self._ensure_publisher(connection, dict(row))
+            self._sync_profiles(connection)
 
             candidates = connection.execute(
                 """
@@ -124,9 +118,42 @@ class ReputationEngine:
             updated = self._recalculate(connection)
         return ReputationResult(recorded, updated)
 
+    def sync_profiles(self):
+        """Materialize configured priors before the first long analysis pass."""
+        if not self.enabled:
+            return 0
+        with self.store._connect() as connection:
+            return self._sync_profiles(connection)
+
+    def _sync_profiles(self, connection):
+        publishers = connection.execute(
+            """
+            SELECT documents.publisher_key,
+                   MAX(documents.publisher_label) AS publisher_label,
+                   MAX(documents.source_id) AS source_id,
+                   MAX(sources.credibility) AS baseline_credibility
+            FROM documents
+            JOIN sources ON sources.id = documents.source_id
+            WHERE sources.kind NOT IN (
+              'private_mail', 'prediction_market', 'weather_forecast',
+              'infrastructure_reference'
+            )
+            GROUP BY documents.publisher_key
+            """
+        ).fetchall()
+        for row in publishers:
+            self._ensure_publisher(connection, dict(row))
+        return len(publishers)
+
     def _ensure_publisher(self, connection, document):
         now = utc_now()
-        baseline = max(0.0, min(1.0, document["baseline_credibility"]))
+        profile = self.publisher_profiles.get(
+            str(document["publisher_key"]).lower()
+        )
+        baseline = (
+            profile["baseline"] if profile else
+            max(0.0, min(1.0, document["baseline_credibility"]))
+        )
         connection.execute(
             """
             INSERT INTO publisher_reputation (
@@ -137,6 +164,11 @@ class ReputationEngine:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(publisher_key) DO UPDATE SET
                 publisher_label = excluded.publisher_label,
+                baseline_credibility = excluded.baseline_credibility,
+                learned_credibility = CASE
+                  WHEN publisher_reputation.evaluated_count=0
+                  THEN excluded.baseline_credibility
+                  ELSE publisher_reputation.learned_credibility END,
                 updated_at = excluded.updated_at
             """,
             (
@@ -146,6 +178,23 @@ class ReputationEngine:
                 now, now
             )
         )
+        if profile:
+            connection.execute(
+                """
+                INSERT INTO publisher_profile_priors (
+                  publisher_key,baseline_credibility,framing_signal,
+                  affiliation,rationale,configured_by,created_at,updated_at
+                ) VALUES (?,?,?,?,?,'user-configuration',?,?)
+                ON CONFLICT(publisher_key) DO UPDATE SET
+                  baseline_credibility=excluded.baseline_credibility,
+                  framing_signal=excluded.framing_signal,
+                  affiliation=excluded.affiliation,rationale=excluded.rationale,
+                  configured_by=excluded.configured_by,updated_at=excluded.updated_at
+                """, (
+                    document["publisher_key"], baseline, profile["framing"],
+                    profile["affiliation"], profile["rationale"], now, now,
+                )
+            )
 
     def _outcome(self, connection, document):
         contradicted_by = self._robust_contradictions(connection, document)

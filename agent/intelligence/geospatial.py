@@ -26,6 +26,16 @@ COUNTRY_CODES = {
     "MEX": "Mexico", "KR": "South Korea", "KOR": "South Korea", "KP": "North Korea",
     "PRK": "North Korea", "SA": "Saudi Arabia", "SAU": "Saudi Arabia", "EG": "Egypt",
     "EGY": "Egypt", "IQ": "Iraq", "IRQ": "Iraq", "JO": "Jordan", "JOR": "Jordan",
+    "OM": "Oman", "OMN": "Oman", "AE": "United Arab Emirates",
+    "ARE": "United Arab Emirates", "QA": "Qatar", "QAT": "Qatar",
+    "BH": "Bahrain", "BHR": "Bahrain", "KW": "Kuwait", "KWT": "Kuwait",
+    "AZ": "Azerbaijan", "AZE": "Azerbaijan", "AM": "Armenia", "ARM": "Armenia",
+    "GE": "Georgia", "GEO": "Georgia", "LY": "Libya", "LBY": "Libya",
+    "TN": "Tunisia", "TUN": "Tunisia", "DZ": "Algeria", "DZA": "Algeria",
+    "MA": "Morocco", "MAR": "Morocco", "VE": "Venezuela", "VEN": "Venezuela",
+    "CO": "Colombia", "COL": "Colombia", "MM": "Myanmar", "MMR": "Myanmar",
+    "BD": "Bangladesh", "BGD": "Bangladesh", "TH": "Thailand", "THA": "Thailand",
+    "PH": "Philippines", "PHL": "Philippines", "ID": "Indonesia", "IDN": "Indonesia",
 }
 
 

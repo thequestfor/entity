@@ -287,6 +287,21 @@ and every outcome and score change is retained in an audit history. Private mail
 never participates. Inspect current results at
 `/api/intelligence/reputations` on the localhost intelligence dashboard.
 
+The effective score shown by the dashboard is assembled from independently
+eligible claim outcomes rather than message volume. It stays at the configured
+baseline until positive evidence is mature, responds immediately to supported
+refutations, and keeps factual accuracy separate from political framing. Model
+reasoning is partitioned into worldview, grounding, and forecast lanes so a large
+synthesis backlog cannot consume capacity reserved for translation and location
+grounding. Every completed, failed, invalid, or budget-denied model attempt is
+audited without storing its prompt.
+
+The primary engineering view also exposes deterministic canonical-event
+assessments. Direct observations, independently corroborated reports, early
+signals, disputes, hypotheses, and unknowns remain separate fields under a
+versioned truth-seeking policy. Source documents and assessment history remain
+immutable; model prose is not required to establish this epistemic state.
+
 ### Read-only Gmail and Outlook setup
 
 Entity can ingest one Gmail account and one Outlook/Microsoft 365 account through
@@ -425,9 +440,35 @@ window for deletions. Increasing `ENTITY_TELEGRAM_DELETION_SCAN_SIZE` improves
 coverage at the cost of more API reads. Captured originals remain in immutable
 document versions when a deletion is detected.
 
-Every Telegram item retains `translation_status=pending`; automatic multilingual
-translation is the next processing-stage integration rather than part of the
-collector. Private mail is excluded from public understanding and source scoring.
+Telegram collection remains lossless and media-light. A separate bounded
+enrichment stage detects language, stores English translations and event fields
+as derived records, extracts links and quoted authorities, and preserves forward
+origin and media metadata without downloading media. The captured source version
+is never replaced. Unsupported media-only posts remain explicitly unavailable;
+private mail is excluded from public understanding and source scoring.
+
+After collection, Entity attempts to infer the event location from grounded text.
+It prefers structured source fields and its local airport/port references, can use
+a bounded model call to extract a verbatim place mention, and resolves that mention
+with Open-Meteo's free geocoder. The inferred point is stored separately from the
+captured source version with its evidence excerpt, confidence, method, and spatial
+precision. Ambiguous reports remain unlocated instead of receiving an invented
+coordinate.
+
+Telegram trust is learned per channel, not for Telegram as a whole. Configure
+starting profiles with `ENTITY_PUBLISHER_PROFILES` using
+`publisher-key|factual-reliability|framing-signal|affiliation|rationale`, separating
+entries with `||`. Factual reliability and political framing are deliberately
+separate: later independent confirmations and contradictions update reliability,
+while a framing prior warns synthesis that a source may select or characterize
+facts strategically.
+
+Enriched channel reports appear in the intelligence dashboard's early-report
+feed with inferred location, learned factual trust, framing signal, original-post
+link, and event-correlation status. Exact reposts and known forwards share a
+reporting family, so repetition does not masquerade as independent confirmation.
+The worker reprojects affected observations and reruns reversible event fusion in
+bounded batches.
 
 For Unreal mode, enable Remote Control and configure:
 

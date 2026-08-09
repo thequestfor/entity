@@ -60,6 +60,10 @@ from agent.intelligence.geospatial_intelligence import (
 )
 from agent.intelligence.environment_layers import EnvironmentLayerEngine
 from agent.intelligence.event_fusion import EventFusionEngine, FusionResult
+from agent.intelligence.location_inference import DocumentLocationInferenceEngine
+from agent.intelligence.open_source_enrichment import OpenSourceEnrichmentEngine
+from agent.intelligence.publisher_assessment import PublisherAssessmentEngine
+from agent.intelligence.event_assessment import CanonicalEventAssessmentEngine
 from agent.intelligence.world_graph import WorldEventGraphEngine
 from agent.intelligence.source_registry import (
     ConnectorContractError, policy_for, validate_connector_contract,
@@ -75,6 +79,11 @@ from agent.intelligence.understanding import UnderstandingEngine
 from agent.intelligence.forecasting import ForecastEngine
 from agent.intelligence.web import IntelligenceDashboard
 from agent.intelligence.worker import IntelligenceWorker
+
+
+class IntelligenceConfigTests(unittest.TestCase):
+    def test_publisher_profiles_are_opt_in(self):
+        self.assertEqual((), IntelligenceConfig().publisher_profiles)
 
 
 class IntelligenceStoreTests(unittest.TestCase):
@@ -126,7 +135,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(26, version)
+        self.assertEqual(30, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -146,6 +155,304 @@ class IntelligenceStoreTests(unittest.TestCase):
         self.assertEqual("Egypt", situation["location_country_name"])
         self.assertEqual("Alexandria", situation["location_label"])
         self.assertGreater(situation["location_confidence"], .5)
+
+    def test_location_inference_grounds_telegram_place_in_local_references(self):
+        self.store.register_source(
+            "ourairports", "OurAirports", "infrastructure_reference",
+            credibility=.8
+        )
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        self.store.ingest_items("ourairports", [SourceItem(
+            "airport-khasab", "Khasab Airport", "https://ourairports.test/khs",
+            latitude=26.171, longitude=56.2406,
+            metadata={"municipality": "Khasab", "country_code": "OM"}
+        )])
+        self.store.ingest_items("telegram", [SourceItem(
+            "report-1", "Vessel hit east of Khasab, Oman",
+            "https://t.me/fixture_example_channel/1", category="conflict",
+            metadata={"platform": "telegram", "channel_username": "fixture_example_channel"}
+        )])
+
+        result = DocumentLocationInferenceEngine(
+            self.store, model_enabled=False, geocoding_enabled=False
+        ).run_batch()
+        document = next(
+            item for item in self.store.list_documents()
+            if item["source_id"] == "telegram"
+        )
+
+        self.assertEqual(1, result["located"])
+        self.assertAlmostEqual(26.171, document["latitude"])
+        self.assertEqual("Oman", document["metadata"]["country"])
+        UnderstandingEngine(self.store).analyze_pending()
+        self.assertEqual(1, len(self.store.list_situations(located_only=True)))
+
+    def test_model_location_requires_literal_evidence_and_resolves_with_free_geocoder(self):
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        self.store.ingest_items("telegram", [SourceItem(
+            "report-2", "Airstrike reported near Rafah overnight",
+            "https://t.me/fixture_example_channel/2", category="conflict",
+            metadata={"platform": "telegram", "channel_username": "fixture_example_channel"}
+        )])
+
+        class Router:
+            def generate_json(self, *args, **kwargs):
+                return {
+                    "location": "Rafah", "country": "Palestine",
+                    "confidence": .88, "evidence": "near Rafah"
+                }
+
+        engine = DocumentLocationInferenceEngine(
+            self.store, router=Router(), model_enabled=True,
+            fetch_json=lambda _: {"results": [{
+                "name": "Rafah", "country": "Palestine", "country_code": "PS",
+                "latitude": 31.287, "longitude": 34.259
+            }]}
+        )
+        result = engine.run_batch()
+        document = next(
+            item for item in self.store.list_documents()
+            if item["source_id"] == "telegram"
+        )
+
+        self.assertEqual(1, result["located"])
+        self.assertAlmostEqual(31.287, document["latitude"])
+        self.assertEqual("model-grounded-place-extraction+open-meteo",
+                         document["metadata"]["location_inference"]["source"])
+
+    def test_location_inference_rejects_non_locative_ambiguous_place_name(self):
+        self.store.register_source(
+            "ourairports", "OurAirports", "infrastructure_reference",
+            credibility=.8
+        )
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        self.store.ingest_items("ourairports", [SourceItem(
+            "airport-lebanon", "Lebanon Municipal Airport",
+            "https://ourairports.test/lebanon", latitude=40.0, longitude=-86.0,
+            metadata={"municipality": "Lebanon", "country_code": "US"}
+        )])
+        self.store.ingest_items("telegram", [SourceItem(
+            "report-3", "Monitoring the Israel-Lebanon agreement",
+            "https://t.me/fixture_example_channel/3", category="conflict",
+            metadata={"platform": "telegram", "channel_username": "fixture_example_channel"}
+        )])
+
+        result = DocumentLocationInferenceEngine(
+            self.store, model_enabled=False, geocoding_enabled=False
+        ).run_batch()
+        report = next(
+            item for item in self.store.list_documents()
+            if item["source_id"] == "telegram"
+        )
+
+        self.assertEqual(0, result["located"])
+        self.assertIsNone(report["latitude"])
+
+    def test_open_source_enrichment_extracts_lineage_urls_and_category(self):
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        self.store.ingest_items("telegram", [SourceItem(
+            "enrich-1",
+            "According to Reuters, a missile struck near Khasab",
+            "https://t.me/fixture_example_channel/10",
+            content=(
+                "According to Reuters, a missile struck near Khasab. "
+                "https://example.test/source"
+            ),
+            category="social-signal",
+            metadata={
+                "platform": "telegram", "channel_username": "fixture_example_channel",
+                "forward_origin_channel_id": 99,
+                "forward_origin_message_id": 123,
+                "forward_origin_label": "Original Channel",
+            }
+        )])
+
+        result = OpenSourceEnrichmentEngine(
+            self.store, model_enabled=False
+        ).run_batch()
+        document = self.store.list_documents()[0]
+        with self.store._connect() as connection:
+            enrichment = dict(connection.execute(
+                "SELECT * FROM document_enrichments"
+            ).fetchone())
+
+        self.assertEqual(1, result.processed)
+        self.assertEqual("conflict", document["category"])
+        self.assertEqual("en", enrichment["detected_language"])
+        self.assertEqual("complete", enrichment["status"])
+        self.assertEqual(
+            "telegram-channel:99:123", enrichment["forward_origin_key"]
+        )
+        self.assertIn("example.test", enrichment["extracted_urls"])
+        self.assertIn("Reuters", enrichment["quoted_sources"])
+        self.assertEqual(
+            "forward:telegram-channel:99:123",
+            document["reporting_family_key"]
+        )
+        early_report = self.store.list_early_reports(limit=1)[0]
+        self.assertEqual("conflict", early_report["enriched_category"])
+        self.assertEqual("Original Channel", early_report["forward_origin_label"])
+        self.assertIsNone(early_report["world_event_id"])
+
+    def test_open_source_model_translation_is_derived_and_grounded(self):
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        original = "وقع انفجار في طهران بحسب وكالة الأنباء"
+        self.store.ingest_items("telegram", [SourceItem(
+            "enrich-ar", original, "https://t.me/fixture_example_channel/11",
+            content=original, category="social-signal",
+            metadata={"platform": "telegram", "channel_username": "fixture_example_channel"}
+        )])
+
+        class Router:
+            def generate_json(self, *args, **kwargs):
+                return {
+                    "detected_language": "ar",
+                    "translated_title": "An explosion occurred in Tehran",
+                    "translated_summary": "An explosion occurred in Tehran, according to the news agency.",
+                    "translated_content": "An explosion occurred in Tehran, according to the news agency.",
+                    "category": "conflict", "category_evidence": "وقع انفجار",
+                    "location": "Tehran", "country": "Iran",
+                    "location_evidence": "في طهران", "event_time": "",
+                    "event_time_evidence": "", "actors": [],
+                    "quoted_sources": [], "confidence": .83,
+                }
+
+            def provider_name(self):
+                return "fixture-model"
+
+        result = OpenSourceEnrichmentEngine(
+            self.store, router=Router(), model_enabled=True,
+            model_calls_per_cycle=1
+        ).run_batch()
+        document = self.store.list_documents()[0]
+        with self.store._connect() as connection:
+            enrichment = dict(connection.execute(
+                "SELECT * FROM document_enrichments"
+            ).fetchone())
+            version = connection.execute(
+                "SELECT content FROM document_versions"
+            ).fetchone()[0]
+
+        self.assertEqual(1, result.translated)
+        self.assertEqual(original, version)
+        self.assertEqual("ar", enrichment["detected_language"])
+        self.assertEqual("Tehran", enrichment["location_label"])
+        self.assertEqual("translated", document["metadata"]["translation_status"])
+        self.assertEqual("Tehran", document["metadata"]["location_name"])
+
+    def test_open_source_model_batches_reports_without_mixing_evidence(self):
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        originals = ("وقع انفجار في طهران", "وقع انفجار في بغداد")
+        self.store.ingest_items("telegram", [
+            SourceItem(
+                f"batch-{index}", original, f"https://t.me/fixture_example_channel/{20 + index}",
+                content=original, category="social-signal",
+                metadata={"platform": "telegram", "channel_username": "fixture_example_channel"}
+            ) for index, original in enumerate(originals)
+        ])
+
+        class Router:
+            def generate_json(self, prompt, *args, **kwargs):
+                reports = json.loads(prompt.split("Reports:\n", 1)[1])
+                return {"reports": [{
+                    "key": report["key"], "detected_language": "ar",
+                    "translated_title": "An explosion was reported",
+                    "translated_summary": "An explosion was reported.",
+                    "translated_content": "An explosion was reported.",
+                    "category": "conflict", "category_evidence": "وقع انفجار",
+                    "location": "", "country": "", "location_evidence": "",
+                    "event_time": "", "event_time_evidence": "",
+                    "actors": [], "quoted_sources": [], "confidence": .8,
+                } for report in reports]}
+
+            def provider_name(self):
+                return "fixture-model"
+
+        result = OpenSourceEnrichmentEngine(
+            self.store, router=Router(), model_enabled=True,
+            model_calls_per_cycle=1, model_reports_per_call=5
+        ).run_batch()
+        with self.store._connect() as connection:
+            rows = connection.execute(
+                "SELECT detected_language,translated_content,status "
+                "FROM document_enrichments ORDER BY document_version_id"
+            ).fetchall()
+
+        self.assertEqual(1, result.model_calls)
+        self.assertEqual(2, result.translated)
+        self.assertEqual(["ar", "ar"], [row[0] for row in rows])
+        self.assertTrue(all(row[1] for row in rows))
+        self.assertEqual(["complete", "complete"], [row[2] for row in rows])
+
+    def test_enrichment_collapses_exact_reposts_into_one_reporting_family(self):
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        text = "A sufficiently detailed identical public incident report near Khasab Oman"
+        self.store.ingest_items("telegram", [
+            SourceItem(
+                "copy-a", text, "https://t.me/fixture_alpha_channel/1", content=text,
+                metadata={"platform": "telegram", "channel_username": "fixture_alpha_channel"}
+            ),
+            SourceItem(
+                "copy-b", text, "https://t.me/fixture_bravo_channel/1", content=text,
+                metadata={"platform": "telegram", "channel_username": "fixture_bravo_channel"}
+            ),
+        ])
+
+        result = OpenSourceEnrichmentEngine(
+            self.store, model_enabled=False
+        ).run_batch()
+        documents = self.store.list_documents()
+        families = {item["reporting_family_key"] for item in documents}
+        with self.store._connect() as connection:
+            relationships = connection.execute(
+                "SELECT relationship FROM document_relationships"
+            ).fetchall()
+
+        self.assertEqual(2, result.processed)
+        self.assertEqual(1, len(families))
+        self.assertTrue(next(iter(families)).startswith("report:"))
+        self.assertEqual(["copied"], [row[0] for row in relationships])
+
+    def test_media_only_report_remains_explicitly_unavailable(self):
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        self.store.ingest_items("telegram", [SourceItem(
+            "media", "Media post from @fixture_example_channel",
+            "https://t.me/fixture_example_channel/12",
+            metadata={
+                "platform": "telegram", "channel_username": "fixture_example_channel",
+                "media_type": "MessageMediaPhoto", "media_width": 1280,
+                "media_height": 720, "media_downloaded": False,
+            }
+        )])
+
+        result = OpenSourceEnrichmentEngine(
+            self.store, router=object(), model_enabled=True,
+            model_calls_per_cycle=1
+        ).run_batch()
+        with self.store._connect() as connection:
+            row = dict(connection.execute(
+                "SELECT status,media_evidence FROM document_enrichments"
+            ).fetchone())
+
+        self.assertEqual(0, result.model_calls)
+        self.assertEqual("media-unavailable", row["status"])
+        self.assertIn('"media_downloaded":false', row["media_evidence"])
 
     def test_aircraft_cache_is_not_a_situation_or_claim(self):
         self.store.replace_aircraft_states([{
@@ -389,6 +696,73 @@ class IntelligenceStoreTests(unittest.TestCase):
         self.assertEqual(2, len(detail["fusion_decisions"]))
         self.assertGreaterEqual(len(detail["versions"]), 1)
         self.assertEqual(FusionResult(), engine.run_batch())
+
+    def test_canonical_event_assessment_separates_corroboration_from_early_signals(self):
+        for source_id in ("assessment_a", "assessment_b"):
+            self.store.register_source(source_id, source_id, "test", credibility=.8)
+        for source_id, offset in (("assessment_a", 0), ("assessment_b", 1)):
+            self.store.ingest_items(source_id, [SourceItem(
+                "event", "Port fire reported near Test City",
+                f"https://{source_id}.test/fire",
+                published_at="2026-08-08T10:00:00Z",
+                category="traditional-news", latitude=10 + offset * .01,
+                longitude=20 + offset * .01,
+            )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        EventFusionEngine(self.store, batch_size=20).run_batch()
+        engine = CanonicalEventAssessmentEngine(self.store, batch_size=20)
+        first = engine.run_batch()
+        event = self.store.list_world_events()[0]
+        detail = self.store.get_world_event(event["id"])
+
+        self.assertEqual(1, first.changed)
+        self.assertEqual("corroborated", event["assessment_status"])
+        self.assertEqual(2, event["assessment_family_count"])
+        self.assertTrue(any(
+            fact["kind"] == "independently-corroborated-report"
+            for fact in event["established_facts"]
+        ))
+        self.assertEqual("truth-seeking-v1", detail["assessment"]["epistemic_policy_version"])
+        self.assertEqual(1, len(detail["assessment_history"]))
+        self.assertEqual(0, engine.run_batch().processed)
+
+    def test_enrichment_refreshes_existing_world_observation_and_refuses_duplicate_decision(self):
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        self.store.ingest_items("telegram", [SourceItem(
+            "refresh", "Military projectile reported near Khasab",
+            "https://t.me/fixture_example_channel/refresh", category="social-signal",
+            metadata={"platform": "telegram", "channel_username": "fixture_example_channel"}
+        )])
+        UnderstandingEngine(self.store).analyze_pending()
+        graph = WorldEventGraphEngine(self.store, batch_size=20)
+        graph.run_batch()
+
+        OpenSourceEnrichmentEngine(
+            self.store, model_enabled=False
+        ).run_batch()
+        refreshed = graph.run_batch()
+        fusion = EventFusionEngine(self.store, batch_size=20)
+        first = fusion.run_batch()
+        second = fusion.run_batch()
+        with self.store._connect() as connection:
+            observation = dict(connection.execute(
+                "SELECT * FROM world_event_observations"
+            ).fetchone())
+            properties = json.loads(observation["properties"])
+            decisions = connection.execute(
+                """SELECT COUNT(*) FROM world_event_fusion_decisions
+                   WHERE observation_id=? AND method=?""",
+                (observation["id"], "deterministic-event-fusion-v2"),
+            ).fetchone()[0]
+
+        self.assertEqual(0, refreshed.observations)
+        self.assertEqual("conflict", observation["observation_kind"])
+        self.assertEqual("en", properties["enrichment"]["detected_language"])
+        self.assertEqual(1, first.processed)
+        self.assertEqual(FusionResult(), second)
+        self.assertEqual(1, decisions)
 
     def test_event_fusion_reviews_ambiguity_and_vetoes_distant_incidents(self):
         self.store.register_source("fusion_review", "Fusion Review", "test")
@@ -728,12 +1102,12 @@ class IntelligenceStoreTests(unittest.TestCase):
     def test_volatile_social_counters_do_not_create_revisions(self):
         initial = SourceItem(
             external_id="post", title="Same post",
-            url="https://t.me/news/1",
+            url="https://t.me/fixture_news_channel/1",
             metadata={"platform": "telegram", "views": 10, "forwards": 1}
         )
         later = SourceItem(
             external_id="post", title="Same post",
-            url="https://t.me/news/1",
+            url="https://t.me/fixture_news_channel/1",
             metadata={"platform": "telegram", "views": 500, "forwards": 20}
         )
 
@@ -1081,6 +1455,39 @@ class UnderstandingEngineTests(unittest.TestCase):
         forecast.generate_json("forecast two")
         with self.assertRaises(ModelUnavailable):
             forecast.generate_json("forecast three")
+
+    def test_grounding_budget_is_reserved_and_attempts_are_audited(self):
+        class Router:
+            last_provider_name = "fixture"
+            def generate_json(self, *args, **kwargs):
+                return {"ok": True}
+
+        budget = ReasoningBudget(
+            self.store, hourly_calls=4, daily_calls=10,
+            worldview_hourly_calls=4, worldview_daily_calls=10,
+            grounding_hourly_reserve=2, grounding_daily_reserve=2,
+            grounding_hourly_calls=2, grounding_daily_calls=4,
+        )
+        worldview = BudgetedModelRouter(Router(), budget)
+        grounding = worldview.for_lane("grounding")
+        worldview.generate_json("world one")
+        worldview.generate_json("world two")
+        with self.assertRaises(ModelUnavailable):
+            worldview.generate_json("world denied")
+        grounding.generate_json("ground one")
+        grounding.generate_json("ground two")
+        with self.assertRaises(ModelUnavailable):
+            grounding.generate_json("ground denied")
+
+        overview = self.store.reasoning_budget_overview()
+        statuses = {
+            (item["lane"], item["status"]): item["count"]
+            for item in overview["attempts_24h"]
+        }
+        self.assertEqual(2, statuses[("worldview", "completed")])
+        self.assertEqual(1, statuses[("worldview", "budget-denied")])
+        self.assertEqual(2, statuses[("grounding", "completed")])
+        self.assertEqual(1, statuses[("grounding", "budget-denied")])
 
     def test_authority_absence_is_not_generic_refutation(self):
         outcome,_,confidence,_=compare_observation(
@@ -1476,7 +1883,7 @@ class UnderstandingEngineTests(unittest.TestCase):
     def test_deleted_social_post_is_retained_but_not_reanalyzed(self):
         self.store.ingest_items("source-a", [SourceItem(
             external_id="deleted", title="Deleted post",
-            url="https://t.me/news/5", category="social-signal",
+            url="https://t.me/fixture_news_channel/5", category="social-signal",
             metadata={"deleted": True}, status="deleted"
         )])
 
@@ -2036,10 +2443,10 @@ class ReputationEngineTests(unittest.TestCase):
     def test_later_independent_authority_increases_early_publisher_trust(self):
         early = SourceItem(
             external_id="early", title="Earthquake near Example City",
-            url="https://t.me/earlywire/1", category="earthquake",
+            url="https://t.me/fixture_early_channel/1", category="earthquake",
             published_at="2026-07-20T10:00:00Z",
             metadata={
-                "platform": "telegram", "channel_username": "earlywire"
+                "platform": "telegram", "channel_username": "fixture_early_channel"
             }
         )
         confirmed = SourceItem(
@@ -2057,7 +2464,7 @@ class ReputationEngineTests(unittest.TestCase):
         reputation = {
             row["publisher_key"]: row
             for row in self.store.list_publisher_reputations()
-        }["telegram:earlywire"]
+        }["telegram:fixture_early_channel"]
 
         self.assertEqual(1, result.outcomes_recorded)
         self.assertEqual(1, reputation["confirmed_count"])
@@ -2066,10 +2473,10 @@ class ReputationEngineTests(unittest.TestCase):
     def test_deleted_unverified_post_lowers_trust_without_erasing_baseline(self):
         self.store.ingest_items("telegram", [SourceItem(
             external_id="deleted", title="Unverified deleted report",
-            url="https://t.me/noisywire/2", category="social-signal",
+            url="https://t.me/fixture_noisy_channel/2", category="social-signal",
             published_at="2026-07-20T10:00:00Z", status="deleted",
             metadata={
-                "platform": "telegram", "channel_username": "noisywire",
+                "platform": "telegram", "channel_username": "fixture_noisy_channel",
                 "deleted": True
             }
         )])
@@ -2077,7 +2484,7 @@ class ReputationEngineTests(unittest.TestCase):
         ReputationEngine(self.store, maturity_hours=0).evaluate()
         reputation = self.store.list_publisher_reputations()[0]
 
-        self.assertEqual("telegram:noisywire", reputation["publisher_key"])
+        self.assertEqual("telegram:fixture_noisy_channel", reputation["publisher_key"])
         self.assertEqual(1, reputation["deleted_unverified_count"])
         self.assertLess(reputation["learned_credibility"], 0.3)
         self.assertGreaterEqual(reputation["learned_credibility"], 0.15)
@@ -2086,10 +2493,10 @@ class ReputationEngineTests(unittest.TestCase):
         self.store.ingest_items("telegram", [SourceItem(
             external_id="wrong", title="Earthquake near Conflict City",
             summary="The earthquake had magnitude 7.8.",
-            url="https://t.me/noisywire/3", category="earthquake",
+            url="https://t.me/fixture_noisy_channel/3", category="earthquake",
             published_at="2026-07-20T10:00:00Z",
             metadata={
-                "platform": "telegram", "channel_username": "noisywire",
+                "platform": "telegram", "channel_username": "fixture_noisy_channel",
                 "magnitude": 7.8
             }
         )])
@@ -2106,7 +2513,7 @@ class ReputationEngineTests(unittest.TestCase):
         reputation = {
             row["publisher_key"]: row
             for row in self.store.list_publisher_reputations()
-        }["telegram:noisywire"]
+        }["telegram:fixture_noisy_channel"]
 
         self.assertEqual(1, reputation["contradicted_count"])
         self.assertLess(reputation["learned_credibility"], 0.3)
@@ -2126,6 +2533,36 @@ class ReputationEngineTests(unittest.TestCase):
         self.assertEqual(0.95, reputation["baseline_credibility"])
         self.assertEqual(0.95, reputation["learned_credibility"])
 
+    def test_channel_profile_separates_reliability_from_framing_prior(self):
+        self.store.ingest_items("telegram", [
+            SourceItem(
+                "osint", "Grounded OSINT report", "https://t.me/fixture_osint_channel/1",
+                metadata={"platform": "telegram", "channel_username": "fixture_osint_channel"}
+            ),
+            SourceItem(
+                "state", "State media report", "https://t.me/fixture_state_channel/1",
+                metadata={"platform": "telegram", "channel_username": "fixture_state_channel"}
+            ),
+        ])
+        profiles = (
+            ("telegram:fixture_osint_channel", .82, .15, "independent-osint", "reliable prior"),
+            ("telegram:fixture_state_channel", .45, .90, "state-media", "framing prior"),
+        )
+
+        ReputationEngine(
+            self.store, maturity_hours=72, publisher_profiles=profiles
+        ).evaluate()
+        reputations = {
+            row["publisher_key"]: row
+            for row in self.store.list_publisher_reputations()
+        }
+
+        self.assertEqual(.82, reputations["telegram:fixture_osint_channel"]["learned_credibility"])
+        self.assertEqual(.15, reputations["telegram:fixture_osint_channel"]["framing_prior"])
+        self.assertEqual(.45, reputations["telegram:fixture_state_channel"]["learned_credibility"])
+        self.assertEqual(.90, reputations["telegram:fixture_state_channel"]["framing_prior"])
+        self.assertEqual("state-media", reputations["telegram:fixture_state_channel"]["affiliation"])
+
     def test_repeated_confirmations_can_overcome_social_source_baseline(self):
         for index in range(12):
             city = f"ExampleCity{index}"
@@ -2133,11 +2570,11 @@ class ReputationEngineTests(unittest.TestCase):
                 external_id=f"early-{index}",
                 title=f"Earthquake reported near {city}",
                 summary=f"A magnitude event was reported near {city}.",
-                url=f"https://t.me/osint613/{index}",
+                url=f"https://t.me/fixture_osint_channel/{index}",
                 category="earthquake",
                 published_at=f"2026-07-{10 + index:02d}T10:00:00Z",
                 metadata={
-                    "platform": "telegram", "channel_username": "osint613"
+                    "platform": "telegram", "channel_username": "fixture_osint_channel"
                 }
             )])
             self.store.ingest_items("official", [SourceItem(
@@ -2154,7 +2591,7 @@ class ReputationEngineTests(unittest.TestCase):
         reputation = {
             row["publisher_key"]: row
             for row in self.store.list_publisher_reputations()
-        }["telegram:osint613"]
+        }["telegram:fixture_osint_channel"]
 
         self.assertEqual(12, reputation["confirmed_count"])
         self.assertEqual(12, reputation["early_confirmation_count"])
@@ -2176,6 +2613,62 @@ class ReputationEngineTests(unittest.TestCase):
         self.assertEqual("official", reputation["publisher_key"])
         self.assertEqual(0, reputation["evaluated_count"])
         self.assertEqual(0.95, reputation["learned_credibility"])
+
+    def test_unified_assessment_uses_only_independent_outcomes_and_keeps_framing_separate(self):
+        self.store.ingest_items("telegram", [SourceItem(
+            external_id="assessment", title="Grounded public report",
+            url="https://t.me/fixture_osint_channel/assessment", category="conflict",
+            metadata={"platform": "telegram", "channel_username": "fixture_osint_channel"}
+        )])
+        UnderstandingEngine(self.store).analyze_pending()
+        profiles = ((
+            "telegram:fixture_osint_channel", .82, .15, "independent-osint", "configured prior"
+        ),)
+        ReputationEngine(
+            self.store, maturity_hours=72, publisher_profiles=profiles
+        ).sync_profiles()
+        with self.store._connect() as connection:
+            claim_id = connection.execute(
+                "SELECT id FROM claims ORDER BY id LIMIT 1"
+            ).fetchone()[0]
+            for index in range(13):
+                connection.execute(
+                    """INSERT INTO publisher_claim_outcomes (
+                         publisher_key,claim_id,topic,claim_type,outcome,
+                         confidence,evidence_document_ids,method,evaluated_at,
+                         evidence_basis,outcome_weight,verifier_source_id,
+                         independent_family_count
+                       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        "telegram:fixture_osint_channel", claim_id, "conflict", "direct_fact",
+                        "confirmed", .9, "[]", f"fixture-{index}",
+                        "2026-08-09T12:00:00Z",
+                        "independent-family-corroboration", .55, "",
+                        1 if index < 12 else 0,
+                    ),
+                )
+
+        changed = PublisherAssessmentEngine(
+            self.store, min_positive_outcomes=12, max_adjustment=.15
+        ).refresh()
+        assessment = {
+            row["publisher_key"]: row
+            for row in self.store.list_publisher_reputations()
+        }["telegram:fixture_osint_channel"]
+        with self.store._connect() as connection:
+            evidence_weight = connection.execute(
+                "SELECT source_weight FROM claim_evidence LIMIT 1"
+            ).fetchone()[0]
+
+        self.assertEqual(1, changed)
+        self.assertEqual(12, assessment["assessment_factual_samples"])
+        self.assertEqual("mature", assessment["maturity_status"])
+        self.assertGreater(assessment["effective_credibility"], .82)
+        self.assertLessEqual(assessment["effective_credibility"], .97)
+        self.assertEqual(.15, assessment["assessment_framing_signal"])
+        self.assertEqual(
+            assessment["effective_credibility"], evidence_weight
+        )
 
 
 class ConnectorTests(unittest.TestCase):
@@ -2918,17 +3411,23 @@ class ConnectorTests(unittest.TestCase):
             def collect(self, channels, previous, limit):
                 calls.append((channels, previous, limit))
                 return [{
-                    "id": 42, "username": "world_news", "title": "World News",
+                    "id": 42, "username": "fixture_public_channel", "title": "Fixture News",
                     "message_ids": [11], "deleted_ids": [10],
                     "messages": [{
                         "id": 11, "text": "Developing report", "date": "2026-07-22T12:00:00Z",
                         "edit_date": "2026-07-22T12:01:00Z", "views": 100,
-                        "forwards": 2, "forwarded": False, "media_type": None
+                        "forwards": 2, "forwarded": True,
+                        "forward_origin_channel_id": 77,
+                        "forward_origin_message_id": 8,
+                        "forward_origin_label": "Origin",
+                        "media_type": "MessageMediaDocument",
+                        "media_mime_type": "video/mp4",
+                        "media_size_bytes": 1234,
                     }]
                 }]
 
         connector = TelegramConnector(
-            api_id="123", api_hash="hash", channels=("@world_news",),
+            api_id="123", api_hash="hash", channels=("@fixture_public_channel",),
             gateway=Gateway(), enabled=True
         )
         batch = connector.poll({"known_message_ids": {"42": [10]}})
@@ -2937,20 +3436,24 @@ class ConnectorTests(unittest.TestCase):
         active, deleted = batch.items
         self.assertEqual("42:11", active.external_id)
         self.assertEqual("pending", active.metadata["translation_status"])
+        self.assertEqual(77, active.metadata["forward_origin_channel_id"])
+        self.assertEqual(8, active.metadata["forward_origin_message_id"])
+        self.assertEqual("video/mp4", active.metadata["media_mime_type"])
+        self.assertFalse(active.metadata["media_downloaded"])
         self.assertEqual("deleted", deleted.status)
         self.assertTrue(deleted.metadata["deleted"])
         self.assertEqual({"42": [11]}, batch.cursor["known_message_ids"])
-        self.assertEqual(("world_news",), calls[0][0])
+        self.assertEqual(("fixture_public_channel",), calls[0][0])
 
     def test_store_preserves_original_version_when_public_post_is_deleted(self):
         original = SourceItem(
             external_id="42:10", title="Original post",
-            url="https://t.me/world_news/10", content="Original public text",
+            url="https://t.me/fixture_public_channel/10", content="Original public text",
             metadata={"platform": "telegram"}
         )
         deleted = SourceItem(
             external_id="42:10", title="Deleted Telegram post",
-            url="https://t.me/world_news/10", summary="Deleted",
+            url="https://t.me/fixture_public_channel/10", summary="Deleted",
             metadata={"platform": "telegram", "deleted": True}, status="deleted"
         )
         with tempfile.TemporaryDirectory() as directory:
@@ -3358,6 +3861,16 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ) as response:
                     reputation_outcomes = json.loads(response.read())
                 with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/early-reports",
+                    timeout=2
+                ) as response:
+                    early_reports = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/reasoning-budget",
+                    timeout=2
+                ) as response:
+                    reasoning_budget = json.loads(response.read())
+                with urllib.request.urlopen(
                     dashboard.url + "api/intelligence/event-fusion",
                     timeout=2
                 ) as response:
@@ -3399,6 +3912,8 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertEqual(1, briefing["situation_count"])
                 self.assertIn("reputations", reputations)
                 self.assertIn("outcomes", reputation_outcomes)
+                self.assertIn("reports", early_reports)
+                self.assertIn("policies", reasoning_budget)
                 self.assertGreaterEqual(fusion_overview["active_memberships"], 1)
                 self.assertIn("reviews", fusion_reviews)
                 self.assertIn("versions", world_event_detail)

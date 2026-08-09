@@ -166,6 +166,10 @@ def _telethon_types():
 def _message_record(message):
     forward = getattr(message, "forward", None)
     media = getattr(message, "media", None)
+    forward_peer = getattr(forward, "from_id", None) if forward else None
+    document = getattr(media, "document", None) if media else None
+    attributes = list(getattr(document, "attributes", None) or [])
+    media_details = _media_details(media, document, attributes)
     return {
         "id": int(message.id),
         "text": str(getattr(message, "raw_text", "") or ""),
@@ -178,7 +182,20 @@ def _message_record(message):
         "reply_to_message_id": getattr(message, "reply_to_msg_id", None),
         "forwarded": bool(forward),
         "forward_date": getattr(forward, "date", None) if forward else None,
-        "media_type": type(media).__name__ if media else None
+        "forward_origin_channel_id": (
+            getattr(forward_peer, "channel_id", None) if forward_peer else None
+        ),
+        "forward_origin_message_id": (
+            getattr(forward, "channel_post", None) if forward else None
+        ),
+        "forward_origin_label": (
+            getattr(forward, "from_name", None) if forward else None
+        ),
+        "forward_origin_post_author": (
+            getattr(forward, "post_author", None) if forward else None
+        ),
+        "media_type": type(media).__name__ if media else None,
+        **media_details,
     }
 
 
@@ -211,11 +228,50 @@ def _message_item(channel, message):
             "reply_to_message_id": message.get("reply_to_message_id"),
             "forwarded": bool(message.get("forwarded")),
             "forward_date": message.get("forward_date"),
+            "forward_origin_channel_id": message.get("forward_origin_channel_id"),
+            "forward_origin_message_id": message.get("forward_origin_message_id"),
+            "forward_origin_label": message.get("forward_origin_label"),
+            "forward_origin_post_author": message.get("forward_origin_post_author"),
             "media_type": message.get("media_type"),
+            "media_mime_type": message.get("media_mime_type"),
+            "media_size_bytes": message.get("media_size_bytes"),
+            "media_duration_seconds": message.get("media_duration_seconds"),
+            "media_width": message.get("media_width"),
+            "media_height": message.get("media_height"),
+            "media_file_name": message.get("media_file_name"),
             "media_downloaded": False,
             "translation_status": "pending"
         }
     )
+
+
+def _media_details(media, document, attributes):
+    if not media:
+        return {}
+    details = {
+        "media_mime_type": getattr(document, "mime_type", None),
+        "media_size_bytes": getattr(document, "size", None),
+    }
+    for attribute in attributes:
+        for source, target in (
+            ("duration", "media_duration_seconds"),
+            ("w", "media_width"), ("h", "media_height"),
+            ("file_name", "media_file_name"),
+        ):
+            value = getattr(attribute, source, None)
+            if value not in (None, ""):
+                details[target] = value
+    photo = getattr(media, "photo", None)
+    sizes = list(getattr(photo, "sizes", None) or [])
+    if sizes:
+        largest = max(
+            sizes,
+            key=lambda value: int(getattr(value, "w", 0) or 0)
+                              * int(getattr(value, "h", 0) or 0),
+        )
+        details.setdefault("media_width", getattr(largest, "w", None))
+        details.setdefault("media_height", getattr(largest, "h", None))
+    return details
 
 
 def _deleted_item(channel, message_id):

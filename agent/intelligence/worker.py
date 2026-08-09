@@ -49,6 +49,10 @@ from agent.intelligence.geospatial_intelligence import GeospatialIntelligenceEng
 from agent.intelligence.environment_layers import EnvironmentLayerEngine
 from agent.intelligence.world_graph import WorldEventGraphEngine
 from agent.intelligence.event_fusion import EventFusionEngine
+from agent.intelligence.location_inference import DocumentLocationInferenceEngine
+from agent.intelligence.open_source_enrichment import OpenSourceEnrichmentEngine
+from agent.intelligence.publisher_assessment import PublisherAssessmentEngine
+from agent.intelligence.event_assessment import CanonicalEventAssessmentEngine
 from agent.intelligence.source_registry import (
     policy_for, validate_connector_contract
 )
@@ -88,10 +92,16 @@ class IntelligenceWorker:
         on_activity=None,
         aircraft_monitor=None,
         geography_batch_size=50,
+        location_inference_engine=None,
+        location_inference_poll_seconds=300,
+        open_source_enrichment_engine=None,
+        open_source_enrichment_poll_seconds=300,
         geospatial_engine=None,
         environment_layer_engine=None,
         world_graph_engine=None,
-        event_fusion_engine=None
+        event_fusion_engine=None,
+        publisher_assessment=None,
+        event_assessment_engine=None
     ):
         self.store = store
         self.connectors = list(connectors)
@@ -134,10 +144,24 @@ class IntelligenceWorker:
         self.on_activity = on_activity
         self.aircraft_monitor = aircraft_monitor
         self.geography_batch_size = max(1, min(500, int(geography_batch_size)))
+        self.location_inference_engine = location_inference_engine
+        self.location_inference_poll_seconds = max(
+            30, int(location_inference_poll_seconds)
+        )
+        self._next_location_inference_at = 0.0
+        self.open_source_enrichment_engine = open_source_enrichment_engine
+        self.open_source_enrichment_poll_seconds = max(
+            30, int(open_source_enrichment_poll_seconds)
+        )
+        self._next_open_source_enrichment_at = 0.0
         self.geospatial_engine = geospatial_engine
         self.environment_layer_engine = environment_layer_engine
         self.world_graph_engine = world_graph_engine
         self.event_fusion_engine = event_fusion_engine
+        self.publisher_assessment = publisher_assessment or PublisherAssessmentEngine(
+            store
+        )
+        self.event_assessment_engine = event_assessment_engine
         self._stop = threading.Event()
         self._thread = None
 
@@ -153,6 +177,15 @@ class IntelligenceWorker:
                 poll_seconds=connector.poll_seconds
             )
             self.store.register_source_policy(connector.source_id, policy)
+
+        try:
+            self.reputation.sync_profiles()
+        except Exception as exc:
+            print("Publisher profile synchronization failed:", type(exc).__name__)
+        try:
+            self.publisher_assessment.refresh()
+        except Exception as exc:
+            print("Publisher assessment initialization failed:", type(exc).__name__)
 
     @classmethod
     def from_config(cls, store, config):
@@ -337,7 +370,8 @@ class IntelligenceWorker:
             maturity_hours=config.reputation_maturity_hours,
             max_adjustment=config.reputation_max_adjustment,
             prior_strength=config.reputation_prior_strength,
-            min_evaluated_outcomes=config.reputation_min_evaluated_outcomes
+            min_evaluated_outcomes=config.reputation_min_evaluated_outcomes,
+            publisher_profiles=config.publisher_profiles
         )
         embedding_provider = OllamaEmbeddingProvider(
             enabled=config.cluster_embeddings_enabled,
@@ -376,11 +410,34 @@ class IntelligenceWorker:
             forecast_hourly_reserve=config.reasoning_forecast_hourly_reserve,
             forecast_daily_reserve=config.reasoning_forecast_daily_reserve,
             forecast_hourly_calls=config.reasoning_forecast_hourly_calls,
-            forecast_daily_calls=config.reasoning_forecast_daily_calls
+            forecast_daily_calls=config.reasoning_forecast_daily_calls,
+            grounding_hourly_reserve=config.reasoning_grounding_hourly_reserve,
+            grounding_daily_reserve=config.reasoning_grounding_daily_reserve,
+            grounding_hourly_calls=config.reasoning_grounding_hourly_calls,
+            grounding_daily_calls=config.reasoning_grounding_daily_calls,
+            worldview_hourly_calls=config.reasoning_worldview_hourly_calls,
+            worldview_daily_calls=config.reasoning_worldview_daily_calls,
         )
         bounded_router = BudgetedModelRouter(understanding.router, budget)
         understanding.router = bounded_router
         understanding.claim_extractor.router = bounded_router
+        location_inference_engine = DocumentLocationInferenceEngine(
+            store, router=bounded_router.for_lane("grounding"),
+            enabled=config.location_inference_enabled,
+            model_enabled=config.location_model_inference_enabled,
+            geocoding_enabled=config.location_geocoding_enabled,
+            batch_size=config.location_inference_batch_size,
+            model_calls_per_cycle=config.location_model_calls_per_cycle,
+            timeout=config.request_timeout_seconds
+        )
+        open_source_enrichment_engine = OpenSourceEnrichmentEngine(
+            store, router=bounded_router.for_lane("grounding"),
+            enabled=config.open_source_enrichment_enabled,
+            batch_size=config.open_source_enrichment_batch_size,
+            model_enabled=config.open_source_model_enrichment_enabled,
+            model_calls_per_cycle=config.open_source_model_calls_per_cycle,
+            model_reports_per_call=config.open_source_model_reports_per_call,
+        )
         belief_revision = BeliefRevisionEngine(
             store,
             enabled=(
@@ -459,6 +516,15 @@ class IntelligenceWorker:
             max_candidates=config.event_fusion_max_candidates,
             lookback_days=config.event_fusion_lookback_days
         )
+        publisher_assessment = PublisherAssessmentEngine(
+            store, prior_strength=config.reputation_prior_strength,
+            min_positive_outcomes=config.reputation_min_evaluated_outcomes,
+            max_adjustment=config.reputation_max_adjustment,
+        )
+        event_assessment_engine = CanonicalEventAssessmentEngine(
+            store, enabled=config.event_assessment_enabled,
+            batch_size=config.event_assessment_batch_size,
+        )
         return cls(
             store=store,
             connectors=connectors,
@@ -482,10 +548,20 @@ class IntelligenceWorker:
             activity_watchdog_seconds=config.activity_watchdog_seconds,
             aircraft_monitor=aircraft_monitor,
             geography_batch_size=config.geography_backfill_batch_size,
+            location_inference_engine=location_inference_engine,
+            location_inference_poll_seconds=(
+                config.location_inference_poll_seconds
+            ),
+            open_source_enrichment_engine=open_source_enrichment_engine,
+            open_source_enrichment_poll_seconds=(
+                config.open_source_enrichment_poll_seconds
+            ),
             geospatial_engine=geospatial_engine,
             environment_layer_engine=environment_layer_engine,
             world_graph_engine=world_graph_engine,
-            event_fusion_engine=event_fusion_engine
+            event_fusion_engine=event_fusion_engine,
+            publisher_assessment=publisher_assessment,
+            event_assessment_engine=event_assessment_engine,
         )
 
     @property
@@ -541,6 +617,34 @@ class IntelligenceWorker:
         changed = sum(outcome.result.changed for outcome in outcomes)
         if self.aircraft_monitor is not None:
             self.aircraft_monitor.run_if_due(force=force)
+        if (
+            self.open_source_enrichment_engine is not None
+            and (force or changed or now >= self._next_open_source_enrichment_at)
+        ):
+            try:
+                enrichment = self.open_source_enrichment_engine.run_batch()
+                changed += (
+                    enrichment.translated + enrichment.categorized
+                    + enrichment.relationships
+                )
+            except Exception as exc:
+                print("Open-source enrichment failed:", type(exc).__name__)
+            finally:
+                self._next_open_source_enrichment_at = (
+                    now + self.open_source_enrichment_poll_seconds
+                )
+        if (
+            self.location_inference_engine is not None
+            and (force or changed or now >= self._next_location_inference_at)
+        ):
+            try:
+                self.location_inference_engine.run_batch()
+            except Exception as exc:
+                print("Document location inference failed:", type(exc).__name__)
+            finally:
+                self._next_location_inference_at = (
+                    now + self.location_inference_poll_seconds
+                )
         try:
             self.understanding.geography.reconcile_batch(
                 self.store, self.geography_batch_size
@@ -625,6 +729,12 @@ class IntelligenceWorker:
             except Exception as exc:
                 print("World event fusion cycle failed:", type(exc).__name__)
 
+        if self.event_assessment_engine is not None:
+            try:
+                self.event_assessment_engine.run_batch()
+            except Exception as exc:
+                print("Canonical event assessment failed:", type(exc).__name__)
+
         try:
             if force or now >= self._next_forecast_at:
                 self.last_forecast_result = self.forecasting.run_cycle()
@@ -641,6 +751,10 @@ class IntelligenceWorker:
                 self.last_reputation_result = self.reputation.evaluate()
         except Exception as exc:
             print("Intelligence reputation cycle failed:", exc)
+        try:
+            self.publisher_assessment.refresh()
+        except Exception as exc:
+            print("Publisher assessment cycle failed:", type(exc).__name__)
         finally:
             if activity_started:
                 self._emit_activity(

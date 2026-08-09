@@ -104,6 +104,27 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             self._send_json(self.server.intelligence_store.epistemic_health())
             return
 
+        if parsed.path == "/api/intelligence/open-source-enrichment":
+            self._send_json(
+                self.server.intelligence_store.open_source_enrichment_overview()
+            )
+            return
+
+        if parsed.path == "/api/intelligence/reasoning-budget":
+            self._send_json(
+                self.server.intelligence_store.reasoning_budget_overview()
+            )
+            return
+
+        if parsed.path == "/api/intelligence/early-reports":
+            query = parse_qs(parsed.query)
+            self._send_json({
+                "reports": self.server.intelligence_store.list_early_reports(
+                    limit=_query_int(query, "limit", 50)
+                )
+            })
+            return
+
         if parsed.path == "/api/intelligence/reasoning":
             query=parse_qs(parsed.query)
             self._send_json(self.server.intelligence_store.reasoning_overview(

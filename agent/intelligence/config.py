@@ -24,6 +24,8 @@ DEFAULT_HDX_HAPI_THEMES = (
     "coordination-context/operational-presence",
 )
 
+DEFAULT_PUBLISHER_PROFILES = ()
+
 
 @dataclass(frozen=True)
 class IntelligenceConfig:
@@ -68,6 +70,12 @@ class IntelligenceConfig:
     reasoning_forecast_daily_reserve: int = 12
     reasoning_forecast_hourly_calls: int = 4
     reasoning_forecast_daily_calls: int = 30
+    reasoning_grounding_hourly_reserve: int = 4
+    reasoning_grounding_daily_reserve: int = 40
+    reasoning_grounding_hourly_calls: int = 8
+    reasoning_grounding_daily_calls: int = 60
+    reasoning_worldview_hourly_calls: int = 12
+    reasoning_worldview_daily_calls: int = 100
     active_acquisition_enabled: bool = False
     active_acquisition_per_cycle: int = 5
     cluster_auto_link_threshold: float = 0.82
@@ -84,6 +92,9 @@ class IntelligenceConfig:
     reputation_max_adjustment: float = 0.15
     reputation_prior_strength: float = 8.0
     reputation_min_evaluated_outcomes: int = 12
+    publisher_profiles: tuple[tuple[str, float, float, str, str], ...] = (
+        DEFAULT_PUBLISHER_PROFILES
+    )
     forecast_max_active: int = 12
     forecast_per_cycle: int = 2
     forecast_resolution_per_cycle: int = 4
@@ -121,6 +132,18 @@ class IntelligenceConfig:
     aircraft_poll_seconds: int = 120
     aircraft_max_states: int = 300
     geography_backfill_batch_size: int = 50
+    location_inference_enabled: bool = True
+    location_model_inference_enabled: bool = False
+    location_geocoding_enabled: bool = True
+    location_inference_batch_size: int = 25
+    location_model_calls_per_cycle: int = 1
+    location_inference_poll_seconds: int = 300
+    open_source_enrichment_enabled: bool = True
+    open_source_enrichment_batch_size: int = 50
+    open_source_model_enrichment_enabled: bool = True
+    open_source_model_calls_per_cycle: int = 1
+    open_source_model_reports_per_call: int = 5
+    open_source_enrichment_poll_seconds: int = 300
     geospatial_features_enabled: bool = True
     geospatial_feature_batch_size: int = 100
     environment_layers_enabled: bool = True
@@ -146,6 +169,8 @@ class IntelligenceConfig:
     event_fusion_review_threshold: float = 0.65
     event_fusion_max_candidates: int = 100
     event_fusion_lookback_days: int = 14
+    event_assessment_enabled: bool = True
+    event_assessment_batch_size: int = 100
     world_bank_enabled: bool = True
     world_bank_countries: tuple[str, ...] = ("WLD",)
     world_bank_indicators: tuple[str, ...] = DEFAULT_WORLD_BANK_INDICATORS
@@ -340,6 +365,30 @@ class IntelligenceConfig:
                 "ENTITY_REASONING_FORECAST_DAILY_CALLS",30,
                 minimum=1,maximum=1000
             ),
+            reasoning_grounding_hourly_reserve=_env_int(
+                "ENTITY_REASONING_GROUNDING_HOURLY_RESERVE",4,
+                minimum=0,maximum=100
+            ),
+            reasoning_grounding_daily_reserve=_env_int(
+                "ENTITY_REASONING_GROUNDING_DAILY_RESERVE",40,
+                minimum=0,maximum=1000
+            ),
+            reasoning_grounding_hourly_calls=_env_int(
+                "ENTITY_REASONING_GROUNDING_HOURLY_CALLS",8,
+                minimum=1,maximum=100
+            ),
+            reasoning_grounding_daily_calls=_env_int(
+                "ENTITY_REASONING_GROUNDING_DAILY_CALLS",60,
+                minimum=1,maximum=1000
+            ),
+            reasoning_worldview_hourly_calls=_env_int(
+                "ENTITY_REASONING_WORLDVIEW_HOURLY_CALLS",12,
+                minimum=1,maximum=100
+            ),
+            reasoning_worldview_daily_calls=_env_int(
+                "ENTITY_REASONING_WORLDVIEW_DAILY_CALLS",100,
+                minimum=1,maximum=1000
+            ),
             active_acquisition_enabled=_env_bool(
                 "ENTITY_ACTIVE_ACQUISITION_ENABLED",False
             ),
@@ -400,6 +449,9 @@ class IntelligenceConfig:
             reputation_min_evaluated_outcomes=_env_int(
                 "ENTITY_REPUTATION_MIN_EVALUATED_OUTCOMES", 12,
                 minimum=3, maximum=100
+            ),
+            publisher_profiles=_env_publisher_profiles(
+                os.getenv("ENTITY_PUBLISHER_PROFILES")
             ),
             forecast_max_active=_env_int(
                 "ENTITY_FORECAST_MAX_ACTIVE", 12, minimum=1
@@ -471,6 +523,49 @@ class IntelligenceConfig:
             aircraft_poll_seconds=_env_int("ENTITY_AIRCRAFT_POLL_SECONDS", 120, minimum=60),
             aircraft_max_states=_env_int("ENTITY_AIRCRAFT_MAX_STATES", 300, minimum=1, maximum=1000),
             geography_backfill_batch_size=_env_int("ENTITY_GEOGRAPHY_BACKFILL_BATCH_SIZE", 50, minimum=1, maximum=500),
+            location_inference_enabled=_env_bool(
+                "ENTITY_LOCATION_INFERENCE_ENABLED", True
+            ),
+            location_model_inference_enabled=_env_bool(
+                "ENTITY_LOCATION_MODEL_INFERENCE_ENABLED", False
+            ),
+            location_geocoding_enabled=_env_bool(
+                "ENTITY_LOCATION_GEOCODING_ENABLED", True
+            ),
+            location_inference_batch_size=_env_int(
+                "ENTITY_LOCATION_INFERENCE_BATCH_SIZE", 25,
+                minimum=1, maximum=200
+            ),
+            location_model_calls_per_cycle=_env_int(
+                "ENTITY_LOCATION_MODEL_CALLS_PER_CYCLE", 1,
+                minimum=0, maximum=25
+            ),
+            location_inference_poll_seconds=_env_int(
+                "ENTITY_LOCATION_INFERENCE_POLL_SECONDS", 300,
+                minimum=30, maximum=86400
+            ),
+            open_source_enrichment_enabled=_env_bool(
+                "ENTITY_OPEN_SOURCE_ENRICHMENT_ENABLED", True
+            ),
+            open_source_enrichment_batch_size=_env_int(
+                "ENTITY_OPEN_SOURCE_ENRICHMENT_BATCH_SIZE", 50,
+                minimum=1, maximum=500
+            ),
+            open_source_model_enrichment_enabled=_env_bool(
+                "ENTITY_OPEN_SOURCE_MODEL_ENRICHMENT_ENABLED", True
+            ),
+            open_source_model_calls_per_cycle=_env_int(
+                "ENTITY_OPEN_SOURCE_MODEL_CALLS_PER_CYCLE", 1,
+                minimum=0, maximum=25
+            ),
+            open_source_model_reports_per_call=_env_int(
+                "ENTITY_OPEN_SOURCE_MODEL_REPORTS_PER_CALL", 5,
+                minimum=1, maximum=10
+            ),
+            open_source_enrichment_poll_seconds=_env_int(
+                "ENTITY_OPEN_SOURCE_ENRICHMENT_POLL_SECONDS", 300,
+                minimum=30, maximum=86400
+            ),
             geospatial_features_enabled=_env_bool("ENTITY_GEOSPATIAL_FEATURES_ENABLED", True),
             geospatial_feature_batch_size=_env_int("ENTITY_GEOSPATIAL_FEATURE_BATCH_SIZE", 100, minimum=1, maximum=500),
             environment_layers_enabled=_env_bool(
@@ -546,6 +641,13 @@ class IntelligenceConfig:
             event_fusion_lookback_days=_env_int(
                 "ENTITY_EVENT_FUSION_LOOKBACK_DAYS", 14,
                 minimum=1, maximum=90
+            ),
+            event_assessment_enabled=_env_bool(
+                "ENTITY_EVENT_ASSESSMENT_ENABLED", True
+            ),
+            event_assessment_batch_size=_env_int(
+                "ENTITY_EVENT_ASSESSMENT_BATCH_SIZE", 100,
+                minimum=1, maximum=500
             ),
             world_bank_enabled=_env_bool("ENTITY_WORLD_BANK_ENABLED", True),
             world_bank_countries=_env_csv(
@@ -704,6 +806,29 @@ def _env_news_feeds(value):
             parts[0], parts[1], max(0.0, min(1.0, credibility))
         ))
     return tuple(feeds)
+
+
+def _env_publisher_profiles(value):
+    if value is None:
+        return DEFAULT_PUBLISHER_PROFILES
+    if not value.strip():
+        return ()
+    profiles = []
+    for definition in value.split("||"):
+        parts = [part.strip() for part in definition.split("|")]
+        if len(parts) < 3 or not parts[0]:
+            continue
+        try:
+            credibility = max(0.0, min(1.0, float(parts[1])))
+            framing = max(0.0, min(1.0, float(parts[2])))
+        except ValueError:
+            continue
+        profiles.append((
+            parts[0].lower(), credibility, framing,
+            parts[3] if len(parts) > 3 else "",
+            parts[4] if len(parts) > 4 else "",
+        ))
+    return tuple(profiles)
 
 
 def _env_csv(value, default):

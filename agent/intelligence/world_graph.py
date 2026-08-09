@@ -116,12 +116,21 @@ class WorldEventGraphEngine:
         recent_limit = min(20, max(1, limit // 5)) if limit > 1 else 0
         historical_limit = limit - recent_limit
         selection = """SELECT versions.id cursor_id,versions.id version_id,
-                   versions.title,versions.summary,versions.published_at,
+                   COALESCE(NULLIF(enrichment.translated_title,''),versions.title) title,
+                   COALESCE(NULLIF(enrichment.translated_summary,''),versions.summary) summary,
+                   versions.published_at,
                    versions.captured_at,versions.content_hash,
                    versions.metadata version_metadata,
                    documents.id document_id,documents.source_id,
                    documents.external_id,documents.category,documents.status,
-                   documents.latitude,documents.longitude,
+                   documents.latitude,documents.longitude,documents.updated_at document_updated_at,
+                   enrichment.detected_language,enrichment.translated_content,
+                   enrichment.event_time enrichment_event_time,
+                   enrichment.actors enrichment_actors,
+                   enrichment.extracted_urls enrichment_urls,
+                   enrichment.quoted_sources enrichment_quoted_sources,
+                   enrichment.forward_origin_key,enrichment.confidence enrichment_confidence,
+                   enrichment.updated_at enrichment_record_updated_at,
                    situation_documents.situation_id,
                    geo_features.id geo_feature_id
                  FROM document_versions versions
@@ -130,14 +139,17 @@ class WorldEventGraphEngine:
                  LEFT JOIN situation_documents
                    ON situation_documents.document_id=documents.id
                  LEFT JOIN geo_features ON geo_features.document_id=documents.id
-                 WHERE {condition}
+                 LEFT JOIN document_enrichments enrichment
+                   ON enrichment.document_version_id=versions.id
+                  AND enrichment.method='open-source-enrichment-v1'
+                 WHERE ({condition})
                    AND sources.kind NOT IN (
                      'private_mail', 'prediction_market',
                      'weather_forecast', 'infrastructure_reference'
                    )"""
         recent = connection.execute(
             selection.format(
-                condition="NOT EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id)"
+                condition="NOT EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id) OR EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id AND ((enrichment.updated_at IS NOT NULL AND (observations.enrichment_updated_at='' OR julianday(enrichment.updated_at)>julianday(observations.enrichment_updated_at))) OR julianday(documents.updated_at)>julianday(COALESCE(NULLIF(observations.enrichment_updated_at,''),observations.created_at))))"
             ) + " ORDER BY versions.id DESC LIMIT ?", (recent_limit,)
         ).fetchall() if recent_limit else []
         historical = connection.execute(
@@ -296,14 +308,30 @@ class WorldEventGraphEngine:
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET
                world_event_id=COALESCE(excluded.world_event_id,world_event_observations.world_event_id),
-               properties=excluded.properties""",
+               observation_kind=excluded.observation_kind,
+               occurred_at=excluded.occurred_at,latitude=excluded.latitude,
+               longitude=excluded.longitude,geometry=excluded.geometry,
+               properties=excluded.properties,enrichment_updated_at=excluded.enrichment_updated_at""",
             (observation_id,event_id,row["version_id"],row["document_id"],
              row["source_id"],row["external_id"],row["category"],
-             metadata.get("onset") or row.get("published_at"),row.get("published_at"),
+             row.get("enrichment_event_time") or metadata.get("onset") or row.get("published_at"),row.get("published_at"),
              row["captured_at"],row.get("latitude"),row.get("longitude"),
              _json(geometry),row["content_hash"],
              _json({"title":row.get("title") or "","summary":row.get("summary") or "",
-                    "metadata":metadata,"document_status":row.get("status") or "active"}),now)
+                    "metadata":metadata,"document_status":row.get("status") or "active",
+                    "enrichment":{
+                      "detected_language":row.get("detected_language") or "",
+                      "translated_content":row.get("translated_content") or "",
+                      "actors":_load_json(row.get("enrichment_actors"),[]),
+                      "urls":_load_json(row.get("enrichment_urls"),[]),
+                      "quoted_sources":_load_json(row.get("enrichment_quoted_sources"),[]),
+                      "forward_origin_key":row.get("forward_origin_key") or "",
+                      "confidence":row.get("enrichment_confidence") or 0,
+                    }}),now)
+        )
+        connection.execute(
+            "UPDATE world_event_observations SET enrichment_updated_at=? WHERE id=?",
+            (row.get("enrichment_record_updated_at") or "", observation_id)
         )
         return 0 if existed else 1
 
