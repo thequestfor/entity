@@ -1051,7 +1051,14 @@ class IntelligenceStore:
                    (SELECT COUNT(*) FROM world_events) events,
                    (SELECT COUNT(*) FROM world_event_observations) observations,
                    (SELECT COUNT(*) FROM world_event_relations) relations,
+                   (SELECT COUNT(*) FROM world_event_memberships WHERE active=1)
+                    fused_memberships,
+                   (SELECT COUNT(*) FROM world_event_fusion_reviews
+                    WHERE status='pending') fusion_reviews,
+                   (SELECT COUNT(*) FROM world_event_versions) event_versions,
                    (SELECT COUNT(*) FROM infrastructure_assets) infrastructure,
+                   (SELECT COUNT(*) FROM weather_forecast_cells
+                    WHERE julianday(expires_at)>=julianday('now')) weather_forecasts,
                    (SELECT COUNT(*) FROM world_change_signals WHERE status='active') active_changes,
                    (SELECT COUNT(*) FROM world_alerts WHERE status='pending') pending_alerts"""
             ).fetchone()
@@ -1059,6 +1066,90 @@ class IntelligenceStore:
                 "SELECT * FROM world_graph_backfill_state ORDER BY lane"
             ).fetchall()
         return {**dict(counts), "backfill": [dict(row) for row in states]}
+
+    def list_weather_forecasts(self, bbox=(-180, -90, 180, 90),
+                               valid_at=None, limit=500):
+        west, south, east, north = bbox
+        target = normalize_timestamp(valid_at) if valid_at else utc_now()
+        now = utc_now()
+        conditions = ["expires_at>=?", "latitude BETWEEN ? AND ?"]
+        params = [now, south, north]
+        if west <= east:
+            conditions.append("longitude BETWEEN ? AND ?")
+        else:
+            conditions.append("(longitude>=? OR longitude<=?)")
+        params.extend([west, east])
+        where = " AND ".join(conditions)
+        query = f"""WITH ranked AS (
+                   SELECT weather_forecast_cells.*,
+                          ROW_NUMBER() OVER (
+                            PARTITION BY source_id,external_id
+                            ORDER BY ABS(strftime('%s',valid_at)-strftime('%s',?)),
+                                     forecast_run_at DESC
+                          ) AS forecast_rank
+                   FROM weather_forecast_cells
+                   WHERE {where}
+                 )
+                 SELECT ranked.*,sources.name source_name,
+                        policies.attribution,policies.license_name,
+                        policies.license_url
+                 FROM ranked
+                 JOIN sources ON sources.id=ranked.source_id
+                 LEFT JOIN source_policies policies
+                   ON policies.source_id=ranked.source_id
+                 WHERE forecast_rank=1
+                 ORDER BY valid_at,latitude,longitude LIMIT ?"""
+        params = [target, *params, max(1, min(2000, int(limit)))]
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item.pop("forecast_rank", None)
+            item["units"] = self._json_load(item.get("units"), {})
+            item["properties"] = self._json_load(item.get("properties"), {})
+            result.append(item)
+        return result
+
+    def list_infrastructure_assets(self, bbox=(-180, -90, 180, 90),
+                                   asset_types=(), limit=1000):
+        west, south, east, north = bbox
+        query = """SELECT assets.*,sources.name source_name,
+                          policies.attribution,policies.license_name,
+                          policies.license_url
+                   FROM infrastructure_assets assets
+                   LEFT JOIN sources ON sources.id=assets.source_id
+                   LEFT JOIN source_policies policies
+                     ON policies.source_id=assets.source_id
+                   WHERE assets.status='active'
+                     AND assets.latitude BETWEEN ? AND ?"""
+        params = [south, north]
+        if west <= east:
+            query += " AND assets.longitude BETWEEN ? AND ?"
+        else:
+            query += " AND (assets.longitude>=? OR assets.longitude<=?)"
+        params.extend([west, east])
+        clean_types = tuple(
+            str(value).strip().lower() for value in asset_types
+            if str(value).strip().lower() in {"airport", "port"}
+        )
+        if clean_types:
+            query += " AND assets.asset_type IN (%s)" % ",".join(
+                "?" for _ in clean_types
+            )
+            params.extend(clean_types)
+        query += " ORDER BY assets.asset_type,assets.name LIMIT ?"
+        params.append(max(1, min(5000, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["geometry"] = self._json_load(item.get("geometry"), {})
+            item["identifiers"] = self._json_load(item.get("identifiers"), {})
+            item["properties"] = self._json_load(item.get("properties"), {})
+            result.append(item)
+        return result
 
     def list_world_events(self, limit=100, status=None, event_type=None,
                           country=None, bbox=None):
@@ -1068,6 +1159,12 @@ class IntelligenceStore:
         if status:
             conditions.append("status=?")
             params.append(str(status)[:30])
+        else:
+            conditions.append("status!='merged'")
+            conditions.append(
+                "id NOT IN (SELECT alias_event_id FROM world_event_aliases "
+                "WHERE status='active')"
+            )
         if event_type:
             conditions.append("event_type=?")
             params.append(str(event_type)[:80])
@@ -1099,8 +1196,23 @@ class IntelligenceStore:
 
     def get_world_event(self, event_id):
         with self._connect() as connection:
+            requested_event_id = str(event_id)[:100]
+            event_id = requested_event_id
+            seen_aliases = set()
+            alias = None
+            while event_id not in seen_aliases:
+                seen_aliases.add(event_id)
+                row = connection.execute(
+                    """SELECT canonical_event_id FROM world_event_aliases
+                       WHERE alias_event_id=? AND status='active'""",
+                    (event_id,)
+                ).fetchone()
+                if not row:
+                    break
+                alias = row
+                event_id = row["canonical_event_id"]
             event = connection.execute(
-                "SELECT * FROM world_events WHERE id=?", (str(event_id)[:100],)
+                "SELECT * FROM world_events WHERE id=?", (event_id,)
             ).fetchone()
             if not event:
                 return None
@@ -1110,7 +1222,11 @@ class IntelligenceStore:
                    FROM world_event_observations observations
                    JOIN sources ON sources.id=observations.source_id
                    JOIN documents ON documents.id=observations.document_id
-                   WHERE observations.world_event_id=?
+                   LEFT JOIN world_event_memberships memberships
+                     ON memberships.observation_id=observations.id
+                    AND memberships.active=1
+                   WHERE COALESCE(memberships.world_event_id,
+                                  observations.world_event_id)=?
                    ORDER BY observations.captured_at DESC LIMIT 200""",
                 (event_id,)
             ).fetchall()
@@ -1119,6 +1235,17 @@ class IntelligenceStore:
                    WHERE (subject_kind='event' AND subject_id=?)
                       OR (object_kind='event' AND object_id=?)
                    ORDER BY confidence DESC LIMIT 200""", (event_id,event_id)
+            ).fetchall()
+            versions = connection.execute(
+                """SELECT * FROM world_event_versions WHERE world_event_id=?
+                   ORDER BY id DESC LIMIT 100""", (event_id,)
+            ).fetchall()
+            decisions = connection.execute(
+                """SELECT decisions.* FROM world_event_fusion_decisions decisions
+                   JOIN world_event_memberships memberships
+                     ON memberships.decision_id=decisions.id
+                   WHERE memberships.world_event_id=?
+                   ORDER BY decisions.created_at DESC LIMIT 200""", (event_id,)
             ).fetchall()
         item = dict(event)
         item["geometry"] = self._json_load(item.get("geometry"), {})
@@ -1134,8 +1261,64 @@ class IntelligenceStore:
             value = dict(row)
             value["evidence"] = self._json_load(value.get("evidence"), [])
             relation_items.append(value)
+        version_items = []
+        for row in versions:
+            value = dict(row)
+            value["snapshot"] = self._json_load(value.get("snapshot"), {})
+            version_items.append(value)
+        decision_items = []
+        for row in decisions:
+            value = dict(row)
+            value["components"] = self._json_load(value.get("components"), {})
+            value["vetoes"] = self._json_load(value.get("vetoes"), [])
+            decision_items.append(value)
         return {"event":item,"observations":observation_items,
-                "relations":relation_items}
+                "relations":relation_items,"versions":version_items,
+                "fusion_decisions":decision_items,
+                "requested_event_id":requested_event_id,
+                "resolved_alias":bool(alias)}
+
+    def fusion_overview(self):
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT
+                   (SELECT COUNT(*) FROM world_event_memberships WHERE active=1)
+                     active_memberships,
+                   (SELECT COUNT(*) FROM world_event_fusion_decisions) decisions,
+                   (SELECT COUNT(*) FROM world_event_fusion_reviews
+                    WHERE status='pending') pending_reviews,
+                   (SELECT COUNT(*) FROM world_event_aliases
+                    WHERE status='active') active_aliases,
+                   (SELECT COUNT(*) FROM world_event_versions) versions,
+                   (SELECT COUNT(*) FROM world_event_operations
+                    WHERE status='applied') applied_operations"""
+            ).fetchone()
+            states = connection.execute(
+                "SELECT * FROM world_event_fusion_state ORDER BY lane"
+            ).fetchall()
+        return {**dict(row), "backfill": [dict(value) for value in states]}
+
+    def list_fusion_reviews(self, limit=100, status="pending"):
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT reviews.*,documents.title document_title,
+                          events.title event_title,sources.name source_name
+                   FROM world_event_fusion_reviews reviews
+                   JOIN world_event_observations observations
+                     ON observations.id=reviews.observation_id
+                   JOIN documents ON documents.id=observations.document_id
+                   JOIN sources ON sources.id=observations.source_id
+                   JOIN world_events events ON events.id=reviews.candidate_event_id
+                   WHERE reviews.status=?
+                   ORDER BY reviews.score DESC,reviews.created_at DESC LIMIT ?""",
+                (str(status)[:30], max(1, min(1000, int(limit))))
+            ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["rationale"] = self._json_load(item.get("rationale"), {})
+            output.append(item)
+        return output
 
     def list_geo_cells(self, bbox=(-180, -90, 180, 90), layers=(),
                        since_at=None, limit=1000):

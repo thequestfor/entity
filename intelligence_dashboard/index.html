@@ -34,6 +34,8 @@
         <article><span>SOURCE ISSUES</span><strong id="issue-count">—</strong></article>
         <article><span>CLUSTER REVIEWS</span><strong id="cluster-review-count">—</strong></article>
         <article><span>DEPENDENT REPORTS</span><strong id="dependent-report-count">—</strong></article>
+        <article><span>FUSED OBSERVATIONS</span><strong id="fusion-membership-count">—</strong></article>
+        <article><span>FUSION REVIEWS</span><strong id="fusion-review-count">—</strong></article>
         <article><span>TYPED CLAIMS</span><strong id="typed-claim-count">—</strong></article>
         <article><span>INTEGRITY REVIEWS</span><strong id="integrity-review-count">—</strong></article>
         <article><span>CORROBORATED</span><strong id="corroborated-claim-count">—</strong></article>
@@ -90,6 +92,8 @@
             </label>
             <label class="map-toggle"><input id="map-labels-toggle" type="checkbox" /> Labels</label>
             <label class="map-toggle"><input id="map-aircraft-toggle" type="checkbox" /> Aircraft</label>
+            <label class="map-toggle"><input id="map-weather-toggle" type="checkbox" /> Weather forecasts</label>
+            <label class="map-toggle"><input id="map-infrastructure-toggle" type="checkbox" checked /> Infrastructure</label>
             <label class="map-toggle"><input id="map-commentary-toggle" type="checkbox" /> Entity commentary</label>
             <button class="map-analyze" id="map-analyze" type="button">Analyze visible region</button>
             <span id="map-status">Loading located situations…</span>
@@ -102,13 +106,15 @@
           <label><input class="map-layer-toggle" type="checkbox" value="flood" checked /><i data-kind="flood"></i> Flood</label>
           <label><input class="map-layer-toggle" type="checkbox" value="storm" checked /><i data-kind="storm"></i> Severe weather</label>
           <label><input class="map-layer-toggle" type="checkbox" value="volcano" checked /><i data-kind="volcano"></i> Volcano</label>
+          <span><i data-kind="weather-forecast"></i> Model forecast</span>
+          <span><i data-kind="infrastructure"></i> Reference asset</span>
           <span><i data-kind="other"></i> Other situation</span>
         </div>
         <aside class="map-commentary" id="map-commentary" hidden aria-live="polite"></aside>
         <article class="regional-assessment" id="regional-assessment" hidden aria-live="polite"></article>
         <article class="country-profile" id="country-profile" hidden aria-live="polite"></article>
         <div class="country-breakdown" id="country-breakdown" aria-live="polite"></div>
-        <p class="map-disclaimer">Hazard marks are based on Entity’s authoritative event feeds where available. Locations are reconciled from cited source metadata and coordinates. Aircraft are approximate crowd-sourced ADS-B state vectors, not air-traffic-control data.</p>
+        <p class="map-disclaimer">Hazard marks are based on Entity’s authoritative event feeds where available. Weather cells are model forecasts, not observations or alerts. Infrastructure marks are reference locations and do not establish operating status. Aircraft are approximate crowd-sourced ADS-B state vectors, not air-traffic-control data.</p>
       </section>
 
       <section class="layout">

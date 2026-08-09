@@ -16,11 +16,13 @@ class JsonConnector:
         self,
         timeout=15,
         max_items=50,
+        max_bytes=10_000_000,
         fetch_json=None,
         enabled=True
     ):
         self.timeout = max(1, int(timeout))
         self.max_items = max(1, int(max_items))
+        self.max_bytes = max(1000, min(50_000_000, int(max_bytes)))
         self._fetch_json_override = fetch_json
         self.enabled = bool(enabled)
 
@@ -47,6 +49,12 @@ class JsonConnector:
             request,
             timeout=self.timeout
         ) as response:
-            body = response.read().decode("utf-8", errors="replace")
+            payload = response.read(self.max_bytes + 1)
+
+        if len(payload) > self.max_bytes:
+            raise ValueError(
+                f"{self.source_id} response exceeded configured byte limit"
+            )
+        body = payload.decode("utf-8", errors="replace")
 
         return json.loads(body)

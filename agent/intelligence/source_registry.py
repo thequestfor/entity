@@ -125,6 +125,34 @@ POLICIES = {
         "U.S. Government work","https://www.noaa.gov/disclaimer",
         "NOAA Space Weather Prediction Center","public-government-data",False,"global","minutes"
     ),
+    "open_meteo_world": SourcePolicy(
+        "public","aggregator","forecast","open-meteo-models",
+        ("api.open-meteo.com",),"CC BY 4.0 and Open-Meteo Terms",
+        "https://open-meteo.com/en/terms","Weather data by Open-Meteo.com",
+        "terms-governed-noncommercial-free-tier",False,"global","hours",
+        (
+            "Forecast grid cells are model-derived forecasts, not observations or alerts.",
+            "The free API is limited to non-commercial use and explicit service limits.",
+        ),
+        retention_days=30,
+        reviewed_at="2026-08-08"
+    ),
+    "ourairports": SourcePolicy(
+        "public","aggregator","reference","ourairports",
+        ("davidmegginson.github.io","ourairports.com"),"Public Domain",
+        "https://ourairports.com/data/","OurAirports",
+        "public-domain",False,"global","daily",
+        ("Airport records are community-maintained references and do not establish operating status.",),
+        reviewed_at="2026-08-08"
+    ),
+    "nga_world_port_index": SourcePolicy(
+        "public","official","reference","nga-world-port-index",
+        ("msi.nga.mil",),"U.S. Government work",
+        "https://msi.nga.mil/Publications/WPI","National Geospatial-Intelligence Agency",
+        "public-government-data",False,"global","static-edition",
+        ("The available archive is a reference edition and does not establish current port status.",),
+        reviewed_at="2026-08-08"
+    ),
     "world_bank_indicators": SourcePolicy(
         "public","intergovernmental","measurement","world-bank",("api.worldbank.org",),
         "World Bank Data Terms","https://www.worldbank.org/en/about/legal/terms-of-use-for-datasets",

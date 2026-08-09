@@ -1,11 +1,14 @@
 import json
 import base64
+import io
 import re
 import shutil
 import sqlite3
+import struct
 import tempfile
 import unittest
 import urllib.request
+import zipfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +28,9 @@ from agent.connectors.mail_common import secure_write
 from agent.connectors.nws import NwsAlertsConnector
 from agent.connectors.noaa_swpc import NoaaSpaceWeatherConnector
 from agent.connectors.news import NewsFeedConnector
+from agent.connectors.nga_wpi import NgaWorldPortIndexConnector
+from agent.connectors.open_meteo_world import OpenMeteoWorldConnector
+from agent.connectors.ourairports import OurAirportsConnector
 from agent.connectors.outlook import OutlookConnector
 from agent.connectors.polymarket import PolymarketConnector
 from agent.connectors.reliefweb import ReliefWebConnector
@@ -52,6 +58,8 @@ from agent.intelligence.aircraft import AdsbLolAircraftMonitor
 from agent.intelligence.geospatial_intelligence import (
     GeospatialIntelligenceEngine, GeospatialPredictionFeatures
 )
+from agent.intelligence.environment_layers import EnvironmentLayerEngine
+from agent.intelligence.event_fusion import EventFusionEngine, FusionResult
 from agent.intelligence.world_graph import WorldEventGraphEngine
 from agent.intelligence.source_registry import (
     ConnectorContractError, policy_for, validate_connector_contract,
@@ -118,7 +126,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(24, version)
+        self.assertEqual(26, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -258,6 +266,311 @@ class IntelligenceStoreTests(unittest.TestCase):
         repeated = WorldEventGraphEngine(self.store, batch_size=20).run_batch()
         self.assertEqual(0, repeated.observations)
         self.assertEqual(1, self.store.world_graph_overview()["observations"])
+
+    def test_environment_layers_version_context_without_creating_events(self):
+        now = datetime.now(UTC).replace(microsecond=0)
+        valid_at = (now + timedelta(hours=6)).isoformat().replace("+00:00", "Z")
+        run_at = now.isoformat().replace("+00:00", "Z")
+        self.store.register_source(
+            "open_meteo_world", "Open-Meteo Global Forecast",
+            "weather_forecast", credibility=.8
+        )
+        self.store.register_source(
+            "ourairports", "OurAirports", "infrastructure_reference",
+            credibility=.78
+        )
+        self.store.ingest_items("open_meteo_world", [SourceItem(
+            "grid:0:0", "Forecast near 0, 0",
+            "https://open-meteo.com/en/docs?latitude=0&longitude=0",
+            summary="Model forecast, not an observation.",
+            published_at=run_at, category="weather-forecast",
+            latitude=0.0, longitude=0.0,
+            metadata={
+                "epistemic_type": "forecast", "forecast_run_at": run_at,
+                "grid_degrees": 30,
+                "units": {"temperature_2m": "°C"},
+                "forecasts": [{
+                    "valid_at": valid_at, "temperature_2m": 24.0,
+                    "precipitation": 1.5, "wind_speed_10m": 20,
+                    "wind_gusts_10m": 30, "surface_pressure": 1012,
+                    "weather_code": 61,
+                }],
+            },
+        )])
+        self.store.ingest_items("ourairports", [SourceItem(
+            "airport-1", "Test International Airport",
+            "https://ourairports.com/airports/TST1/",
+            summary="Reference only.", category="infrastructure-airport",
+            latitude=10.0, longitude=20.0,
+            metadata={
+                "epistemic_type": "reference", "asset_type": "airport",
+                "name": "Test International Airport", "country_code": "TS",
+                "identifiers": {"ident": "TST1"},
+            },
+        ), SourceItem(
+            "port-dateline", "Dateline Port",
+            "https://ourairports.com/airports/PORT1/",
+            summary="Reference only.", category="infrastructure-port",
+            latitude=5.0, longitude=179.5,
+            metadata={
+                "epistemic_type": "reference", "asset_type": "port",
+                "name": "Dateline Port", "country_code": "TS",
+                "identifiers": {"test": "PORT1"},
+            },
+        )])
+
+        engine = EnvironmentLayerEngine(self.store, batch_size=20)
+        result = engine.run_batch()
+        forecasts = self.store.list_weather_forecasts(
+            bbox=(-1, -1, 1, 1), valid_at=valid_at
+        )
+        assets = self.store.list_infrastructure_assets(
+            bbox=(19, 9, 21, 11), asset_types=("airport",)
+        )
+        dateline_assets = self.store.list_infrastructure_assets(
+            bbox=(170, -10, -170, 10), asset_types=("port",)
+        )
+        UnderstandingEngine(self.store).analyze_pending()
+        graph = WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        ReputationEngine(self.store, maturity_hours=0).evaluate()
+
+        self.assertEqual(3, result.processed)
+        self.assertEqual(1, len(forecasts))
+        self.assertEqual(24.0, forecasts[0]["temperature_c"])
+        self.assertEqual("forecast", forecasts[0]["properties"]["epistemic_type"])
+        self.assertEqual(1, len(assets))
+        self.assertEqual("airport", assets[0]["asset_type"])
+        self.assertEqual("active", assets[0]["status"])
+        self.assertEqual("Dateline Port", dateline_assets[0]["name"])
+        self.assertEqual([], self.store.list_situations())
+        self.assertEqual([], self.store.list_publisher_reputations())
+        self.assertEqual(0, graph.events)
+        self.assertEqual(0, graph.observations)
+
+        repeated = engine.run_batch()
+        self.assertEqual(0, repeated.processed)
+        with self.store._connect() as connection:
+            weather_versions = connection.execute(
+                "SELECT COUNT(*) FROM weather_forecast_versions"
+            ).fetchone()[0]
+            asset_versions = connection.execute(
+                "SELECT COUNT(*) FROM infrastructure_asset_versions"
+            ).fetchone()[0]
+        self.assertEqual(1, weather_versions)
+        self.assertEqual(2, asset_versions)
+
+    def test_event_fusion_links_independent_reports_idempotently(self):
+        for source_id in ("fusion_a", "fusion_b"):
+            self.store.register_source(source_id, source_id, "test", credibility=.8)
+        items = [
+            ("fusion_a", "https://a.test/fire", 10.0, 20.0),
+            ("fusion_b", "https://b.test/fire", 10.01, 20.01),
+        ]
+        for source_id, url, latitude, longitude in items:
+            self.store.ingest_items(source_id, [SourceItem(
+                "fire-1", "Port fire reported near Test City", url,
+                published_at="2026-08-08T10:00:00Z",
+                category="traditional-news", latitude=latitude,
+                longitude=longitude,
+            )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        engine = EventFusionEngine(self.store, batch_size=20)
+        result = engine.run_batch()
+
+        self.assertEqual((2, 1, 1, 0), (
+            result.processed, result.linked, result.created, result.reviews
+        ))
+        events = self.store.list_world_events()
+        self.assertEqual(1, len(events))
+        self.assertEqual(2, events[0]["observation_count"])
+        self.assertEqual(2, events[0]["independent_family_count"])
+        detail = self.store.get_world_event(events[0]["id"])
+        self.assertEqual(2, len(detail["observations"]))
+        self.assertEqual(2, len(detail["fusion_decisions"]))
+        self.assertGreaterEqual(len(detail["versions"]), 1)
+        self.assertEqual(FusionResult(), engine.run_batch())
+
+    def test_event_fusion_reviews_ambiguity_and_vetoes_distant_incidents(self):
+        self.store.register_source("fusion_review", "Fusion Review", "test")
+        self.store.ingest_items("fusion_review", [SourceItem(
+            "one", "Explosion reported at Central Port",
+            "https://review.test/one", published_at="2026-08-08T10:00:00Z",
+            category="traditional-news", latitude=10, longitude=20,
+        ), SourceItem(
+            "two", "Smoke reported near Central Port",
+            "https://review.test/two", published_at="2026-08-08T10:10:00Z",
+            category="traditional-news", latitude=10.01, longitude=20.01,
+        ), SourceItem(
+            "three", "Explosion reported at Central Port",
+            "https://review.test/three", published_at="2026-08-08T10:20:00Z",
+            category="traditional-news", latitude=-30, longitude=-120,
+        )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        result = EventFusionEngine(self.store, batch_size=20).run_batch()
+
+        self.assertEqual(1, result.reviews)
+        self.assertEqual(2, result.created)
+        self.assertEqual(1, len(self.store.list_fusion_reviews()))
+        self.assertEqual(2, len(self.store.list_world_events()))
+
+    def test_event_fusion_keeps_nearby_authoritatively_distinct_incidents_separate(self):
+        self.store.register_source("official_incidents", "Official Incidents", "test")
+        self.store.ingest_items("official_incidents", [SourceItem(
+            "alpha", "Incident at Central Station", "https://official.test/a",
+            published_at="2026-08-08T10:00:00Z", category="emergency-report",
+            latitude=10, longitude=20, metadata={"incident_id": "A-100"},
+        ), SourceItem(
+            "beta", "Incident at Central Station", "https://official.test/b",
+            published_at="2026-08-08T10:02:00Z", category="emergency-report",
+            latitude=10.001, longitude=20.001, metadata={"incident_id": "B-200"},
+        )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        result = EventFusionEngine(self.store, batch_size=20).run_batch()
+        self.assertEqual(2, result.created)
+        self.assertEqual(0, result.linked)
+        self.assertEqual(2, len(self.store.list_world_events()))
+        with self.store._connect() as connection:
+            vetoes = [
+                json.loads(row[0]) for row in connection.execute(
+                    "SELECT vetoes FROM world_event_fusion_decisions WHERE outcome='reject'"
+                )
+            ]
+        self.assertIn("conflicting_authoritative_identifier", vetoes[0])
+
+    def test_event_fusion_merge_and_rollback_restore_memberships(self):
+        self.store.register_source("fusion_ops", "Fusion Operations", "test")
+        self.store.ingest_items("fusion_ops", [SourceItem(
+            "north", "Northern incident", "https://ops.test/north",
+            published_at="2026-08-08T10:00:00Z", category="traditional-news",
+            latitude=40, longitude=-70,
+        ), SourceItem(
+            "south", "Southern incident", "https://ops.test/south",
+            published_at="2026-08-08T10:00:00Z", category="traditional-news",
+            latitude=-40, longitude=70,
+        )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        engine = EventFusionEngine(self.store, batch_size=20)
+        engine.run_batch()
+        events = self.store.list_world_events()
+        before = {}
+        with self.store._connect() as connection:
+            for row in connection.execute(
+                "SELECT observation_id,world_event_id FROM world_event_memberships WHERE active=1"
+            ):
+                before[row["observation_id"]] = row["world_event_id"]
+        operation_id = engine.merge_events(events[0]["id"], events[1]["id"], "fixture")
+        self.assertEqual(1, len(self.store.list_world_events()))
+        with self.store._connect() as connection:
+            alias_id = connection.execute(
+                "SELECT alias_event_id FROM world_event_aliases WHERE status='active'"
+            ).fetchone()[0]
+        self.assertTrue(self.store.get_world_event(alias_id)["resolved_alias"])
+        self.assertEqual(2, engine.rollback_operation(operation_id))
+        with self.store._connect() as connection:
+            after = {
+                row["observation_id"]: row["world_event_id"]
+                for row in connection.execute(
+                    "SELECT observation_id,world_event_id FROM world_event_memberships WHERE active=1"
+                )
+            }
+        self.assertEqual(before, after)
+        self.assertEqual(2, len(self.store.list_world_events()))
+
+    def test_event_fusion_split_and_rollback_are_reversible(self):
+        for source_id in ("split_a", "split_b"):
+            self.store.register_source(source_id, source_id, "test")
+            self.store.ingest_items(source_id, [SourceItem(
+                "same", "Shared incident at Test Port",
+                f"https://{source_id}.test/same",
+                published_at="2026-08-08T10:00:00Z",
+                category="traditional-news", latitude=10, longitude=20,
+            )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        engine = EventFusionEngine(self.store, batch_size=20)
+        engine.run_batch()
+        source = self.store.list_world_events()[0]
+        with self.store._connect() as connection:
+            observation_ids = [row[0] for row in connection.execute(
+                "SELECT observation_id FROM world_event_memberships WHERE active=1 ORDER BY observation_id"
+            )]
+        operation_id, target = engine.split_event(
+            source["id"], observation_ids[:1], "fixture split"
+        )
+        self.assertEqual(2, len(self.store.list_world_events()))
+        self.assertEqual(2, len({
+            item["id"] for item in self.store.list_world_events()
+        }))
+        self.assertEqual(2, engine.rollback_operation(operation_id))
+        self.assertEqual(1, len(self.store.list_world_events()))
+        with self.store._connect() as connection:
+            constraint = connection.execute(
+                """SELECT active FROM world_event_fusion_constraints
+                   WHERE left_event_id IN (?,?) AND right_event_id IN (?,?)""",
+                (source["id"], target, source["id"], target),
+            ).fetchone()
+        self.assertEqual(0, constraint["active"])
+
+    def test_event_fusion_revisions_and_review_resolution_are_auditable(self):
+        self.store.register_source("fusion_revision", "Fusion Revision", "test")
+        first = SourceItem(
+            "incident", "Port fire reported", "https://revision.test/incident",
+            summary="Fire is burning.", published_at="2026-08-08T10:00:00Z",
+            category="traditional-news", latitude=10, longitude=20,
+        )
+        self.store.ingest_items("fusion_revision", [first])
+        graph = WorldEventGraphEngine(self.store, batch_size=20)
+        fusion = EventFusionEngine(self.store, batch_size=20)
+        graph.run_batch()
+        fusion.run_batch()
+        event_id = self.store.list_world_events()[0]["id"]
+
+        revised = SourceItem(
+            "incident", "Port fire contained", "https://revision.test/incident",
+            summary="Fire crews report containment.",
+            published_at="2026-08-08T11:00:00Z",
+            category="traditional-news", latitude=10, longitude=20,
+        )
+        self.store.ingest_items("fusion_revision", [revised])
+        graph.run_batch()
+        result = fusion.run_batch()
+        self.assertEqual(1, result.linked)
+        self.assertEqual(event_id, self.store.list_world_events()[0]["id"])
+        with self.store._connect() as connection:
+            observations = connection.execute(
+                """SELECT status,predecessor_observation_id FROM
+                   world_event_observations ORDER BY document_version_id"""
+            ).fetchall()
+            active_memberships = connection.execute(
+                "SELECT COUNT(*) FROM world_event_memberships WHERE active=1"
+            ).fetchone()[0]
+        self.assertEqual("superseded", observations[0]["status"])
+        self.assertEqual(observations[0]["predecessor_observation_id"], None)
+        self.assertIsNotNone(observations[1]["predecessor_observation_id"])
+        self.assertEqual(1, active_memberships)
+
+        self.store.ingest_items("fusion_revision", [SourceItem(
+            "smoke", "Smoke at Port fire site",
+            "https://revision.test/smoke", published_at="2026-08-08T11:10:00Z",
+            category="traditional-news", latitude=10.01, longitude=20.01,
+        )])
+        graph.run_batch()
+        fusion.run_batch()
+        review = self.store.list_fusion_reviews()[0]
+        operation_id, target = fusion.resolve_review(
+            review["id"], "separate", "distinct incident"
+        )
+        self.assertNotEqual(event_id, target)
+        self.assertEqual([], self.store.list_fusion_reviews())
+        with self.store._connect() as connection:
+            operation = connection.execute(
+                "SELECT * FROM world_event_operations WHERE id=?",
+                (operation_id,),
+            ).fetchone()
+            constraint = connection.execute(
+                "SELECT COUNT(*) FROM world_event_fusion_constraints WHERE active=1"
+            ).fetchone()[0]
+        self.assertEqual("review-separate", operation["operation_type"])
+        self.assertEqual(1, constraint)
 
     def test_source_contracts_persist_role_license_and_host_allowlist(self):
         class Connector:
@@ -1866,6 +2179,100 @@ class ReputationEngineTests(unittest.TestCase):
 
 
 class ConnectorTests(unittest.TestCase):
+    def test_open_meteo_world_connector_is_bounded_and_labels_forecasts(self):
+        calls = []
+
+        def fetch(url):
+            calls.append(url)
+            times = [f"2026-08-08T{hour:02d}:00" for hour in range(13)]
+            return {
+                "latitude": -75.0, "longitude": -180.0, "timezone": "GMT",
+                "elevation": 4,
+                "hourly_units": {
+                    "temperature_2m": "°C", "precipitation": "mm",
+                    "wind_speed_10m": "km/h", "wind_gusts_10m": "km/h",
+                    "surface_pressure": "hPa", "weather_code": "wmo code",
+                },
+                "hourly": {
+                    "time": times, "temperature_2m": list(range(13)),
+                    "precipitation": [0] * 13, "wind_speed_10m": [10] * 13,
+                    "wind_gusts_10m": [20] * 13,
+                    "surface_pressure": [1010] * 13,
+                    "weather_code": [1] * 13,
+                },
+            }
+
+        connector = OpenMeteoWorldConnector(
+            grid_degrees=90, horizon_hours=12, max_cells=1,
+            batch_cells=1, fetch_json=fetch, enabled=True
+        )
+        batch = connector.poll()
+        item = batch.items[0]
+
+        self.assertEqual(1, len(calls))
+        self.assertEqual(1, len(batch.items))
+        self.assertEqual("weather-forecast", item.category)
+        self.assertEqual("forecast", item.metadata["epistemic_type"])
+        self.assertEqual([-180.0, -75.0], item.metadata["geometry"]["coordinates"])
+        self.assertEqual(3, len(item.metadata["forecasts"]))
+
+    def test_ourairports_connector_filters_and_normalizes_reference_assets(self):
+        csv_text = """id,ident,type,name,latitude_deg,longitude_deg,elevation_ft,continent,iso_country,iso_region,municipality,scheduled_service,icao_code,iata_code,gps_code,local_code,home_link,wikipedia_link,keywords
+1,TST1,large_airport,Test International,10.5,20.5,100,AF,TS,TS-1,Test City,yes,TST1,TST,TST1,,,
+2,SMAL,small_airport,Small Field,11,21,50,AF,TS,TS-1,Test City,no,,,,,,,
+"""
+        connector = OurAirportsConnector(
+            airport_types=("large_airport",),
+            fetch_csv=lambda _: csv_text, enabled=True
+        )
+        batch = connector.poll()
+        item = batch.items[0]
+
+        self.assertEqual(1, len(batch.items))
+        self.assertEqual("infrastructure-airport", item.category)
+        self.assertEqual("airport", item.metadata["asset_type"])
+        self.assertTrue(item.metadata["scheduled_service"])
+        self.assertIn("does not establish current operating status", item.summary)
+
+    def test_nga_wpi_connector_parses_bounded_official_reference_archive(self):
+        fields = [
+            ("INDEX_NO", "N", 16), ("PORT_NAME", "C", 30),
+            ("COUNTRY", "C", 3), ("LATITUDE", "N", 16),
+            ("LONGITUDE", "N", 16), ("HARBORSIZE", "C", 2),
+        ]
+        record_length = 1 + sum(length for _, _, length in fields)
+        header_length = 32 + 32 * len(fields) + 1
+        header = bytearray(32)
+        header[0] = 3
+        header[4:8] = struct.pack("<I", 1)
+        header[8:10] = struct.pack("<H", header_length)
+        header[10:12] = struct.pack("<H", record_length)
+        descriptors = bytearray()
+        for name, field_type, length in fields:
+            descriptor = bytearray(32)
+            descriptor[:len(name)] = name.encode("ascii")
+            descriptor[11] = ord(field_type)
+            descriptor[16] = length
+            descriptors.extend(descriptor)
+        values = ("1001", "Test Port", "TS", "12.5", "24.5", "L")
+        record = b" " + b"".join(
+            value.encode("ascii").ljust(length)
+            for value, (_, _, length) in zip(values, fields)
+        )
+        archive_io = io.BytesIO()
+        with zipfile.ZipFile(archive_io, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr("WPI.dbf", bytes(header) + bytes(descriptors) + b"\r" + record)
+        connector = NgaWorldPortIndexConnector(
+            fetch_archive=lambda _: archive_io.getvalue(), enabled=True
+        )
+        item = connector.poll().items[0]
+
+        self.assertEqual("1001", item.external_id)
+        self.assertEqual("infrastructure-port", item.category)
+        self.assertEqual((12.5, 24.5), (item.latitude, item.longitude))
+        self.assertEqual("port", item.metadata["asset_type"])
+        self.assertEqual("L", item.metadata["properties"]["harborsize"])
+
     def test_acled_connector_normalizes_curated_reported_event(self):
         payload = {"success":True,"data":[{
             "event_id_cnty":"TST1","event_date":"2026-08-07",
@@ -2570,8 +2977,15 @@ class IntelligenceWorkerTests(unittest.TestCase):
             self.assertIn("acled_conflict", policies)
             self.assertIn("hdx_hapi", policies)
             self.assertIn("copernicus_ems", policies)
+            self.assertIn("open_meteo_world", policies)
+            self.assertIn("ourairports", policies)
+            self.assertIn("nga_world_port_index", policies)
             self.assertTrue(policies["acled_conflict"]["credentials_required"])
             self.assertEqual("observation", policies["copernicus_ems"]["evidence_role"])
+            self.assertEqual("forecast", policies["open_meteo_world"]["evidence_role"])
+            self.assertEqual("reference", policies["ourairports"]["evidence_role"])
+            self.assertIsInstance(worker.event_fusion_engine, EventFusionEngine)
+            self.assertTrue(worker.event_fusion_engine.enabled)
             self.assertFalse(next(
                 connector.enabled for connector in worker.connectors
                 if connector.source_id == "acled_conflict"
@@ -2812,6 +3226,42 @@ class IntelligenceDashboardTests(unittest.TestCase):
                           "geometry": {"type": "Point", "coordinates": [20.0, 10.0]}}
             )])
             GeospatialIntelligenceEngine(store, batch_size=10).run_batch()
+            layer_now = datetime.now(UTC).replace(microsecond=0)
+            layer_run = layer_now.isoformat().replace("+00:00", "Z")
+            layer_valid = (layer_now + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+            store.register_source(
+                "open_meteo_world", "Open-Meteo", "weather_forecast"
+            )
+            store.register_source(
+                "ourairports", "OurAirports", "infrastructure_reference"
+            )
+            store.ingest_items("open_meteo_world", [SourceItem(
+                "grid:10:20", "Forecast cell",
+                "https://open-meteo.com/en/docs?latitude=10&longitude=20",
+                published_at=layer_run, category="weather-forecast",
+                latitude=10.0, longitude=20.0,
+                metadata={
+                    "epistemic_type": "forecast", "forecast_run_at": layer_run,
+                    "forecasts": [{
+                        "valid_at": layer_valid, "temperature_2m": 20,
+                        "precipitation": 0, "wind_speed_10m": 10,
+                        "wind_gusts_10m": 15, "surface_pressure": 1010,
+                        "weather_code": 1,
+                    }],
+                },
+            )])
+            store.ingest_items("ourairports", [SourceItem(
+                "airport-dashboard", "Dashboard Airport",
+                "https://ourairports.com/airports/DASH/",
+                category="infrastructure-airport", latitude=10.2, longitude=20.2,
+                metadata={
+                    "epistemic_type": "reference", "asset_type": "airport",
+                    "name": "Dashboard Airport", "identifiers": {"ident": "DASH"},
+                },
+            )])
+            EnvironmentLayerEngine(store, batch_size=20).run_batch()
+            WorldEventGraphEngine(store, batch_size=50).run_batch()
+            EventFusionEngine(store, batch_size=50).run_batch()
             static_root = temporary / "dashboard"
             static_root.mkdir()
             (static_root / "index.html").write_text(
@@ -2861,6 +3311,16 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ) as response:
                     map_features = json.loads(response.read())
                 with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/map/weather?bbox=19,9,21,11",
+                    timeout=2
+                ) as response:
+                    map_weather = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/map/infrastructure?bbox=19,9,21,11&types=airport",
+                    timeout=2
+                ) as response:
+                    map_infrastructure = json.loads(response.read())
+                with urllib.request.urlopen(
                     dashboard.url + "api/intelligence/map/regional-assessment?bbox=19,9,21,11&layers=earthquake",
                     timeout=2
                 ) as response:
@@ -2897,6 +3357,26 @@ class IntelligenceDashboardTests(unittest.TestCase):
                     timeout=2
                 ) as response:
                     reputation_outcomes = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/event-fusion",
+                    timeout=2
+                ) as response:
+                    fusion_overview = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/event-fusion/reviews",
+                    timeout=2
+                ) as response:
+                    fusion_reviews = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/world-events",
+                    timeout=2
+                ) as response:
+                    world_events = json.loads(response.read())["events"]
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/world-events/"
+                    + world_events[0]["id"], timeout=2
+                ) as response:
+                    world_event_detail = json.loads(response.read())
 
                 self.assertIn("Intelligence test", page)
                 self.assertIn(
@@ -2909,6 +3389,8 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertIn("countries", geography)
                 self.assertEqual([], aircraft["aircraft"])
                 self.assertEqual("earthquake", map_features["features"][0]["feature_type"])
+                self.assertEqual(1, len(map_weather["forecasts"]))
+                self.assertEqual("Dashboard Airport", map_infrastructure["assets"][0]["name"])
                 self.assertEqual(1, regional["feature_counts"]["earthquake"])
                 self.assertEqual("Testland", country_profile["profile"]["country_name"])
                 self.assertEqual("stored-worldview", map_commentary["basis"])
@@ -2917,6 +3399,10 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertEqual(1, briefing["situation_count"])
                 self.assertIn("reputations", reputations)
                 self.assertIn("outcomes", reputation_outcomes)
+                self.assertGreaterEqual(fusion_overview["active_memberships"], 1)
+                self.assertIn("reviews", fusion_reviews)
+                self.assertIn("versions", world_event_detail)
+                self.assertIn("fusion_decisions", world_event_detail)
             finally:
                 dashboard.stop()
 

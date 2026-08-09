@@ -189,7 +189,10 @@ class EpistemicBackfill:
                  AND attempts.method = 'hybrid'
                  AND attempts.version = ?
                 WHERE versions.id > ? AND attempts.id IS NULL
-                  AND sources.kind NOT IN ('private_mail', 'prediction_market')
+                  AND sources.kind NOT IN (
+                    'private_mail', 'prediction_market', 'weather_forecast',
+                    'infrastructure_reference'
+                  )
                 ORDER BY versions.id ASC LIMIT ?
                 """,
                 (BACKFILL_VERSION, state["cursor_rowid"], self.batch_size)

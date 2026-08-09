@@ -13,7 +13,10 @@ from agent.connectors.outlook import OutlookConnector
 from agent.connectors.nws import NwsAlertsConnector
 from agent.connectors.noaa_swpc import NoaaSpaceWeatherConnector
 from agent.connectors.news import NewsFeedConnector
+from agent.connectors.nga_wpi import NgaWorldPortIndexConnector
 from agent.connectors.reliefweb import ReliefWebConnector
+from agent.connectors.open_meteo_world import OpenMeteoWorldConnector
+from agent.connectors.ourairports import OurAirportsConnector
 from agent.connectors.polymarket import PolymarketConnector
 from agent.connectors.telegram import TelegramConnector
 from agent.connectors.usgs import UsgsConnector
@@ -38,6 +41,9 @@ __all__ = [
     "NwsAlertsConnector",
     "NoaaSpaceWeatherConnector",
     "NewsFeedConnector",
+    "NgaWorldPortIndexConnector",
+    "OpenMeteoWorldConnector",
+    "OurAirportsConnector",
     "PolymarketConnector",
     "ReliefWebConnector",
     "TelegramConnector",

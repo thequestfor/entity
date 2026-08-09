@@ -159,6 +159,20 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             self._send_json(self.server.intelligence_store.world_graph_overview())
             return
 
+        if parsed.path == "/api/intelligence/event-fusion":
+            self._send_json(self.server.intelligence_store.fusion_overview())
+            return
+
+        if parsed.path == "/api/intelligence/event-fusion/reviews":
+            query = parse_qs(parsed.query)
+            self._send_json({
+                "reviews": self.server.intelligence_store.list_fusion_reviews(
+                    limit=_query_int(query, "limit", 100),
+                    status=(query.get("status") or ["pending"])[0]
+                )
+            })
+            return
+
         if parsed.path == "/api/intelligence/world-events":
             query = parse_qs(parsed.query)
             bbox = _query_bbox(query) if "bbox" in query else None
@@ -206,6 +220,28 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
                 ) if zoom <= 6 else [],
                 "anomalies": self.server.intelligence_store.list_geo_anomalies(
                     bbox=bbox, limit=100
+                )
+            })
+            return
+
+        if parsed.path == "/api/intelligence/map/weather":
+            query = parse_qs(parsed.query)
+            self._send_json({
+                "forecasts": self.server.intelligence_store.list_weather_forecasts(
+                    bbox=_query_bbox(query),
+                    valid_at=(query.get("valid_at") or [None])[0],
+                    limit=_query_int(query, "limit", 500)
+                )
+            })
+            return
+
+        if parsed.path == "/api/intelligence/map/infrastructure":
+            query = parse_qs(parsed.query)
+            self._send_json({
+                "assets": self.server.intelligence_store.list_infrastructure_assets(
+                    bbox=_query_bbox(query),
+                    asset_types=_query_csv(query, "types"),
+                    limit=_query_int(query, "limit", 1000)
                 )
             })
             return

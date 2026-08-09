@@ -126,10 +126,15 @@ class WorldEventGraphEngine:
                    geo_features.id geo_feature_id
                  FROM document_versions versions
                  JOIN documents ON documents.id=versions.document_id
+                 JOIN sources ON sources.id=documents.source_id
                  LEFT JOIN situation_documents
                    ON situation_documents.document_id=documents.id
                  LEFT JOIN geo_features ON geo_features.document_id=documents.id
-                 WHERE {condition}"""
+                 WHERE {condition}
+                   AND sources.kind NOT IN (
+                     'private_mail', 'prediction_market',
+                     'weather_forecast', 'infrastructure_reference'
+                   )"""
         recent = connection.execute(
             selection.format(
                 condition="NOT EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id)"

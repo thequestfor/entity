@@ -246,7 +246,10 @@ class BeliefRevisionEngine:
             JOIN documents ON documents.id=versions.document_id
             JOIN sources ON sources.id=documents.source_id
             WHERE evidence.claim_id=? AND evidence.stance='supports'
-              AND sources.kind NOT IN ('private_mail','prediction_market')
+              AND sources.kind NOT IN (
+                'private_mail','prediction_market','weather_forecast',
+                'infrastructure_reference'
+              )
             """, (claim["id"],)
         ).fetchall()
         for item in evidence:
@@ -294,7 +297,10 @@ class BeliefRevisionEngine:
               MAX(sources.credibility),0.0,1.0,?,?
             FROM documents JOIN sources ON sources.id=documents.source_id
             WHERE documents.publisher_key!=''
-              AND sources.kind NOT IN ('private_mail','prediction_market')
+              AND sources.kind NOT IN (
+                'private_mail','prediction_market','weather_forecast',
+                'infrastructure_reference'
+              )
             GROUP BY documents.publisher_key
             """, (now, now)
         )

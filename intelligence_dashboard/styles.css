@@ -122,7 +122,7 @@ main { padding-block: 30px 60px; }
 .world-map .leaflet-control-zoom a { border-color: #244745; background: #0b1b1f; color: #c9f5ef; }
 .world-map .leaflet-control-attribution { background: rgba(4,14,17,.78); color: #77928f; }
 .world-map .leaflet-control-attribution a { color: #8ed4cc; }
-.map-symbol-wrap, .map-cluster-wrap, .aircraft-marker-wrap { background: transparent; border: 0; }
+.map-symbol-wrap, .map-cluster-wrap, .aircraft-marker-wrap, .infrastructure-marker-wrap { background: transparent; border: 0; }
 .map-symbol, .map-cluster {
   display: grid;
   width: 24px;
@@ -150,6 +150,9 @@ main { padding-block: 30px 60px; }
 .geo-anomaly { animation: geo-anomaly-pulse 1.8s ease-out infinite; }
 @keyframes geo-anomaly-pulse { 0%,100% { stroke-opacity: .95; } 50% { stroke-opacity: .28; } }
 .aircraft-marker { display: block; color: #cbb4ff; font-size: 18px; line-height: 20px; text-shadow: 0 0 6px #8c69d4; }
+.infrastructure-marker { display: grid; width: 18px; height: 18px; place-items: center; border: 1px solid #b8f3ea; border-radius: 50%; background: rgba(16,50,56,.9); color: #b8f3ea; font-size: 11px; line-height: 18px; box-shadow: 0 0 7px rgba(81,205,190,.48); }
+.infrastructure-port { color: #76d6ff; border-color: #76d6ff; }
+.weather-forecast-cell { filter: drop-shadow(0 0 5px rgba(105,198,242,.48)); }
 .entity-map-tooltip, .map-place-label { border: 1px solid #2b5652; background: rgba(5,18,21,.95); color: #dff7f4; box-shadow: 0 8px 20px rgba(0,0,0,.35); }
 .entity-map-tooltip::before, .map-place-label::before { border-top-color: #2b5652 !important; }
 .entity-map-tooltip div, .map-place-label div { display: grid; gap: 4px; max-width: 310px; }
@@ -178,6 +181,8 @@ main { padding-block: 30px 60px; }
 .map-legend i[data-kind="flood"] { border-radius: 2px; background: #3a94e6; border-color: #c6ecff; }
 .map-legend i[data-kind="storm"] { background: #9a68dd; border-color: #e4d4ff; }
 .map-legend i[data-kind="volcano"] { background: #b84b25; border-color: #ffd2bc; }
+.map-legend i[data-kind="weather-forecast"] { background: #4d95c5; border-color: #bceaff; }
+.map-legend i[data-kind="infrastructure"] { background: #17464b; border-color: #8ee4d8; }
 .map-empty { padding: 80px 20px; color: #63807d; text-align: center; }
 
 .panel { border-radius: 4px; }

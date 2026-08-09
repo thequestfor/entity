@@ -18,6 +18,9 @@ from agent.connectors import (
     NwsAlertsConnector,
     NoaaSpaceWeatherConnector,
     NewsFeedConnector,
+    NgaWorldPortIndexConnector,
+    OpenMeteoWorldConnector,
+    OurAirportsConnector,
     PolymarketConnector,
     ReliefWebConnector,
     TelegramConnector,
@@ -43,7 +46,9 @@ from agent.intelligence.claim_grounding import ClaimGroundingEngine
 from agent.intelligence.ensemble_training import EnsembleTrainer
 from agent.intelligence.aircraft import AdsbLolAircraftMonitor
 from agent.intelligence.geospatial_intelligence import GeospatialIntelligenceEngine
+from agent.intelligence.environment_layers import EnvironmentLayerEngine
 from agent.intelligence.world_graph import WorldEventGraphEngine
+from agent.intelligence.event_fusion import EventFusionEngine
 from agent.intelligence.source_registry import (
     policy_for, validate_connector_contract
 )
@@ -84,7 +89,9 @@ class IntelligenceWorker:
         aircraft_monitor=None,
         geography_batch_size=50,
         geospatial_engine=None,
-        world_graph_engine=None
+        environment_layer_engine=None,
+        world_graph_engine=None,
+        event_fusion_engine=None
     ):
         self.store = store
         self.connectors = list(connectors)
@@ -128,7 +135,9 @@ class IntelligenceWorker:
         self.aircraft_monitor = aircraft_monitor
         self.geography_batch_size = max(1, min(500, int(geography_batch_size)))
         self.geospatial_engine = geospatial_engine
+        self.environment_layer_engine = environment_layer_engine
         self.world_graph_engine = world_graph_engine
+        self.event_fusion_engine = event_fusion_engine
         self._stop = threading.Event()
         self._thread = None
 
@@ -167,6 +176,28 @@ class IntelligenceWorker:
                 timeout=config.request_timeout_seconds,
                 max_items=config.max_items_per_source,
                 enabled=config.copernicus_ems_enabled
+            ),
+            OpenMeteoWorldConnector(
+                grid_degrees=config.global_weather_grid_degrees,
+                horizon_hours=config.global_weather_horizon_hours,
+                max_cells=config.global_weather_max_cells,
+                batch_cells=config.global_weather_batch_cells,
+                poll_seconds=config.global_weather_poll_seconds,
+                timeout=config.request_timeout_seconds,
+                enabled=config.global_weather_enabled
+            ),
+            OurAirportsConnector(
+                airport_types=config.ourairports_types,
+                timeout=config.request_timeout_seconds,
+                max_items=config.ourairports_max_assets,
+                poll_seconds=config.ourairports_poll_seconds,
+                enabled=config.ourairports_enabled
+            ),
+            NgaWorldPortIndexConnector(
+                timeout=config.request_timeout_seconds,
+                max_items=config.nga_wpi_max_assets,
+                poll_seconds=config.nga_wpi_poll_seconds,
+                enabled=config.nga_wpi_enabled
             ),
             UsgsConnector(
                 timeout=config.request_timeout_seconds,
@@ -412,9 +443,21 @@ class IntelligenceWorker:
             store, enabled=config.geospatial_features_enabled,
             batch_size=config.geospatial_feature_batch_size
         )
+        environment_layer_engine = EnvironmentLayerEngine(
+            store, enabled=config.environment_layers_enabled,
+            batch_size=config.environment_layer_batch_size
+        )
         world_graph_engine = WorldEventGraphEngine(
             store, enabled=config.world_graph_enabled,
             batch_size=config.world_graph_batch_size
+        )
+        event_fusion_engine = EventFusionEngine(
+            store, enabled=config.event_fusion_enabled,
+            batch_size=config.event_fusion_batch_size,
+            auto_link_threshold=config.event_fusion_auto_link_threshold,
+            review_threshold=config.event_fusion_review_threshold,
+            max_candidates=config.event_fusion_max_candidates,
+            lookback_days=config.event_fusion_lookback_days
         )
         return cls(
             store=store,
@@ -440,7 +483,9 @@ class IntelligenceWorker:
             aircraft_monitor=aircraft_monitor,
             geography_batch_size=config.geography_backfill_batch_size,
             geospatial_engine=geospatial_engine,
-            world_graph_engine=world_graph_engine
+            environment_layer_engine=environment_layer_engine,
+            world_graph_engine=world_graph_engine,
+            event_fusion_engine=event_fusion_engine
         )
 
     @property
@@ -507,6 +552,11 @@ class IntelligenceWorker:
                 self.geospatial_engine.run_batch()
             except Exception as exc:
                 print("Native geospatial feature cycle failed:", type(exc).__name__)
+        if self.environment_layer_engine is not None:
+            try:
+                self.environment_layer_engine.run_batch()
+            except Exception as exc:
+                print("Environment layer cycle failed:", type(exc).__name__)
         analysis_due = changed or force or now >= self._next_analysis_at
         try:
             self.belief_revision.run_batch()
@@ -568,6 +618,12 @@ class IntelligenceWorker:
                 self.world_graph_engine.run_batch()
             except Exception as exc:
                 print("World event graph cycle failed:", type(exc).__name__)
+
+        if self.event_fusion_engine is not None:
+            try:
+                self.event_fusion_engine.run_batch()
+            except Exception as exc:
+                print("World event fusion cycle failed:", type(exc).__name__)
 
         try:
             if force or now >= self._next_forecast_at:

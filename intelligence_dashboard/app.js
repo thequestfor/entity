@@ -20,6 +20,8 @@ const elements = {
   mapLayerToggles: [...document.querySelectorAll(".map-layer-toggle")],
   mapLabelsToggle: document.querySelector("#map-labels-toggle"),
   mapAircraftToggle: document.querySelector("#map-aircraft-toggle"),
+  mapWeatherToggle: document.querySelector("#map-weather-toggle"),
+  mapInfrastructureToggle: document.querySelector("#map-infrastructure-toggle"),
   mapCommentaryToggle: document.querySelector("#map-commentary-toggle"),
   mapCommentary: document.querySelector("#map-commentary"),
   regionalAssessment: document.querySelector("#regional-assessment"),
@@ -33,6 +35,8 @@ const elements = {
   forecastList: document.querySelector("#forecast-list"),
   clusterReviewCount: document.querySelector("#cluster-review-count"),
   dependentReportCount: document.querySelector("#dependent-report-count"),
+  fusionMembershipCount: document.querySelector("#fusion-membership-count"),
+  fusionReviewCount: document.querySelector("#fusion-review-count"),
   typedClaimCount: document.querySelector("#typed-claim-count"),
   integrityReviewCount: document.querySelector("#integrity-review-count"),
   epistemicBackfillStatus: document.querySelector("#epistemic-backfill-status"),
@@ -61,6 +65,8 @@ let aircraftMapLayer;
 let countryMapLayer;
 let nativeHazardLayer;
 let nativeAnomalyLayer;
+let weatherForecastLayer;
+let infrastructureMapLayer;
 let countryRollups = new Map();
 let countryLayers = new Map();
 let commentaryTimer;
@@ -144,6 +150,11 @@ function renderOverview(overview) {
     elements.categoryFilter.append(option);
   }
   elements.categoryFilter.value = current;
+}
+
+function renderFusionOverview(fusion) {
+  elements.fusionMembershipCount.textContent = fusion.active_memberships ?? 0;
+  elements.fusionReviewCount.textContent = fusion.pending_reviews ?? 0;
 }
 
 function renderBriefing(briefing) {
@@ -238,6 +249,8 @@ function initializeMap() {
   countryMapLayer = L.layerGroup().addTo(intelligenceMap);
   nativeHazardLayer = L.layerGroup().addTo(intelligenceMap);
   nativeAnomalyLayer = L.layerGroup().addTo(intelligenceMap);
+  weatherForecastLayer = L.layerGroup().addTo(intelligenceMap);
+  infrastructureMapLayer = L.layerGroup().addTo(intelligenceMap);
   situationMapLayer = L.layerGroup().addTo(intelligenceMap);
   aircraftMapLayer = L.layerGroup().addTo(intelligenceMap);
   intelligenceMap.on("zoomend", () => {
@@ -440,12 +453,72 @@ function scheduleViewportLoad() {
 async function loadViewportFeatures() {
   const requestId = ++viewportRequest;
   try {
-    const payload = await request(`/api/intelligence/map/features?${viewportQuery()}`);
+    const query = viewportQuery();
+    const infrastructureQuery = new URLSearchParams(query);
+    infrastructureQuery.set("types", "airport,port");
+    infrastructureQuery.set("limit", intelligenceMap.getZoom() <= 5 ? "500" : "1800");
+    const [payload, weather, infrastructure] = await Promise.all([
+      request(`/api/intelligence/map/features?${query}`),
+      elements.mapWeatherToggle.checked
+        ? request(`/api/intelligence/map/weather?${query}`)
+        : Promise.resolve({ forecasts: [] }),
+      elements.mapInfrastructureToggle.checked
+        ? request(`/api/intelligence/map/infrastructure?${infrastructureQuery}`)
+        : Promise.resolve({ assets: [] })
+    ]);
     if (requestId !== viewportRequest) return;
     renderNativeFeatures(payload);
+    renderEnvironmentLayers(weather.forecasts || [], infrastructure.assets || []);
   } catch (error) {
-    if (requestId === viewportRequest) elements.mapStatus.textContent += " · hazard layer unavailable";
+    if (requestId === viewportRequest) elements.mapStatus.textContent += " · one or more map layers unavailable";
   }
+}
+
+function renderEnvironmentLayers(forecasts, assets) {
+  weatherForecastLayer.clearLayers();
+  infrastructureMapLayer.clearLayers();
+  for (const forecast of forecasts) addWeatherForecast(forecast);
+  for (const asset of assets) addInfrastructureAsset(asset);
+  elements.mapStatus.textContent += ` · ${forecasts.length} forecast cells · ${assets.length} reference assets`;
+}
+
+function addWeatherForecast(forecast) {
+  if (!Number.isFinite(forecast.latitude) || !Number.isFinite(forecast.longitude)) return;
+  const precipitation = Number(forecast.precipitation_mm || 0);
+  const gust = Number(forecast.wind_gust_kph || 0);
+  const radius = Math.max(3, Math.min(10, 3 + precipitation / 2 + gust / 40));
+  const marker = L.circleMarker([forecast.latitude, forecast.longitude], {
+    radius, className: "weather-forecast-cell", color: "#88d8ff", weight: 1,
+    fillColor: precipitation > 1 ? "#3d86c9" : "#5a8fae", fillOpacity: .38
+  });
+  const temperature = Number.isFinite(forecast.temperature_c)
+    ? `${Math.round(forecast.temperature_c)}°C`
+    : "temperature unavailable";
+  marker.bindTooltip(
+    `${temperature} · ${precipitation.toFixed(1)} mm precipitation · ${Math.round(gust)} km/h gusts · valid ${formatTime(forecast.valid_at)} · forecast by ${forecast.source_name}`,
+    { sticky: true, className: "entity-map-tooltip" }
+  );
+  marker.addTo(weatherForecastLayer);
+}
+
+function addInfrastructureAsset(asset) {
+  if (!Number.isFinite(asset.latitude) || !Number.isFinite(asset.longitude)) return;
+  const kind = asset.asset_type === "port" ? "port" : "airport";
+  const glyph = kind === "port" ? "⚓" : "✦";
+  const marker = L.marker([asset.latitude, asset.longitude], {
+    icon: L.divIcon({
+      className: "infrastructure-marker-wrap",
+      html: `<span class="infrastructure-marker infrastructure-${kind}" aria-hidden="true">${glyph}</span>`,
+      iconSize: [18, 18], iconAnchor: [9, 9]
+    }),
+    keyboard: true,
+    title: asset.name
+  });
+  marker.bindTooltip(
+    `${asset.name} · ${kind} reference · ${asset.source_name} · operating status unknown`,
+    { sticky: true, className: "entity-map-tooltip" }
+  );
+  marker.addTo(infrastructureMapLayer);
 }
 
 function renderNativeFeatures(payload) {
@@ -899,7 +972,7 @@ async function refresh() {
     const mapQuery = new URLSearchParams(categoryQuery);
     mapQuery.set("located", "1");
     mapQuery.set("limit", "200");
-    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, aircraftResponse] = await Promise.all([
+    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, aircraftResponse, fusion] = await Promise.all([
       request("/api/intelligence/overview"),
       request(`/api/intelligence/documents${category}`),
       request("/api/intelligence/sources"),
@@ -909,9 +982,11 @@ async function refresh() {
       request("/api/intelligence/reputations"),
       request("/api/intelligence/forecasts"),
       request("/api/intelligence/epistemic-health"),
-      request("/api/intelligence/aircraft?limit=300")
+      request("/api/intelligence/aircraft?limit=300"),
+      request("/api/intelligence/event-fusion")
     ]);
     renderOverview(overview);
+    renderFusionOverview(fusion);
     renderDocuments(documents.documents ?? []);
     renderSources(sources.sources ?? []);
     renderSituations(situations.situations ?? []);
@@ -949,6 +1024,8 @@ elements.mapCountryFilter.addEventListener("change", () => {
 });
 elements.mapLabelsToggle.addEventListener("change", () => { mapLabels = elements.mapLabelsToggle.checked; renderMap(lastMapSituations); });
 elements.mapAircraftToggle.addEventListener("change", () => renderMap(lastMapSituations));
+elements.mapWeatherToggle.addEventListener("change", scheduleViewportLoad);
+elements.mapInfrastructureToggle.addEventListener("change", scheduleViewportLoad);
 elements.mapTimeFilter.addEventListener("change", scheduleViewportLoad);
 elements.mapSeverityFilter.addEventListener("change", scheduleViewportLoad);
 for (const toggle of elements.mapLayerToggles) toggle.addEventListener("change", scheduleViewportLoad);

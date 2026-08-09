@@ -54,7 +54,10 @@ class ReputationEngine:
                        MAX(sources.credibility) AS baseline_credibility
                 FROM documents
                 JOIN sources ON sources.id = documents.source_id
-                WHERE sources.kind NOT IN ('private_mail', 'prediction_market')
+                WHERE sources.kind NOT IN (
+                  'private_mail', 'prediction_market', 'weather_forecast',
+                  'infrastructure_reference'
+                )
                 GROUP BY documents.publisher_key
                 """
             ).fetchall()
@@ -70,7 +73,10 @@ class ReputationEngine:
                   ON publisher_outcomes.document_id = documents.id
                 LEFT JOIN publisher_verification_attempts AS attempts
                   ON attempts.document_id = documents.id
-                WHERE sources.kind NOT IN ('private_mail', 'prediction_market')
+                WHERE sources.kind NOT IN (
+                  'private_mail', 'prediction_market', 'weather_forecast',
+                  'infrastructure_reference'
+                )
                   AND publisher_outcomes.document_id IS NULL
                   AND COALESCE(documents.published_at,
                                documents.retrieved_at) <= ?
@@ -241,7 +247,10 @@ class ReputationEngine:
               AND other.id != ?
               AND other.publisher_key != ?
               AND other.status = 'active'
-              AND other_source.kind NOT IN ('private_mail', 'prediction_market')
+              AND other_source.kind NOT IN (
+                'private_mail', 'prediction_market', 'weather_forecast',
+                'infrastructure_reference'
+              )
               AND COALESCE(json_extract(other.metadata, '$.forwarded'), 0) = 0
               AND COALESCE(other.published_at, other.retrieved_at) > ?
             """,

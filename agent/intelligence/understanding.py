@@ -863,7 +863,10 @@ class UnderstandingEngine:
                     OR document_analysis.document_version_id != versions.id
                 )
                   AND documents.status = 'active'
-                  AND sources.kind NOT IN ('private_mail', 'prediction_market')
+                  AND sources.kind NOT IN (
+                    'private_mail', 'prediction_market',
+                    'weather_forecast', 'infrastructure_reference'
+                  )
                 ORDER BY COALESCE(documents.published_at,
                                   documents.retrieved_at) ASC
                 LIMIT ?

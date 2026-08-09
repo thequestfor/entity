@@ -41,7 +41,10 @@ SOURCE_IDS_BY_KIND = {
 }
 
 AUTHORITATIVE_SOURCE_IDS = set().union(*SOURCE_IDS_BY_KIND.values())
-EXCLUDED_SOURCE_KINDS = {"private_mail", "prediction_market"}
+EXCLUDED_SOURCE_KINDS = {
+    "private_mail", "prediction_market", "weather_forecast",
+    "infrastructure_reference"
+}
 
 
 @dataclass(frozen=True)
@@ -303,7 +306,10 @@ class VerificationEngine:
             JOIN documents ON documents.id=versions.document_id
             JOIN sources ON sources.id=documents.source_id
             WHERE evidence.claim_id=? AND evidence.stance='supports'
-              AND sources.kind NOT IN ('private_mail','prediction_market')
+              AND sources.kind NOT IN (
+                'private_mail','prediction_market','weather_forecast',
+                'infrastructure_reference'
+              )
             ORDER BY evidence.observed_at DESC
             """, (claim_id,)
         ).fetchall()
@@ -329,7 +335,10 @@ class VerificationEngine:
             WHERE relations.relationship='contradicts'
               AND (relations.left_claim_id=? OR relations.right_claim_id=?)
               AND evidence.stance='supports'
-              AND sources.kind NOT IN ('private_mail','prediction_market')
+              AND sources.kind NOT IN (
+                'private_mail','prediction_market','weather_forecast',
+                'infrastructure_reference'
+              )
             ORDER BY evidence.observed_at DESC
             """, (claim_id, claim_id, claim_id)
         ).fetchall()

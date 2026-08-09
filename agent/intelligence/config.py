@@ -123,8 +123,29 @@ class IntelligenceConfig:
     geography_backfill_batch_size: int = 50
     geospatial_features_enabled: bool = True
     geospatial_feature_batch_size: int = 100
+    environment_layers_enabled: bool = True
+    environment_layer_batch_size: int = 100
+    global_weather_enabled: bool = False
+    global_weather_grid_degrees: float = 30.0
+    global_weather_horizon_hours: int = 24
+    global_weather_max_cells: int = 200
+    global_weather_batch_cells: int = 25
+    global_weather_poll_seconds: int = 21600
+    ourairports_enabled: bool = True
+    ourairports_types: tuple[str, ...] = ("large_airport", "medium_airport")
+    ourairports_max_assets: int = 10000
+    ourairports_poll_seconds: int = 86400
+    nga_wpi_enabled: bool = True
+    nga_wpi_max_assets: int = 5000
+    nga_wpi_poll_seconds: int = 604800
     world_graph_enabled: bool = True
     world_graph_batch_size: int = 100
+    event_fusion_enabled: bool = True
+    event_fusion_batch_size: int = 100
+    event_fusion_auto_link_threshold: float = 0.82
+    event_fusion_review_threshold: float = 0.65
+    event_fusion_max_candidates: int = 100
+    event_fusion_lookback_days: int = 14
     world_bank_enabled: bool = True
     world_bank_countries: tuple[str, ...] = ("WLD",)
     world_bank_indicators: tuple[str, ...] = DEFAULT_WORLD_BANK_INDICATORS
@@ -452,8 +473,80 @@ class IntelligenceConfig:
             geography_backfill_batch_size=_env_int("ENTITY_GEOGRAPHY_BACKFILL_BATCH_SIZE", 50, minimum=1, maximum=500),
             geospatial_features_enabled=_env_bool("ENTITY_GEOSPATIAL_FEATURES_ENABLED", True),
             geospatial_feature_batch_size=_env_int("ENTITY_GEOSPATIAL_FEATURE_BATCH_SIZE", 100, minimum=1, maximum=500),
+            environment_layers_enabled=_env_bool(
+                "ENTITY_ENVIRONMENT_LAYERS_ENABLED", True
+            ),
+            environment_layer_batch_size=_env_int(
+                "ENTITY_ENVIRONMENT_LAYER_BATCH_SIZE", 100,
+                minimum=1, maximum=500
+            ),
+            global_weather_enabled=_env_bool(
+                "ENTITY_GLOBAL_WEATHER_ENABLED", False
+            ),
+            global_weather_grid_degrees=_env_float(
+                "ENTITY_GLOBAL_WEATHER_GRID_DEGREES", 30.0,
+                minimum=5.0, maximum=90.0
+            ),
+            global_weather_horizon_hours=_env_int(
+                "ENTITY_GLOBAL_WEATHER_HORIZON_HOURS", 24,
+                minimum=6, maximum=168
+            ),
+            global_weather_max_cells=_env_int(
+                "ENTITY_GLOBAL_WEATHER_MAX_CELLS", 200,
+                minimum=1, maximum=2000
+            ),
+            global_weather_batch_cells=_env_int(
+                "ENTITY_GLOBAL_WEATHER_BATCH_CELLS", 25,
+                minimum=1, maximum=50
+            ),
+            global_weather_poll_seconds=_env_int(
+                "ENTITY_GLOBAL_WEATHER_POLL_SECONDS", 21600,
+                minimum=3600
+            ),
+            ourairports_enabled=_env_bool("ENTITY_OURAIRPORTS_ENABLED", True),
+            ourairports_types=_env_csv(
+                os.getenv("ENTITY_OURAIRPORTS_TYPES"),
+                ("large_airport", "medium_airport")
+            ),
+            ourairports_max_assets=_env_int(
+                "ENTITY_OURAIRPORTS_MAX_ASSETS", 10000,
+                minimum=1, maximum=25000
+            ),
+            ourairports_poll_seconds=_env_int(
+                "ENTITY_OURAIRPORTS_POLL_SECONDS", 86400,
+                minimum=3600
+            ),
+            nga_wpi_enabled=_env_bool("ENTITY_NGA_WPI_ENABLED", True),
+            nga_wpi_max_assets=_env_int(
+                "ENTITY_NGA_WPI_MAX_ASSETS", 5000,
+                minimum=1, maximum=10000
+            ),
+            nga_wpi_poll_seconds=_env_int(
+                "ENTITY_NGA_WPI_POLL_SECONDS", 604800,
+                minimum=86400
+            ),
             world_graph_enabled=_env_bool("ENTITY_WORLD_GRAPH_ENABLED", True),
             world_graph_batch_size=_env_int("ENTITY_WORLD_GRAPH_BATCH_SIZE", 100, minimum=2, maximum=500),
+            event_fusion_enabled=_env_bool("ENTITY_EVENT_FUSION_ENABLED", True),
+            event_fusion_batch_size=_env_int(
+                "ENTITY_EVENT_FUSION_BATCH_SIZE", 100, minimum=1, maximum=500
+            ),
+            event_fusion_auto_link_threshold=_env_float(
+                "ENTITY_EVENT_FUSION_AUTO_LINK_THRESHOLD", .82,
+                minimum=.55, maximum=.99
+            ),
+            event_fusion_review_threshold=_env_float(
+                "ENTITY_EVENT_FUSION_REVIEW_THRESHOLD", .65,
+                minimum=.3, maximum=.99
+            ),
+            event_fusion_max_candidates=_env_int(
+                "ENTITY_EVENT_FUSION_MAX_CANDIDATES", 100,
+                minimum=5, maximum=500
+            ),
+            event_fusion_lookback_days=_env_int(
+                "ENTITY_EVENT_FUSION_LOOKBACK_DAYS", 14,
+                minimum=1, maximum=90
+            ),
             world_bank_enabled=_env_bool("ENTITY_WORLD_BANK_ENABLED", True),
             world_bank_countries=_env_csv(
                 os.getenv("ENTITY_WORLD_BANK_COUNTRIES"), ("WLD",)

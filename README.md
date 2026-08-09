@@ -179,6 +179,15 @@ ENTITY_NWS_ALERTS_ENABLED=true
 ENTITY_CISA_KEV_ENABLED=true
 ENTITY_GITHUB_ADVISORIES_ENABLED=true
 ENTITY_NOAA_SPACE_WEATHER_ENABLED=true
+# Context layers: airports and ports are static references. Open-Meteo global
+# forecasts are opt-in because its free service is non-commercial.
+ENTITY_ENVIRONMENT_LAYERS_ENABLED=true
+ENTITY_GLOBAL_WEATHER_ENABLED=false
+ENTITY_GLOBAL_WEATHER_GRID_DEGREES=30
+ENTITY_OURAIRPORTS_ENABLED=true
+ENTITY_NGA_WPI_ENABLED=true
+ENTITY_EVENT_FUSION_ENABLED=true
+ENTITY_EVENT_FUSION_BATCH_SIZE=100
 # NASA FIRMS is opt-in and requires a free MAP_KEY.
 ENTITY_FIRMS_ENABLED=false
 ENTITY_FIRMS_MAP_KEY=
@@ -211,6 +220,23 @@ Weather alerts, and selected World Bank indicators require no API key. NASA
 FIRMS and FRED require operator-provided keys and are disabled until supplied.
 GDELT is also free and global, but its results inherit the varying reliability
 of the publishers it indexes. The dashboard binds only to localhost by default.
+
+World Intelligence can also materialize separate environmental context layers.
+OurAirports supplies public-domain medium and large airport references, and the
+official NGA World Port Index supplies port references. These records indicate
+that an asset is listed at a location; they do not establish that it is open,
+closed, damaged, congested, or otherwise operating. Open-Meteo can supply a
+coarse global forecast grid after `ENTITY_GLOBAL_WEATHER_ENABLED=true` is set.
+Its free API is limited to non-commercial use and requires attribution, so it is
+disabled by default. Forecast cells remain model forecasts and never become
+weather observations, alerts, factual claims, or corroboration.
+
+Eligible reports and observations are deterministically fused into canonical
+world events after projection. Every link stores its score components, vetoes,
+evidence cutoff, and algorithm version. Ambiguous candidates remain pending for
+review; copied or syndicated reports count as one independent reporting family.
+Event aliases and immutable versions preserve history across correction, merge,
+split, reattribution, and rollback operations.
 
 Direct news collection uses publisher-supplied RSS or Atom metadata rather than
 scraping full articles. `ENTITY_NEWS_RSS_FEEDS` entries use
