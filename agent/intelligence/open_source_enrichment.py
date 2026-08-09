@@ -78,10 +78,11 @@ class OpenSourceEnrichmentEngine:
                      ON enrichment.document_version_id=versions.id
                     AND enrichment.method=?
                    WHERE {condition} AND sources.kind IN (?,?)"""
-            pending = """(enrichment.id IS NULL OR (
-                       enrichment.status='needs-model'
-                       AND julianday(enrichment.updated_at)<julianday('now','-6 hours')
-                     ))"""
+            pending = """(enrichment.id IS NULL OR
+                       enrichment.status='media-derived-pending' OR (
+                         enrichment.status='needs-model' AND
+                         julianday(enrichment.updated_at)<julianday('now','-6 hours')
+                       ))"""
             recent = connection.execute(
                 selection.format(condition=pending)
                 + " ORDER BY versions.id DESC LIMIT ?",
@@ -102,6 +103,12 @@ class OpenSourceEnrichmentEngine:
         for document in rows:
             metadata = self.store._json_load(document.get("version_metadata"), {})
             original = _source_text(document)
+            media_derivations = self._media_derivations(document["version_id"])
+            if media_derivations:
+                original += "\nDerived public-media evidence:\n" + "\n".join(
+                    item["derived_text"] for item in media_derivations
+                    if item["derived_text"]
+                )
             language = _detect_language(original)
             category = _category(original, document.get("category"))
             urls = _urls(original)
@@ -111,6 +118,7 @@ class OpenSourceEnrichmentEngine:
             media_only = (
                 original.lower().startswith("media post from @")
                 and bool(metadata.get("media_type"))
+                and not media_derivations
             )
             needs_model = (
                 not media_only
@@ -121,6 +129,7 @@ class OpenSourceEnrichmentEngine:
                 "language": language, "category": category, "urls": urls,
                 "quoted": quoted, "actors": actors, "forward_key": forward_key,
                 "forward_label": forward_label, "media_only": media_only,
+                "media_derivations": media_derivations,
                 "needs_model": needs_model,
             })
 
@@ -152,6 +161,7 @@ class OpenSourceEnrichmentEngine:
                 item["category"], item["urls"], item["quoted"], item["actors"],
                 item["forward_key"], item["forward_label"],
                 model_payloads.get(document["version_id"]), item["media_only"],
+                item["media_derivations"],
             )
             outcome = self._record(document, item["metadata"], derived, now)
             processed += 1
@@ -189,6 +199,18 @@ class OpenSourceEnrichmentEngine:
             processed, translated, categorized, attributed, relationships,
             model_calls,
         )
+
+    def _media_derivations(self, version_id):
+        with self.store._connect() as connection:
+            rows = connection.execute(
+                """SELECT id,derivation_kind,derived_text,confidence,
+                          evidence_locator,media_hash
+                   FROM public_media_derivations
+                   WHERE document_version_id=? AND status='complete'
+                   ORDER BY id LIMIT 10""",
+                (version_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def _state(self, connection, now):
         row = connection.execute(
@@ -242,7 +264,7 @@ class OpenSourceEnrichmentEngine:
 
     def _combine(self, document, original, metadata, language, category, urls,
                  quoted, actors, forward_key, forward_label, payload,
-                 media_only=False):
+                 media_only=False, media_derivations=()):
         translated_title = translated_summary = translated_content = ""
         location = country = event_time = ""
         confidence = .75 if language == "en" else .45
@@ -291,6 +313,16 @@ class OpenSourceEnrichmentEngine:
                 "grouped_id", "media_downloaded",
             ) if metadata.get(key) not in (None, "")
         }
+        if media_derivations:
+            media["derivations"] = [
+                {
+                    "id": item["id"], "kind": item["derivation_kind"],
+                    "confidence": item["confidence"],
+                    "locator": item["evidence_locator"],
+                    "media_hash": item["media_hash"],
+                }
+                for item in media_derivations
+            ]
         needs_model = (
             not payload and not media_only
             and (language != "en" or category == "social-signal")

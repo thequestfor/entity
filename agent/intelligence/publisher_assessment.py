@@ -7,7 +7,7 @@ import math
 from agent.intelligence.store import utc_now
 
 
-METHOD = "independent-outcome-assessment-v1"
+METHOD = "independent-outcome-assessment-v2"
 
 
 class PublisherAssessmentEngine:
@@ -29,6 +29,7 @@ class PublisherAssessmentEngine:
                           profiles.attribution_quality,
                           profiles.revision_discipline,
                           profiles.independence_confidence,
+                          profiles.timeliness_score,
                           profiles.framing_signal AS observed_framing,
                           priors.framing_signal AS framing_prior,
                           priors.affiliation,priors.rationale
@@ -46,6 +47,7 @@ class PublisherAssessmentEngine:
                          COALESCE(SUM(outcome='refuted'),0) refuted,
                          COALESCE(SUM(outcome='mixed'),0) mixed,
                          COUNT(*) samples,
+                         GROUP_CONCAT(id) outcome_ids,
                          COALESCE(SUM(CASE WHEN outcome='confirmed' THEN
                            confidence*outcome_weight ELSE 0 END),0) success_weight,
                          COALESCE(SUM(CASE WHEN outcome='refuted' THEN
@@ -80,9 +82,34 @@ class PublisherAssessmentEngine:
                         (assessment["effective"], publisher["publisher_key"]),
                     )
                 changed += int(assessment_changed)
+                topics = connection.execute(
+                    """SELECT topic,
+                         COALESCE(SUM(outcome='confirmed'),0) confirmed,
+                         COALESCE(SUM(outcome='refuted'),0) refuted,
+                         COALESCE(SUM(outcome='mixed'),0) mixed,
+                         COUNT(*) samples,
+                         GROUP_CONCAT(id) outcome_ids,
+                         COALESCE(SUM(CASE WHEN outcome='confirmed' THEN
+                           confidence*outcome_weight ELSE 0 END),0) success_weight,
+                         COALESCE(SUM(CASE WHEN outcome='refuted' THEN
+                           confidence*outcome_weight ELSE 0 END),0) failure_weight
+                       FROM publisher_claim_outcomes
+                       WHERE publisher_key=? AND topic!='' AND (
+                         independent_family_count>0 OR
+                         evidence_basis LIKE 'authoritative%')
+                       GROUP BY topic""",
+                    (publisher["publisher_key"],),
+                ).fetchall()
+                for topic in topics:
+                    scoped = self._assessment(
+                        dict(publisher), dict(topic), now,
+                        scope_kind="topic", scope_value=str(topic["topic"]),
+                    )
+                    self._store(connection, scoped)
         return changed
 
-    def _assessment(self, publisher, outcome, now):
+    def _assessment(self, publisher, outcome, now, scope_kind="global",
+                    scope_value=""):
         baseline = float(publisher["baseline_credibility"])
         success = float(outcome["success_weight"] or 0)
         failure = float(outcome["failure_weight"] or 0)
@@ -110,6 +137,8 @@ class PublisherAssessmentEngine:
         framing = max(framing_prior, observed_framing)
         raw = {
             "publisher_key": publisher["publisher_key"],
+            "scope_kind": scope_kind,
+            "scope_value": scope_value,
             "baseline": round(baseline, 4),
             "estimate": round(estimate, 4),
             "effective": round(effective, 4),
@@ -119,9 +148,14 @@ class PublisherAssessmentEngine:
             "refuted": refuted,
             "mixed": int(outcome["mixed"] or 0),
             "samples": samples,
+            "outcome_ids": [
+                int(value) for value in str(outcome.get("outcome_ids") or "").split(",")
+                if value.isdigit()
+            ],
             "attribution": round(float(publisher.get("attribution_quality") or .5), 4),
             "revision": round(float(publisher.get("revision_discipline") or .5), 4),
             "independence": round(float(publisher.get("independence_confidence") or .5), 4),
+            "timeliness": round(float(publisher.get("timeliness_score") or .5), 4),
             "framing_prior": round(framing_prior, 4),
             "observed_framing": round(observed_framing, 4),
             "framing": round(framing, 4),
@@ -136,10 +170,11 @@ class PublisherAssessmentEngine:
 
     def _store(self, connection, item):
         values = (
-            item["publisher_key"], "global", "", item["baseline"],
+            item["publisher_key"], item["scope_kind"], item["scope_value"], item["baseline"],
             item["estimate"], item["effective"], item["lower"], item["upper"],
             item["confirmed"], item["refuted"], item["mixed"], item["samples"],
             item["attribution"], item["revision"], item["independence"],
+            item["timeliness"],
             item["framing_prior"], item["observed_framing"], item["framing"],
             item["affiliation"], item["rationale"], item["maturity"], METHOD,
             item["input_hash"], item["updated_at"],
@@ -150,10 +185,10 @@ class PublisherAssessmentEngine:
                  evidence_estimate,effective_credibility,reliability_lower_bound,
                  reliability_upper_bound,confirmed_count,refuted_count,mixed_count,
                  factual_samples,attribution_quality,revision_discipline,
-                 independence_confidence,framing_prior,observed_framing,
+                 independence_confidence,timeliness_score,framing_prior,observed_framing,
                  framing_signal,affiliation,rationale,maturity_status,method,
                  input_hash,updated_at
-               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(publisher_key,scope_kind,scope_value) DO UPDATE SET
                  baseline_credibility=excluded.baseline_credibility,
                  evidence_estimate=excluded.evidence_estimate,
@@ -166,6 +201,7 @@ class PublisherAssessmentEngine:
                  attribution_quality=excluded.attribution_quality,
                  revision_discipline=excluded.revision_discipline,
                  independence_confidence=excluded.independence_confidence,
+                 timeliness_score=excluded.timeliness_score,
                  framing_prior=excluded.framing_prior,
                  observed_framing=excluded.observed_framing,
                  framing_signal=excluded.framing_signal,
@@ -180,14 +216,40 @@ class PublisherAssessmentEngine:
                  evidence_estimate,effective_credibility,reliability_lower_bound,
                  reliability_upper_bound,confirmed_count,refuted_count,mixed_count,
                  factual_samples,framing_signal,maturity_status,method,input_hash,
-                 reason,created_at
-               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 reason,created_at,attribution_quality,revision_discipline,
+                 independence_confidence,timeliness_score,observed_framing
+               ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
-                item["publisher_key"], "global", "", item["baseline"],
+                item["publisher_key"], item["scope_kind"], item["scope_value"], item["baseline"],
                 item["estimate"], item["effective"], item["lower"], item["upper"],
                 item["confirmed"], item["refuted"], item["mixed"], item["samples"],
                 item["framing"], item["maturity"], METHOD, item["input_hash"],
                 "Independent outcomes changed the auditable assessment input.",
-                item["updated_at"],
+                item["updated_at"], item["attribution"], item["revision"],
+                item["independence"], item["timeliness"], item["observed_framing"],
             ),
         )
+        for dimension, value in (
+            ("factual_accuracy", item["estimate"]),
+            ("attribution_quality", item["attribution"]),
+            ("revision_discipline", item["revision"]),
+            ("independence", item["independence"]),
+            ("timeliness", item["timeliness"]),
+            ("framing", item["framing"]),
+        ):
+            dimension_hash = hashlib.sha256(
+                f'{item["input_hash"]}:{dimension}:{value}'.encode()
+            ).hexdigest()
+            connection.execute(
+                """INSERT OR IGNORE INTO publisher_dimension_observations (
+                     publisher_key,dimension,scope_kind,scope_value,value,
+                     sample_count,evidence_basis,evidence_ids,method,input_hash,
+                     evidence_cutoff_at,created_at
+                   ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (item["publisher_key"], dimension, item["scope_kind"],
+                 item["scope_value"], value, item["samples"],
+                 "independent resolved outcomes and versioned content metrics",
+                 json.dumps(item["outcome_ids"], separators=(",", ":")),
+                 METHOD, dimension_hash, item["updated_at"],
+                 item["updated_at"]),
+            )

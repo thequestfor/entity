@@ -1,5 +1,6 @@
 import json
 import base64
+import hashlib
 import io
 import re
 import shutil
@@ -62,6 +63,7 @@ from agent.intelligence.environment_layers import EnvironmentLayerEngine
 from agent.intelligence.event_fusion import EventFusionEngine, FusionResult
 from agent.intelligence.location_inference import DocumentLocationInferenceEngine
 from agent.intelligence.open_source_enrichment import OpenSourceEnrichmentEngine
+from agent.intelligence.media_derivation import PublicMediaDerivationEngine
 from agent.intelligence.publisher_assessment import PublisherAssessmentEngine
 from agent.intelligence.event_assessment import CanonicalEventAssessmentEngine
 from agent.intelligence.world_graph import WorldEventGraphEngine
@@ -135,7 +137,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(30, version)
+        self.assertEqual(31, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -453,6 +455,64 @@ class IntelligenceStoreTests(unittest.TestCase):
         self.assertEqual(0, result.model_calls)
         self.assertEqual("media-unavailable", row["status"])
         self.assertIn('"media_downloaded":false', row["media_evidence"])
+
+    def test_public_media_derivation_retains_hash_locator_and_derived_role(self):
+        media_directory = Path(self.temporary_directory.name) / "media"
+        media_directory.mkdir()
+        media_path = media_directory / "fixture"
+        payload = b"bounded public image fixture"
+        media_path.write_bytes(payload)
+        media_hash = hashlib.sha256(payload).hexdigest()
+        self.store.register_source(
+            "telegram", "Telegram", "social_signal", credibility=.3
+        )
+        self.store.ingest_items("telegram", [SourceItem(
+            "media-derived", "Media post from @fixture_example_channel",
+            "https://t.me/fixture_example_channel/13",
+            metadata={
+                "platform": "telegram",
+                "channel_username": "fixture_example_channel",
+                "media_type": "MessageMediaPhoto",
+                "media_mime_type": "image/png",
+                "media_size_bytes": len(payload),
+                "media_downloaded": True,
+                "media_local_path": str(media_path),
+                "media_sha256": media_hash,
+            },
+        )])
+
+        class Processor:
+            def derive(self, path, mime_type, media_type):
+                return [{
+                    "kind": "ocr", "text": "Evacuation ordered in Example City",
+                    "locator": "image:full", "confidence": .8,
+                }]
+
+        result = PublicMediaDerivationEngine(
+            self.store, media_directory, processor=Processor(), enabled=True
+        ).run_batch()
+        OpenSourceEnrichmentEngine(
+            self.store, model_enabled=False
+        ).run_batch()
+        with self.store._connect() as connection:
+            derivation = dict(connection.execute(
+                "SELECT * FROM public_media_derivations"
+            ).fetchone())
+            enrichment = dict(connection.execute(
+                "SELECT * FROM document_enrichments"
+            ).fetchone())
+
+        self.assertEqual(1, result.completed)
+        self.assertEqual(media_hash, derivation["media_hash"])
+        self.assertEqual("image:full", derivation["evidence_locator"])
+        self.assertEqual("complete", derivation["status"])
+        media_evidence = json.loads(enrichment["media_evidence"])
+        self.assertEqual("ocr", media_evidence["derivations"][0]["kind"])
+        self.assertNotEqual("direct-observation", derivation["derivation_kind"])
+        self.assertEqual(
+            ["needs-model"],
+            [item["status"] for item in self.store.list_enrichment_queue()],
+        )
 
     def test_aircraft_cache_is_not_a_situation_or_claim(self):
         self.store.replace_aircraft_states([{
@@ -2659,6 +2719,16 @@ class ReputationEngineTests(unittest.TestCase):
             evidence_weight = connection.execute(
                 "SELECT source_weight FROM claim_evidence LIMIT 1"
             ).fetchone()[0]
+            scopes = connection.execute(
+                """SELECT scope_kind,scope_value FROM publisher_assessments
+                   WHERE publisher_key=? ORDER BY scope_kind""",
+                ("telegram:fixture_osint_channel",),
+            ).fetchall()
+            dimensions = connection.execute(
+                """SELECT DISTINCT dimension FROM publisher_dimension_observations
+                   WHERE publisher_key=?""",
+                ("telegram:fixture_osint_channel",),
+            ).fetchall()
 
         self.assertEqual(1, changed)
         self.assertEqual(12, assessment["assessment_factual_samples"])
@@ -2666,6 +2736,18 @@ class ReputationEngineTests(unittest.TestCase):
         self.assertGreater(assessment["effective_credibility"], .82)
         self.assertLessEqual(assessment["effective_credibility"], .97)
         self.assertEqual(.15, assessment["assessment_framing_signal"])
+        self.assertEqual(
+            [("global", ""), ("topic", "conflict")],
+            [tuple(row) for row in scopes],
+        )
+        self.assertEqual(
+            {"factual_accuracy", "attribution_quality", "revision_discipline",
+             "independence", "timeliness", "framing"},
+            {row[0] for row in dimensions},
+        )
+        audit = self.store.publisher_audit("telegram:fixture_osint_channel")
+        self.assertEqual(2, len(audit["assessments"]))
+        self.assertGreaterEqual(len(audit["history"]), 2)
         self.assertEqual(
             assessment["effective_credibility"], evidence_weight
         )
@@ -3861,6 +3943,28 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ) as response:
                     reputation_outcomes = json.loads(response.read())
                 with urllib.request.urlopen(
+                    dashboard.url
+                    + "api/intelligence/publisher-audit?publisher=fixture",
+                    timeout=2
+                ) as response:
+                    publisher_audit = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url
+                    + "api/intelligence/reporting-family?key=fixture-family",
+                    timeout=2
+                ) as response:
+                    family_audit = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/enrichment-queue",
+                    timeout=2
+                ) as response:
+                    enrichment_queue = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/media-derivations",
+                    timeout=2
+                ) as response:
+                    media_derivations = json.loads(response.read())
+                with urllib.request.urlopen(
                     dashboard.url + "api/intelligence/early-reports",
                     timeout=2
                 ) as response:
@@ -3912,6 +4016,12 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertEqual(1, briefing["situation_count"])
                 self.assertIn("reputations", reputations)
                 self.assertIn("outcomes", reputation_outcomes)
+                self.assertEqual("fixture", publisher_audit["publisher_key"])
+                self.assertEqual(
+                    "fixture-family", family_audit["reporting_family_key"]
+                )
+                self.assertIn("items", enrichment_queue)
+                self.assertIn("totals", media_derivations)
                 self.assertIn("reports", early_reports)
                 self.assertIn("policies", reasoning_budget)
                 self.assertGreaterEqual(fusion_overview["active_memberships"], 1)

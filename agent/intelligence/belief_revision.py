@@ -579,8 +579,16 @@ class BeliefRevisionEngine:
                   confidence*outcome_weight ELSE 0 END) good,
                 SUM(CASE WHEN outcome='refuted' THEN
                   confidence*outcome_weight ELSE 0 END) bad,
-                COUNT(*) factual_samples
+                COUNT(*) factual_samples,
+                SUM(CASE WHEN outcome='confirmed' AND
+                  COALESCE(independent_family_count,0)>0 THEN 1 ELSE 0 END)
+                  confirmed_samples
               FROM publisher_claim_outcomes GROUP BY publisher_key
+            ), timing_summary AS (
+              SELECT publisher_key,
+                SUM(CASE WHEN outcome='confirmed' THEN was_early ELSE 0 END) early,
+                SUM(outcome='confirmed') confirmed
+              FROM publisher_outcomes GROUP BY publisher_key
             ), claim_summary AS (
               SELECT documents.publisher_key,
                 AVG(CASE WHEN claims.claim_type='attributed_assertion'
@@ -601,7 +609,9 @@ class BeliefRevisionEngine:
               COALESCE(content.causal_claim_share,0) causal_share,
               COALESCE(claims.attribution_quality,.5) attribution_quality,
               COALESCE(claims.revisions,0) revisions,
-              priors.framing_signal framing_prior
+              priors.framing_signal framing_prior,
+              COALESCE(timing.early,0) early,
+              COALESCE(timing.confirmed,0) timing_samples
             FROM publisher_reputation reputation
             LEFT JOIN outcome_summary outcomes
               ON outcomes.publisher_key=reputation.publisher_key
@@ -611,6 +621,8 @@ class BeliefRevisionEngine:
               ON claims.publisher_key=reputation.publisher_key
             LEFT JOIN publisher_profile_priors priors
               ON priors.publisher_key=reputation.publisher_key
+            LEFT JOIN timing_summary timing
+              ON timing.publisher_key=reputation.publisher_key
             """
         ).fetchall()
         for row in rows:
@@ -628,13 +640,19 @@ class BeliefRevisionEngine:
                 if row["framing_prior"] is not None and samples < 20
                 else observed_framing
             )
+            timing_samples = int(row["timing_samples"] or 0)
+            timeliness = (
+                .5 if not timing_samples else
+                (float(row["early"] or 0) + 1) / (timing_samples + 2)
+            )
             connection.execute(
                 """
                 INSERT INTO publisher_epistemic_profiles (
                   publisher_key,factual_accuracy,attribution_quality,
                   revision_discipline,independence_confidence,framing_signal,
-                  factual_samples,revision_samples,method,updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                  factual_samples,revision_samples,method,updated_at,
+                  timeliness_score,timeliness_samples
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(publisher_key) DO UPDATE SET
                   factual_accuracy=excluded.factual_accuracy,
                   attribution_quality=excluded.attribution_quality,
@@ -643,6 +661,8 @@ class BeliefRevisionEngine:
                   framing_signal=excluded.framing_signal,
                   factual_samples=excluded.factual_samples,
                   revision_samples=excluded.revision_samples,
+                  timeliness_score=excluded.timeliness_score,
+                  timeliness_samples=excluded.timeliness_samples,
                   method=excluded.method,updated_at=excluded.updated_at
                 """,
                 (row["publisher_key"],round(accuracy,4),
@@ -650,7 +670,8 @@ class BeliefRevisionEngine:
                  round(max(0,min(1,revision_discipline)),4),
                  round(max(0,1-float(row["syndication_share"] or 0)),4),
                  round(framing,4),
-                 samples,revisions,"epistemic-profile-v1",now)
+                 samples,revisions,"epistemic-profile-v2",now,
+                 round(timeliness,4),timing_samples)
             )
 
     def _refresh_content_profiles(self, connection, now):

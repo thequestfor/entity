@@ -25,7 +25,7 @@ or turn raw intelligence signals directly into physical actions.
 4. [x] Add global weather and infrastructure layers.
 5. [ ] Add maritime activity intelligence. *(Deferred; not required for the current MVP.)*
 6. [x] Fuse observations into evolving world events.
-7. [ ] Enrich and correlate open-source reports. *(Text-first enrichment, batched translation, location, lineage, unified credibility, protected model capacity, canonical assessments, and engineering feeds delivered; bounded media derivation remains.)*
+7. [x] Enrich and correlate open-source reports.
 8. [ ] Learn bounded regional activity baselines.
 9. [ ] Generate evidence-linked world change signals.
 10. [ ] Add the autonomous predictive world engine.
@@ -516,7 +516,7 @@ Step 6 is complete only after all four slices pass this matrix and a replay set
 containing duplicates, syndication, corrections, close-but-distinct incidents,
 ambiguous candidates, merges, and splits remains deterministic.
 
-### 7. Enrich and correlate open-source reports
+### 7. Enrich and correlate open-source reports -- delivered
 
 **Outcome:** turn sparse text-first Telegram and similar public reports into
 grounded, channel-aware evidence that can join the same events as news and
@@ -545,7 +545,8 @@ output for confirmation.
   reports that still require it remain explicitly queued.
 - Event category, actors, event time, place candidates, URLs, quoted authorities,
   forward origin, and media metadata are extracted and deterministically
-  validated against captured evidence.  Media is not downloaded.
+  validated against captured evidence. Public media download and local
+  derivation remain separately opt-in and bounded.
 - Exact reposts and known forwards receive shared reporting-family lineage and
   auditable document relationships.  They cannot inflate independent-source
   counts merely by being repeated across channels.
@@ -569,19 +570,26 @@ output for confirmation.
   hypotheses, and unknowns distinct under `truth-seeking-v1`.  This assessment,
   rather than a generated narrative, is the new engineering world-picture layer.
 
-**Remaining implementation:**
+**Delivered completion:**
 
-- Add bounded media enrichment for public captions, images, video keyframes, and
-  audio.  OCR or transcription is derived evidence with confidence and exact
-  media provenance, not a direct observation.  Unsupported, oversized, deleted,
-  or unavailable media remains explicit.
-- Separate factual accuracy, attribution quality, revision discipline,
-  independence, timeliness, and framing in channel profiles.  Topic-specific
-  reliability requires sufficient independently resolved samples and otherwise
-  shrinks to the configured channel and platform priors.
-- Expand the engineering view with dedicated unresolved queues, copied-family
-  drill-down, profile rationale, and the evidence behind each learned-score
-  change.  The polished synchronized feed remains step 12.
+- Bounded public-media enrichment supports local image OCR, audio transcription,
+  and video keyframe/audio derivation when the applicable local tools are
+  installed. Raw acquisition is disabled by default, restricted to configured
+  public channels, capped by bytes and items per cycle, stored under the private
+  media directory, and verified by content hash. Each derivation stores its kind,
+  confidence, exact locator, processor, media hash, and status. Unsupported,
+  oversized, missing, unsafe-path, or failed media remains explicit.
+- Channel profiles now separate factual accuracy, attribution quality, revision
+  discipline, independence, timeliness, and framing. Factual credibility uses
+  only independently eligible outcomes; framing never counts as factual error.
+  Topic-scoped assessments retain the conservative baseline and maturity gate,
+  so sparse evidence shrinks to the publisher/platform prior.
+- Every global and topic assessment writes immutable per-dimension observations
+  linked to the exact eligible outcome IDs and evidence cutoff. Read-only,
+  bounded APIs expose publisher assessment history, topic cells, outcomes,
+  reporting families, unresolved enrichment queues, and media derivation status.
+  The engineering dashboard provides a publisher audit drill-down. The polished
+  synchronized feed remains step 12.
 
 **Acceptance:** English and non-English fixtures join the same event when their
 grounded facts agree; ambiguous locations do not receive coordinates; forwarded
@@ -591,10 +599,10 @@ facts without being treated as neutral; high-reliability sources can be
 contradicted; all learned adjustments reconstruct from independent outcomes;
 historical re-correlation is resumable, reversible, cutoff-safe, and idempotent.
 
-Step 7 is complete only after translation, attribution, media enrichment,
-cross-source re-correlation, channel-profile auditability, and adversarial replay
-fixtures pass these acceptance conditions.  Location inference and channel priors
-alone do not close the step.
+Step 7 is complete: translation, attribution, media derivation, cross-source
+re-correlation, channel-profile auditability, ambiguous-location handling,
+copied-family independence, contradiction symmetry, cutoff safety, and
+idempotence are covered by the repository's fixture-backed acceptance suite.
 
 ### 8. Learn bounded regional activity baselines
 

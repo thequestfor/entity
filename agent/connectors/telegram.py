@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import re
 from pathlib import Path
@@ -23,6 +24,10 @@ class TelegramConnector:
         channels=(),
         messages_per_channel=50,
         deletion_scan_size=100,
+        media_enabled=False,
+        media_directory="agent/private/intelligence_media",
+        media_max_bytes=10_000_000,
+        media_max_per_cycle=3,
         poll_seconds=120,
         timeout=30,
         gateway=None,
@@ -37,6 +42,10 @@ class TelegramConnector:
         )
         self.messages_per_channel = max(1, min(200, int(messages_per_channel)))
         self.deletion_scan_size = max(1, min(500, int(deletion_scan_size)))
+        self.media_enabled = bool(media_enabled)
+        self.media_directory = Path(media_directory)
+        self.media_max_bytes = max(1, min(100_000_000, int(media_max_bytes)))
+        self.media_max_per_cycle = max(1, min(25, int(media_max_per_cycle)))
         self.timeout = max(1, int(timeout))
         self.poll_seconds = max(60, int(poll_seconds))
         self.gateway = gateway
@@ -52,7 +61,11 @@ class TelegramConnector:
             api_id=self.api_id,
             api_hash=self.api_hash,
             session_path=self.session_path,
-            timeout=self.timeout
+            timeout=self.timeout,
+            media_enabled=self.media_enabled,
+            media_directory=self.media_directory,
+            media_max_bytes=self.media_max_bytes,
+            media_max_per_cycle=self.media_max_per_cycle,
         )
         previous = cursor.get("known_message_ids") or {}
         result = gateway.collect(
@@ -79,11 +92,18 @@ class TelegramConnector:
 
 
 class TelethonGateway:
-    def __init__(self, api_id, api_hash, session_path, timeout=30):
+    def __init__(self, api_id, api_hash, session_path, timeout=30,
+                 media_enabled=False,
+                 media_directory="agent/private/intelligence_media",
+                 media_max_bytes=10_000_000, media_max_per_cycle=3):
         self.api_id = int(api_id)
         self.api_hash = api_hash
         self.session_path = Path(session_path)
         self.timeout = timeout
+        self.media_enabled = bool(media_enabled)
+        self.media_directory = Path(media_directory)
+        self.media_max_bytes = max(1, min(100_000_000, int(media_max_bytes)))
+        self.media_max_per_cycle = max(1, min(25, int(media_max_per_cycle)))
 
     def collect(self, channels, previous, limit):
         return asyncio.run(self._collect(channels, previous, limit))
@@ -105,6 +125,7 @@ class TelethonGateway:
                     ".venv/bin/python -m agent.intelligence.telegram_auth authorize"
                 )
             collected = []
+            media_downloads = 0
             for selector in channels:
                 entity = await client.get_entity(selector)
                 if not isinstance(entity, Channel) or not entity.broadcast:
@@ -132,7 +153,16 @@ class TelethonGateway:
                 async for message in client.iter_messages(entity, limit=limit):
                     if not message or not message.id:
                         continue
-                    messages.append(_message_record(message))
+                    record = _message_record(message)
+                    if (
+                        self.media_enabled and message.media
+                        and media_downloads < self.media_max_per_cycle
+                    ):
+                        downloaded = await self._download_media(client, message, record)
+                        if downloaded:
+                            record.update(downloaded)
+                            media_downloads += 1
+                    messages.append(record)
                     present_ids.add(message.id)
                 message_ids = [message["id"] for message in messages]
                 collected.append({
@@ -150,6 +180,38 @@ class TelethonGateway:
         finally:
             await client.disconnect()
             _secure_session(self.session_path)
+
+    async def _download_media(self, client, message, record):
+        declared = int(record.get("media_size_bytes") or 0)
+        if declared and declared > self.media_max_bytes:
+            return {"media_derivation_status": "oversized"}
+        try:
+            payload = await client.download_media(message, file=bytes)
+        except Exception:
+            return {"media_derivation_status": "download-failed"}
+        if not isinstance(payload, bytes) or not payload:
+            return {"media_derivation_status": "unavailable"}
+        if len(payload) > self.media_max_bytes:
+            return {"media_derivation_status": "oversized"}
+        digest = hashlib.sha256(payload).hexdigest()
+        self.media_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(self.media_directory, 0o700)
+        target = self.media_directory / digest
+        try:
+            descriptor = os.open(
+                target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
+            )
+            with os.fdopen(descriptor, "wb") as stream:
+                stream.write(payload)
+        except FileExistsError:
+            pass
+        return {
+            "media_downloaded": True,
+            "media_local_path": str(target),
+            "media_sha256": digest,
+            "media_size_bytes": len(payload),
+            "media_derivation_status": "pending",
+        }
 
 
 def _telethon_types():
@@ -239,7 +301,10 @@ def _message_item(channel, message):
             "media_width": message.get("media_width"),
             "media_height": message.get("media_height"),
             "media_file_name": message.get("media_file_name"),
-            "media_downloaded": False,
+            "media_downloaded": bool(message.get("media_downloaded")),
+            "media_local_path": message.get("media_local_path"),
+            "media_sha256": message.get("media_sha256"),
+            "media_derivation_status": message.get("media_derivation_status"),
             "translation_status": "pending"
         }
     )

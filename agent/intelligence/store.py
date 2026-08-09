@@ -725,6 +725,7 @@ class IntelligenceStore:
                        assessments.maturity_status,
                        assessments.framing_signal AS assessment_framing_signal,
                        assessments.observed_framing,
+                       assessments.timeliness_score AS assessment_timeliness_score,
                        assessments.method AS assessment_method,
                        assessments.updated_at AS assessment_updated_at,
                        profiles.factual_accuracy,
@@ -732,6 +733,8 @@ class IntelligenceStore:
                        profiles.revision_discipline,
                        profiles.independence_confidence,
                        profiles.framing_signal,
+                       profiles.timeliness_score,
+                       profiles.timeliness_samples,
                        profiles.factual_samples,
                        priors.framing_signal AS framing_prior,
                        priors.affiliation,
@@ -764,6 +767,124 @@ class IntelligenceStore:
                 (max(1, min(1000, int(limit))),)
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def publisher_audit(self, publisher_key, limit=100):
+        publisher_key = str(publisher_key or "")[:300]
+        limit = max(1, min(500, int(limit)))
+        with self._connect() as connection:
+            assessments = connection.execute(
+                """SELECT * FROM publisher_assessments WHERE publisher_key=?
+                   ORDER BY scope_kind,scope_value""", (publisher_key,)
+            ).fetchall()
+            history = connection.execute(
+                """SELECT * FROM publisher_assessment_history
+                   WHERE publisher_key=? ORDER BY created_at DESC,id DESC LIMIT ?""",
+                (publisher_key, limit),
+            ).fetchall()
+            dimensions = connection.execute(
+                """SELECT * FROM publisher_dimension_observations
+                   WHERE publisher_key=? ORDER BY created_at DESC,id DESC LIMIT ?""",
+                (publisher_key, limit),
+            ).fetchall()
+            families = connection.execute(
+                """SELECT reporting_family_key,COUNT(*) document_count,
+                          MIN(published_at) first_reported_at,
+                          MAX(published_at) latest_reported_at
+                   FROM documents WHERE publisher_key=?
+                     AND reporting_family_key!=''
+                   GROUP BY reporting_family_key
+                   ORDER BY latest_reported_at DESC LIMIT ?""",
+                (publisher_key, limit),
+            ).fetchall()
+        return {
+            "publisher_key": publisher_key,
+            "assessments": [dict(row) for row in assessments],
+            "history": [dict(row) for row in history],
+            "dimensions": [
+                {**dict(row), "evidence_ids": self._json_load(row["evidence_ids"], [])}
+                for row in dimensions
+            ],
+            "outcomes": self.list_publisher_outcomes(publisher_key, limit),
+            "reliability_cells": self.list_reliability_cells(publisher_key, limit),
+            "reporting_families": [dict(row) for row in families],
+        }
+
+    def reporting_family_audit(self, family_key, limit=100):
+        family_key = str(family_key or "")[:300]
+        limit = max(1, min(500, int(limit)))
+        with self._connect() as connection:
+            documents = connection.execute(
+                """SELECT id,publisher_key,publisher_label,title,url,published_at,
+                          retrieved_at,status
+                   FROM documents WHERE reporting_family_key=?
+                   ORDER BY published_at,retrieved_at LIMIT ?""",
+                (family_key, limit),
+            ).fetchall()
+            relationships = connection.execute(
+                """SELECT * FROM document_relationships
+                   WHERE left_document_id IN (
+                     SELECT id FROM documents WHERE reporting_family_key=?) OR
+                         right_document_id IN (
+                     SELECT id FROM documents WHERE reporting_family_key=?)
+                   ORDER BY created_at LIMIT ?""",
+                (family_key, family_key, limit),
+            ).fetchall()
+        return {"reporting_family_key": family_key,
+                "documents": [dict(row) for row in documents],
+                "relationships": [dict(row) for row in relationships]}
+
+    def list_enrichment_queue(self, status=None, limit=100):
+        allowed = {
+            "needs-model", "media-unavailable", "media-derived-pending",
+            "unresolved-location", "unresolved", "all",
+        }
+        status = str(status or "unresolved")
+        if status not in allowed:
+            status = "all"
+        query = """SELECT enrichment.document_id,enrichment.document_version_id,
+                    enrichment.status,enrichment.detected_language,
+                    enrichment.location_label,enrichment.country_name,
+                    enrichment.updated_at,documents.publisher_key,
+                    documents.publisher_label,documents.title,documents.url
+                 FROM document_enrichments enrichment
+                 JOIN documents ON documents.id=enrichment.document_id"""
+        params = []
+        if status == "unresolved":
+            query += " WHERE enrichment.status!='complete'"
+        elif status == "unresolved-location":
+            query += " WHERE enrichment.location_label=''"
+        elif status != "all":
+            query += " WHERE enrichment.status=?"
+            params.append(status)
+        query += " ORDER BY enrichment.updated_at DESC LIMIT ?"
+        params.append(max(1, min(500, int(limit))))
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def media_derivation_overview(self, limit=100):
+        with self._connect() as connection:
+            totals = connection.execute(
+                """SELECT COUNT(*) total,
+                   COALESCE(SUM(status='complete'),0) complete,
+                   COALESCE(SUM(status='unavailable'),0) unavailable,
+                   COALESCE(SUM(status='failed'),0) failed
+                   FROM public_media_derivations"""
+            ).fetchone()
+            recent = connection.execute(
+                """SELECT derivation.*,documents.publisher_key,documents.title,
+                          documents.url
+                   FROM public_media_derivations derivation
+                   JOIN documents ON documents.id=derivation.document_id
+                   ORDER BY derivation.updated_at DESC,derivation.id DESC LIMIT ?""",
+                (max(1, min(500, int(limit))),),
+            ).fetchall()
+            state = connection.execute(
+                "SELECT * FROM public_media_derivation_state WHERE lane=?",
+                ("public-media-versions-v1",),
+            ).fetchone()
+        return {"totals": dict(totals), "recent": [dict(row) for row in recent],
+                "state": dict(state) if state else {}}
 
     def reasoning_budget_overview(self):
         now = datetime.now(UTC)

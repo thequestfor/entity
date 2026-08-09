@@ -391,7 +391,8 @@ storage. The result cap is per collection cycle. Keep the Bearer Token only in
 
 Telegram is a useful worldwide early-signal source, but it is not evidence of
 truth by itself. Entity uses an explicit allowlist, accepts public broadcast
-channels only, stores text and captions without downloading media, preserves
+channels only, stores text and captions, keeps media downloads disabled unless
+the bounded derivation lane is explicitly enabled, preserves
 captured revisions and detected deletion tombstones, and assigns the source a
 low initial credibility requiring independent corroboration. Private chats,
 private channels, groups, contacts, and saved messages are rejected.
@@ -408,6 +409,12 @@ ENTITY_TELEGRAM_CHANNELS=
 ENTITY_TELEGRAM_POLL_SECONDS=120
 ENTITY_TELEGRAM_MESSAGES_PER_CHANNEL=50
 ENTITY_TELEGRAM_DELETION_SCAN_SIZE=100
+ENTITY_TELEGRAM_MEDIA_ENABLED=false
+ENTITY_TELEGRAM_MEDIA_DIRECTORY=agent/private/intelligence_media
+ENTITY_TELEGRAM_MEDIA_MAX_BYTES=10000000
+ENTITY_TELEGRAM_MEDIA_MAX_PER_CYCLE=3
+ENTITY_TELEGRAM_MEDIA_WHISPER_MODEL=
+ENTITY_TELEGRAM_MEDIA_RETENTION_HOURS=168
 ```
 
 Authorize locally. The phone number, one-time code, and optional two-step
@@ -440,11 +447,23 @@ window for deletions. Increasing `ENTITY_TELEGRAM_DELETION_SCAN_SIZE` improves
 coverage at the cost of more API reads. Captured originals remain in immutable
 document versions when a deletion is detected.
 
+Public media derivation is separately opt-in with
+`ENTITY_TELEGRAM_MEDIA_ENABLED=true`. Downloads are limited by file and cycle,
+stored under the private media directory, and processed only by available local
+OCR, transcription, and keyframe tools. Audio transcription additionally
+requires an existing local model path; Entity will not download a model. Derived
+text retains its media hash and locator and never counts as a direct observation.
+Unsupported, oversized, or
+unavailable media remains explicit. Raw content-addressed cache files expire
+after the configured retention window; provenance and derived records remain.
+
 Telegram collection remains lossless and media-light. A separate bounded
 enrichment stage detects language, stores English translations and event fields
 as derived records, extracts links and quoted authorities, and preserves forward
-origin and media metadata without downloading media. The captured source version
-is never replaced. Unsupported media-only posts remain explicitly unavailable;
+origin and media metadata. When media derivation is enabled, bounded public files
+are cached privately for local OCR, transcription, or keyframe extraction. The
+captured source version is never replaced. Unsupported media-only posts remain
+explicitly unavailable;
 private mail is excluded from public understanding and source scoring.
 
 After collection, Entity attempts to infer the event location from grounded text.

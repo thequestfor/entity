@@ -69,6 +69,22 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             })
             return
 
+        if parsed.path == "/api/intelligence/publisher-audit":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.publisher_audit(
+                (query.get("publisher") or [""])[0],
+                limit=_query_int(query, "limit", 100),
+            ))
+            return
+
+        if parsed.path == "/api/intelligence/reporting-family":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.reporting_family_audit(
+                (query.get("key") or [""])[0],
+                limit=_query_int(query, "limit", 100),
+            ))
+            return
+
         if parsed.path == "/api/intelligence/reliability-cells":
             query = parse_qs(parsed.query)
             self._send_json({"cells": self.server.intelligence_store.list_reliability_cells(
@@ -108,6 +124,21 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             self._send_json(
                 self.server.intelligence_store.open_source_enrichment_overview()
             )
+            return
+
+        if parsed.path == "/api/intelligence/enrichment-queue":
+            query = parse_qs(parsed.query)
+            self._send_json({"items": self.server.intelligence_store.list_enrichment_queue(
+                status=(query.get("status") or ["unresolved"])[0],
+                limit=_query_int(query, "limit", 100),
+            )})
+            return
+
+        if parsed.path == "/api/intelligence/media-derivations":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.media_derivation_overview(
+                limit=_query_int(query, "limit", 100)
+            ))
             return
 
         if parsed.path == "/api/intelligence/reasoning-budget":

@@ -30,10 +30,12 @@ const elements = {
   situationList: document.querySelector("#situation-list"),
   situationDetail: document.querySelector("#situation-detail"),
   earlyReportList: document.querySelector("#early-report-list"),
+  unresolvedEnrichmentList: document.querySelector("#unresolved-enrichment-list"),
   canonicalEventList: document.querySelector("#canonical-event-list"),
   documentFeed: document.querySelector("#document-feed"),
   sourceList: document.querySelector("#source-list"),
   reputationList: document.querySelector("#reputation-list"),
+  publisherAudit: document.querySelector("#publisher-audit"),
   forecastList: document.querySelector("#forecast-list"),
   clusterReviewCount: document.querySelector("#cluster-review-count"),
   dependentReportCount: document.querySelector("#dependent-report-count"),
@@ -1017,7 +1019,86 @@ function renderReputations(reputations) {
         `${reputation.latest_outcome_reason}`;
       card.append(audit);
     }
+    const inspect = document.createElement("button");
+    inspect.type = "button";
+    inspect.className = "audit-button";
+    inspect.textContent = "Inspect evidence and dimensions";
+    inspect.addEventListener("click", async () => {
+      elements.publisherAudit.textContent = "Loading publisher audit…";
+      try {
+        const audit = await request(
+          `/api/intelligence/publisher-audit?publisher=${encodeURIComponent(reputation.publisher_key)}`
+        );
+        renderPublisherAudit(audit);
+      } catch (error) {
+        elements.publisherAudit.textContent = `Audit unavailable: ${error.message}`;
+      }
+    });
+    card.append(inspect);
     elements.reputationList.append(card);
+  }
+}
+
+function renderUnresolvedEnrichment(items) {
+  elements.unresolvedEnrichmentList.replaceChildren();
+  if (!items.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "No unresolved enrichment records.";
+    elements.unresolvedEnrichmentList.append(empty);
+    return;
+  }
+  for (const item of items.slice(0, 30)) {
+    const row = document.createElement("p");
+    row.className = "document";
+    row.textContent =
+      `${item.status} · ${item.publisher_label} · ${item.title}`;
+    elements.unresolvedEnrichmentList.append(row);
+  }
+}
+
+function renderPublisherAudit(audit) {
+  elements.publisherAudit.replaceChildren();
+  const heading = document.createElement("strong");
+  heading.textContent = `Audit: ${audit.publisher_key}`;
+  elements.publisherAudit.append(heading);
+  for (const assessment of audit.assessments ?? []) {
+    const row = document.createElement("p");
+    const scope = assessment.scope_kind === "global"
+      ? "global" : `${assessment.scope_kind}: ${assessment.scope_value}`;
+    row.textContent =
+      `${scope} · factual ${Math.round(Number(assessment.effective_credibility) * 100)}% ` +
+      `(${assessment.factual_samples} samples) · attribution ` +
+      `${Math.round(Number(assessment.attribution_quality) * 100)}% · revision ` +
+      `${Math.round(Number(assessment.revision_discipline) * 100)}% · independence ` +
+      `${Math.round(Number(assessment.independence_confidence) * 100)}% · timeliness ` +
+      `${Math.round(Number(assessment.timeliness_score) * 100)}% · framing ` +
+      `${Math.round(Number(assessment.framing_signal) * 100)}%`;
+    elements.publisherAudit.append(row);
+  }
+  const summary = document.createElement("small");
+  summary.textContent =
+    `${audit.outcomes?.length ?? 0} recent outcomes · ` +
+    `${audit.reporting_families?.length ?? 0} reporting families · ` +
+    `${audit.history?.length ?? 0} immutable assessment revisions`;
+  elements.publisherAudit.append(summary);
+  for (const family of (audit.reporting_families ?? []).slice(0, 10)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "audit-button";
+    button.textContent =
+      `Reporting family: ${family.document_count} document(s)`;
+    button.addEventListener("click", async () => {
+      const familyAudit = await request(
+        `/api/intelligence/reporting-family?key=${encodeURIComponent(family.reporting_family_key)}`
+      );
+      const details = document.createElement("p");
+      details.textContent = (familyAudit.documents ?? []).map(
+        item => `${item.publisher_label}: ${item.title}`
+      ).join(" · ") || "No retained family members.";
+      button.replaceWith(details);
+    });
+    elements.publisherAudit.append(button);
   }
 }
 
@@ -1098,7 +1179,7 @@ async function refresh() {
     const mapQuery = new URLSearchParams(categoryQuery);
     mapQuery.set("located", "1");
     mapQuery.set("limit", "200");
-    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, enrichment, budget, earlyReports, canonicalEvents, aircraftResponse, fusion] = await Promise.all([
+    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, enrichment, budget, earlyReports, unresolvedEnrichment, canonicalEvents, aircraftResponse, fusion] = await Promise.all([
       request("/api/intelligence/overview"),
       request(`/api/intelligence/documents${category}`),
       request("/api/intelligence/sources"),
@@ -1111,6 +1192,7 @@ async function refresh() {
       request("/api/intelligence/open-source-enrichment"),
       request("/api/intelligence/reasoning-budget"),
       request("/api/intelligence/early-reports?limit=30"),
+      request("/api/intelligence/enrichment-queue?limit=30"),
       request("/api/intelligence/world-events?limit=30"),
       request("/api/intelligence/aircraft?limit=300"),
       request("/api/intelligence/event-fusion")
@@ -1130,6 +1212,7 @@ async function refresh() {
     renderForecasts(forecasts.forecasts ?? [], forecasts.calibration ?? {});
     renderEpistemicHealth(epistemicHealth, enrichment, budget);
     renderEarlyReports(earlyReports.reports ?? []);
+    renderUnresolvedEnrichment(unresolvedEnrichment.items ?? []);
     renderCanonicalEvents(canonicalEvents.events ?? []);
     setConnection(true);
   } catch (error) {

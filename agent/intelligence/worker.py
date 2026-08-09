@@ -51,6 +51,7 @@ from agent.intelligence.world_graph import WorldEventGraphEngine
 from agent.intelligence.event_fusion import EventFusionEngine
 from agent.intelligence.location_inference import DocumentLocationInferenceEngine
 from agent.intelligence.open_source_enrichment import OpenSourceEnrichmentEngine
+from agent.intelligence.media_derivation import PublicMediaDerivationEngine
 from agent.intelligence.publisher_assessment import PublisherAssessmentEngine
 from agent.intelligence.event_assessment import CanonicalEventAssessmentEngine
 from agent.intelligence.source_registry import (
@@ -96,6 +97,7 @@ class IntelligenceWorker:
         location_inference_poll_seconds=300,
         open_source_enrichment_engine=None,
         open_source_enrichment_poll_seconds=300,
+        media_derivation_engine=None,
         geospatial_engine=None,
         environment_layer_engine=None,
         world_graph_engine=None,
@@ -154,6 +156,7 @@ class IntelligenceWorker:
             30, int(open_source_enrichment_poll_seconds)
         )
         self._next_open_source_enrichment_at = 0.0
+        self.media_derivation_engine = media_derivation_engine
         self.geospatial_engine = geospatial_engine
         self.environment_layer_engine = environment_layer_engine
         self.world_graph_engine = world_graph_engine
@@ -313,6 +316,10 @@ class IntelligenceWorker:
                 channels=config.telegram_channels,
                 messages_per_channel=config.telegram_messages_per_channel,
                 deletion_scan_size=config.telegram_deletion_scan_size,
+                media_enabled=config.telegram_media_enabled,
+                media_directory=config.telegram_media_directory,
+                media_max_bytes=config.telegram_media_max_bytes,
+                media_max_per_cycle=config.telegram_media_max_per_cycle,
                 poll_seconds=config.telegram_poll_seconds,
                 timeout=config.request_timeout_seconds,
                 enabled=config.telegram_enabled
@@ -438,6 +445,14 @@ class IntelligenceWorker:
             model_calls_per_cycle=config.open_source_model_calls_per_cycle,
             model_reports_per_call=config.open_source_model_reports_per_call,
         )
+        media_derivation_engine = PublicMediaDerivationEngine(
+            store, media_directory=config.telegram_media_directory,
+            enabled=config.telegram_media_enabled,
+            batch_size=config.telegram_media_max_per_cycle,
+            timeout=config.request_timeout_seconds,
+            whisper_model=config.telegram_media_whisper_model,
+            retention_hours=config.telegram_media_retention_hours,
+        )
         belief_revision = BeliefRevisionEngine(
             store,
             enabled=(
@@ -556,6 +571,7 @@ class IntelligenceWorker:
             open_source_enrichment_poll_seconds=(
                 config.open_source_enrichment_poll_seconds
             ),
+            media_derivation_engine=media_derivation_engine,
             geospatial_engine=geospatial_engine,
             environment_layer_engine=environment_layer_engine,
             world_graph_engine=world_graph_engine,
@@ -617,6 +633,12 @@ class IntelligenceWorker:
         changed = sum(outcome.result.changed for outcome in outcomes)
         if self.aircraft_monitor is not None:
             self.aircraft_monitor.run_if_due(force=force)
+        if self.media_derivation_engine is not None:
+            try:
+                media = self.media_derivation_engine.run_batch()
+                changed += media.completed
+            except Exception as exc:
+                print("Public media derivation failed:", type(exc).__name__)
         if (
             self.open_source_enrichment_engine is not None
             and (force or changed or now >= self._next_open_source_enrichment_at)

@@ -187,6 +187,12 @@ class IntelligenceConfig:
     telegram_poll_seconds: int = 120
     telegram_messages_per_channel: int = 50
     telegram_deletion_scan_size: int = 100
+    telegram_media_enabled: bool = False
+    telegram_media_directory: Path = Path("agent/private/intelligence_media")
+    telegram_media_max_bytes: int = 10_000_000
+    telegram_media_max_per_cycle: int = 3
+    telegram_media_whisper_model: Path | None = None
+    telegram_media_retention_hours: int = 168
     gmail_enabled: bool = False
     gmail_credentials_path: Path = Path("agent/google_gmail_credentials.json")
     gmail_token_path: Path = Path("agent/google_gmail_token.json")
@@ -686,6 +692,27 @@ class IntelligenceConfig:
             ),
             telegram_deletion_scan_size=_env_int(
                 "ENTITY_TELEGRAM_DELETION_SCAN_SIZE", 100, minimum=1
+            ),
+            telegram_media_enabled=_env_bool(
+                "ENTITY_TELEGRAM_MEDIA_ENABLED", False
+            ),
+            telegram_media_directory=Path(os.getenv(
+                "ENTITY_TELEGRAM_MEDIA_DIRECTORY",
+                "agent/private/intelligence_media"
+            )),
+            telegram_media_max_bytes=_env_int(
+                "ENTITY_TELEGRAM_MEDIA_MAX_BYTES", 10_000_000, minimum=1
+            ),
+            telegram_media_max_per_cycle=_env_int(
+                "ENTITY_TELEGRAM_MEDIA_MAX_PER_CYCLE", 3, minimum=1
+            ),
+            telegram_media_whisper_model=(
+                Path(value) if (
+                    value := os.getenv("ENTITY_TELEGRAM_MEDIA_WHISPER_MODEL", "").strip()
+                ) else None
+            ),
+            telegram_media_retention_hours=_env_int(
+                "ENTITY_TELEGRAM_MEDIA_RETENTION_HOURS", 168, minimum=1
             ),
             gmail_enabled=_env_bool("ENTITY_GMAIL_ENABLED", False),
             gmail_credentials_path=Path(os.getenv(
