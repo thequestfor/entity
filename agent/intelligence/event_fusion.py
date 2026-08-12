@@ -10,9 +10,10 @@ from datetime import UTC, datetime
 from agent.intelligence.store import utc_now
 
 
-METHOD = "deterministic-event-fusion-v2"
-FEATURE_VERSION = "event-fusion-features-v2"
-LANE = "world-event-observations-v1"
+METHOD = "deterministic-event-fusion-v3"
+FEATURE_VERSION = "event-fusion-features-v3"
+LANE = "world-event-observations-v3"
+READINESS_SCHEDULER = "event-fusion-comparison-ready-v3"
 EXCLUDED_SOURCE_KINDS = {
     "private_mail", "prediction_market", "weather_forecast",
     "infrastructure_reference",
@@ -43,7 +44,8 @@ class EventFusionEngine:
 
     def __init__(self, store, enabled=True, batch_size=100,
                  auto_link_threshold=0.82, review_threshold=0.65,
-                 max_candidates=100, lookback_days=14):
+                 max_candidates=100, lookback_days=14, clock=None,
+                 comparison_ready_per_cycle=20, recent_per_cycle=20):
         self.store = store
         self.enabled = bool(enabled)
         self.batch_size = max(1, min(500, int(batch_size)))
@@ -53,15 +55,20 @@ class EventFusionEngine:
         ))
         self.max_candidates = max(5, min(500, int(max_candidates)))
         self.lookback_days = max(1, min(90, int(lookback_days)))
+        self.clock = clock or utc_now
+        self.comparison_ready_per_cycle = max(
+            0, min(self.batch_size, int(comparison_ready_per_cycle))
+        )
+        self.recent_per_cycle = max(
+            0, min(self.batch_size, int(recent_per_cycle))
+        )
 
     def run_batch(self):
         if not self.enabled:
             return FusionResult()
-        now = utc_now()
+        now = self.clock()
         with self.store._connect() as connection:
-            cursor = self._state(connection, now)
-            recent_limit = min(20, max(1, self.batch_size // 5)) if self.batch_size > 1 else 0
-            historical_limit = self.batch_size - recent_limit
+            self._state(connection, now)
             selection = """SELECT observations.*,versions.id version_id,
                        COALESCE(json_extract(observations.properties,'$.title'),documents.title) document_title,
                        COALESCE(json_extract(observations.properties,'$.summary'),documents.summary) document_summary,
@@ -87,19 +94,57 @@ class EventFusionEngine:
                        'infrastructure_reference'
                      )"""
             unprocessed = "NOT EXISTS (SELECT 1 FROM world_event_fusion_decisions decisions WHERE decisions.observation_id=observations.id AND decisions.method=?)"
+            ready_limit = self.comparison_ready_per_cycle
+            ready = connection.execute(
+                "WITH eligible AS (" + selection.format(condition=unprocessed + """
+                  AND EXISTS (
+                    SELECT 1 FROM article_content_captures captures
+                    JOIN article_framing_assessments assessments
+                      ON assessments.article_capture_id=captures.id
+                    WHERE captures.document_version_id=observations.document_version_id
+                      AND captures.status='complete'
+                      AND assessments.status='complete'
+                  )""") + """), ranked AS (
+                    SELECT eligible.*,ROW_NUMBER() OVER (
+                      PARTITION BY COALESCE(NULLIF(publisher_key,''),source_id)
+                      ORDER BY captured_at,id
+                    ) publisher_rank FROM eligible
+                  ) SELECT * FROM ranked WHERE publisher_rank<=?
+                    ORDER BY publisher_key,publisher_rank LIMIT ?""",
+                (METHOD, ready_limit,
+                 min(5000, max(ready_limit * 100, ready_limit))),
+            ).fetchall() if ready_limit else []
+            recent_limit = self.recent_per_cycle
             recent = connection.execute(
                 selection.format(condition=unprocessed)
-                + " ORDER BY versions.id DESC LIMIT ?", (METHOD, recent_limit)
+                + " ORDER BY observations.captured_at DESC,observations.id DESC LIMIT ?",
+                (METHOD, recent_limit),
             ).fetchall() if recent_limit else []
-            historical = connection.execute(
-                selection.format(condition="versions.id>? AND " + unprocessed)
-                + " ORDER BY versions.id LIMIT ?", (cursor, METHOD, historical_limit)
+            oldest = connection.execute(
+                selection.format(condition=unprocessed)
+                + " ORDER BY observations.captured_at,observations.id LIMIT ?",
+                (METHOD, self.batch_size),
             ).fetchall()
             rows, seen = [], set()
-            for row in [*recent, *historical]:
-                if row["id"] not in seen:
-                    seen.add(row["id"])
-                    rows.append(dict(row))
+            def add(items, maximum):
+                for raw in items:
+                    if len(rows) >= maximum:
+                        break
+                    if raw["id"] not in seen:
+                        seen.add(raw["id"])
+                        rows.append(dict(raw))
+
+            add(ready, min(self.batch_size, len(ready)))
+            remaining = self.batch_size - len(rows)
+            recent_reserve = min(recent_limit, remaining)
+            add(oldest, self.batch_size - recent_reserve)
+            add(recent, self.batch_size)
+            add(oldest, self.batch_size)
+            if ready:
+                _advance_scheduler_cursor(
+                    connection, READINESS_SCHEDULER,
+                    ready[-1]["publisher_key"] or ready[-1]["source_id"], now,
+                )
 
             linked = created = reviews = versions = 0
             for row in rows:
@@ -108,13 +153,13 @@ class EventFusionEngine:
                 created += outcome[1]
                 reviews += outcome[2]
                 versions += outcome[3]
-            if historical:
+            if rows:
                 connection.execute(
                     """UPDATE world_event_fusion_state SET cursor_version_id=?,
                        processed=processed+?,linked=linked+?,created=created+?,
                        reviews=reviews+?,completed=0,completed_at=NULL,
                        last_error='',updated_at=? WHERE lane=?""",
-                    (historical[-1]["version_id"], len(rows), linked, created,
+                    (0, len(rows), linked, created,
                      reviews, now, LANE),
                 )
             else:
@@ -141,6 +186,14 @@ class EventFusionEngine:
         return 0
 
     def _process(self, connection, observation, now):
+        current_row = connection.execute(
+            """SELECT world_event_id FROM world_event_memberships
+               WHERE observation_id=? AND active=1""",
+            (observation["id"],),
+        ).fetchone()
+        current_event = self._resolve_alias(
+            connection, current_row[0] if current_row else ""
+        )
         predecessor_id, predecessor_event = self._annotate_observation(
             connection, observation
         )
@@ -155,6 +208,11 @@ class EventFusionEngine:
         else:
             candidates = self._candidates(connection, observation)
             scored = [self._score(observation, candidate) for candidate in candidates]
+        if current_event:
+            scored = [
+                item for item in scored
+                if self._resolve_alias(connection, item["event"]["id"]) != current_event
+            ]
         usable = [item for item in scored if not item["vetoes"]]
         best = sorted(
             usable, key=lambda item: (-item["score"], item["event"]["id"])
@@ -164,6 +222,8 @@ class EventFusionEngine:
             outcome, target = "link", best["event"]["id"]
         elif best and best["score"] >= self.review_threshold:
             outcome, target = "review", best["event"]["id"]
+        elif current_event:
+            outcome, target = "retain", current_event
         else:
             outcome, target = "create", self._seed_event(
                 connection, observation, now
@@ -183,7 +243,8 @@ class EventFusionEngine:
                 chosen_decision = decision_id
         if chosen_decision is None:
             chosen_decision = self._decision(
-                connection, observation["id"], "", target, "create", 0,
+                connection, observation["id"],
+                current_event if outcome == "retain" else "", target, outcome, 0,
                 {}, [], observation["captured_at"], now,
             )
 
@@ -199,6 +260,10 @@ class EventFusionEngine:
             )
             return 0, 0, 1, 0
 
+        if outcome == "retain":
+            return 0, 0, 0, 0
+
+        source_event = current_event
         self._membership(
             connection, observation["id"], target, chosen_decision,
             outcome, now,
@@ -209,7 +274,7 @@ class EventFusionEngine:
                    WHERE observation_id=? AND active=1""",
                 (now, predecessor_id),
             )
-        original = self._resolve_alias(
+        original = source_event or self._resolve_alias(
             connection, observation.get("world_event_id") or ""
         )
         if original and original != target:
@@ -219,6 +284,8 @@ class EventFusionEngine:
             ).fetchone()[0]
             if count == 0:
                 self._alias(connection, original, target, "fused-seed", now)
+            else:
+                self._recompute(connection, original, now, "link-source")
         version = self._recompute(connection, target, now, outcome)
         return int(outcome == "link"), int(outcome == "create"), 0, version
 
@@ -509,7 +576,7 @@ class EventFusionEngine:
         resolution = str(resolution).strip().lower()
         if resolution not in {"link", "separate"}:
             raise ValueError("review resolution must be link or separate")
-        now = utc_now()
+        now = self.clock()
         with self.store._connect() as connection:
             review = connection.execute(
                 "SELECT * FROM world_event_fusion_reviews WHERE id=? AND status='pending'",
@@ -560,7 +627,7 @@ class EventFusionEngine:
 
     def reattribute_observation(self, observation_id, target_event_id,
                                 rationale=""):
-        now = utc_now()
+        now = self.clock()
         with self.store._connect() as connection:
             target = self._resolve_alias(connection, target_event_id)
             current = connection.execute(
@@ -585,7 +652,7 @@ class EventFusionEngine:
             return operation_id
 
     def merge_events(self, left_event_id, right_event_id, rationale=""):
-        now = utc_now()
+        now = self.clock()
         with self.store._connect() as connection:
             left = self._resolve_alias(connection, left_event_id)
             right = self._resolve_alias(connection, right_event_id)
@@ -613,7 +680,7 @@ class EventFusionEngine:
         selected = sorted(set(str(value) for value in observation_ids if value))
         if not selected:
             raise ValueError("split requires observations")
-        now = utc_now()
+        now = self.clock()
         with self.store._connect() as connection:
             source = self._resolve_alias(connection, event_id)
             before = self._membership_snapshot(connection, (source,))
@@ -642,7 +709,7 @@ class EventFusionEngine:
             return operation_id, created
 
     def rollback_operation(self, operation_id):
-        now = utc_now()
+        now = self.clock()
         with self.store._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM world_event_operations WHERE id=? AND status='applied'",
@@ -855,3 +922,15 @@ def _distance_km(lat_a, lon_a, lat_b, lon_b):
     delta_lat, delta_lon = lat_b - lat_a, lon_b - lon_a
     value = math.sin(delta_lat / 2) ** 2 + math.cos(lat_a) * math.cos(lat_b) * math.sin(delta_lon / 2) ** 2
     return 6371 * 2 * math.atan2(math.sqrt(value), math.sqrt(max(0, 1 - value)))
+
+
+def _advance_scheduler_cursor(connection, engine, rotation_key, now):
+    connection.execute(
+        """INSERT INTO intelligence_scheduler_state (
+             engine,last_rotation_key,updated_at
+           ) VALUES (?,?,?)
+           ON CONFLICT(engine) DO UPDATE SET
+             last_rotation_key=excluded.last_rotation_key,
+             updated_at=excluded.updated_at""",
+        (str(engine)[:120], str(rotation_key or "")[:300], now),
+    )

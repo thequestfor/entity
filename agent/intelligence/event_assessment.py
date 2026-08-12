@@ -20,10 +20,11 @@ class EventAssessmentResult:
 class CanonicalEventAssessmentEngine:
     """Summarize epistemic state without converting reports into facts."""
 
-    def __init__(self, store, enabled=True, batch_size=100):
+    def __init__(self, store, enabled=True, batch_size=100, clock=None):
         self.store = store
         self.enabled = bool(enabled)
         self.batch_size = max(1, min(500, int(batch_size)))
+        self.clock = clock or utc_now
 
     def run_batch(self):
         if not self.enabled:
@@ -234,7 +235,7 @@ class CanonicalEventAssessmentEngine:
         ).fetchone()
         if previous and previous["input_hash"] == item["input_hash"]:
             return False
-        now = utc_now()
+        now = self.clock()
         encoded = {
             key: self.store._json(item[key]) for key in (
                 "established_facts", "reported_claims", "disputes", "hypotheses",

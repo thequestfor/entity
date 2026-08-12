@@ -1,0 +1,8 @@
+{
+  "schema":"replay-bundle-v1","bundle_key":"source-outage-v1","cutoff":"2026-01-02T02:00:00Z",
+  "sources":[{"id":"replay_a","name":"Replay A","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-a","allowed_hosts":["a.test"],"policy_version":"source-contract-v2"}},{"id":"replay_b","name":"Replay B","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-b","allowed_hosts":["b.test"],"policy_version":"source-contract-v2"}}],
+  "documents":[{"source_id":"replay_a","external_id":"outage-1","title":"Road remains open","url":"https://a.test/outage-1","summary":"One source reported normal traffic.","category":"news","captured_at":"2026-01-02T00:10:00Z","metadata":{"domain":"a.test"}}],
+  "captures":[],"frozen_responses":[],
+  "expected_gaps":[{"source_id":"replay_b","start":"2026-01-02T00:00:00Z","end":"2026-01-02T02:00:00Z","status":"unknown-coverage"}],
+  "provenance":"synthetic-test-only"
+}

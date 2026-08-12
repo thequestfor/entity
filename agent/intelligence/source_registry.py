@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from urllib.parse import urlsplit
 
 
-POLICY_VERSION = "source-contract-v1"
+POLICY_VERSION = "source-contract-v2"
 SOURCE_ID = re.compile(r"^[a-z0-9][a-z0-9_-]{1,99}$")
 ACCESS_CLASSES = {"public", "authenticated", "private"}
 AUTHORITY_CLASSES = {
@@ -36,6 +36,11 @@ class SourcePolicy:
     retention_days: int | None = None
     policy_version: str = POLICY_VERSION
     reviewed_at: str | None = None
+    article_acquisition_mode: str = "feed-only"
+    article_hosts: tuple[str, ...] = ()
+    article_max_bytes: int = 0
+    article_requests_per_cycle: int = 0
+    article_excerpt_display: bool = False
 
     def snapshot(self):
         return asdict(self)
@@ -202,6 +207,7 @@ POLICIES = {
 
 KIND_DEFAULTS = {
     "news": ("public","journalistic","report","publisher"),
+    "traditional_news": ("public","journalistic","report","publisher"),
     "test": ("public","unspecified","report","test-fixture"),
     "public_api": ("public","unspecified","report","unspecified"),
 }

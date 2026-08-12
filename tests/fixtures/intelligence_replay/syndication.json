@@ -1,0 +1,6 @@
+{
+  "schema":"replay-bundle-v1","bundle_key":"syndication-v1","cutoff":"2026-01-04T03:00:00Z",
+  "sources":[{"id":"replay_a","name":"Replay A","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-a","allowed_hosts":["a.test"],"policy_version":"source-contract-v2"}},{"id":"replay_b","name":"Replay B","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-b","allowed_hosts":["b.test"],"policy_version":"source-contract-v2"}}],
+  "documents":[{"source_id":"replay_a","external_id":"wire-1","title":"Agency reports airport delay","url":"https://a.test/wire-1","summary":"A wire report described delays.","category":"news","captured_at":"2026-01-04T00:10:00Z","reporting_family_key":"wire-family-1","metadata":{"domain":"a.test"}},{"source_id":"replay_b","external_id":"wire-copy","title":"Agency reports airport delay","url":"https://b.test/wire-copy","summary":"The same wire report was republished.","category":"news","captured_at":"2026-01-04T00:11:00Z","reporting_family_key":"wire-family-1","metadata":{"domain":"b.test"}}],
+  "captures":[],"frozen_responses":[],"expected_gaps":[],"provenance":"synthetic-test-only"
+}

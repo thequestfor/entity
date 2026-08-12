@@ -79,6 +79,7 @@ class OpenSourceEnrichmentEngine:
                     AND enrichment.method=?
                    WHERE {condition} AND sources.kind IN (?,?)"""
             pending = """(enrichment.id IS NULL OR
+                       enrichment.status='article-derived-pending' OR
                        enrichment.status='media-derived-pending' OR (
                          enrichment.status='needs-model' AND
                          julianday(enrichment.updated_at)<julianday('now','-6 hours')
@@ -102,7 +103,13 @@ class OpenSourceEnrichmentEngine:
         prepared = []
         for document in rows:
             metadata = self.store._json_load(document.get("version_metadata"), {})
-            original = _source_text(document)
+            article_capture = self._article_capture(document["version_id"])
+            if article_capture:
+                document["input_hash"] = article_capture["content_hash"]
+            original = (
+                article_capture["normalized_text"] if article_capture
+                else _source_text(document)
+            )
             media_derivations = self._media_derivations(document["version_id"])
             if media_derivations:
                 original += "\nDerived public-media evidence:\n" + "\n".join(
@@ -130,6 +137,7 @@ class OpenSourceEnrichmentEngine:
                 "quoted": quoted, "actors": actors, "forward_key": forward_key,
                 "forward_label": forward_label, "media_only": media_only,
                 "media_derivations": media_derivations,
+                "article_capture": article_capture,
                 "needs_model": needs_model,
             })
 
@@ -211,6 +219,17 @@ class OpenSourceEnrichmentEngine:
                 (version_id,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def _article_capture(self, version_id):
+        with self.store._connect() as connection:
+            row = connection.execute(
+                """SELECT id,normalized_text,content_hash,content_scope,captured_at
+                   FROM article_content_captures
+                   WHERE document_version_id=? AND status='complete'
+                   ORDER BY captured_at DESC,id DESC LIMIT 1""",
+                (version_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def _state(self, connection, now):
         row = connection.execute(

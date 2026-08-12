@@ -4,6 +4,12 @@ This is the canonical implementation plan for Entity's global intelligence
 system. It is deliberately separate from Entity's identity as a personal
 agent.
 
+The bounded delivery order and the exact scope of the next two implementation
+prompts are maintained in
+[`world-intelligence-execution-roadmap.md`](world-intelligence-execution-roadmap.md).
+That execution roadmap may pull safety and observability foundations forward,
+but it does not change the product or epistemic requirements in this file.
+
 ## Product boundary
 
 - **Entity Core** owns wake word, conversation, memory, calendar, alarms,
@@ -25,7 +31,8 @@ or turn raw intelligence signals directly into physical actions.
 4. [x] Add global weather and infrastructure layers.
 5. [ ] Add maritime activity intelligence. *(Deferred; not required for the current MVP.)*
 6. [x] Fuse observations into evolving world events.
-7. [x] Enrich and correlate open-source reports.
+7. [ ] Enrich and correlate open-source reports. *(Corrective full-text and
+   framing-v2 work is in progress; factual credibility remains active.)*
 8. [ ] Learn bounded regional activity baselines.
 9. [ ] Generate evidence-linked world change signals.
 10. [ ] Add the autonomous predictive world engine.
@@ -516,7 +523,7 @@ Step 6 is complete only after all four slices pass this matrix and a replay set
 containing duplicates, syndication, corrections, close-but-distinct incidents,
 ambiguous candidates, merges, and splits remains deterministic.
 
-### 7. Enrich and correlate open-source reports -- delivered
+### 7. Enrich and correlate open-source reports -- corrective work in progress
 
 **Outcome:** turn sparse text-first Telegram and similar public reports into
 grounded, channel-aware evidence that can join the same events as news and
@@ -590,6 +597,20 @@ output for confirmation.
   reporting families, unresolved enrichment queues, and media derivation status.
   The engineering dashboard provides a publisher audit drill-down. The polished
   synchronized feed remains step 12.
+- Corrective article analysis now preserves full content supplied in feeds and
+  supports explicit, per-source publisher-page capture. The fetcher enforces
+  HTTPS, publisher-host allowlists, redirect and public-address validation,
+  response and cycle bounds, immutable hashes, extraction audit records, and
+  retention metadata; page capture remains off for every default news feed.
+- Semantic framing v2 reads the captured article rather than only its headline.
+  Its prompt is publisher-blind, every observation requires a literal text span,
+  unsupported model evidence is rejected, and the resulting framing vectors are
+  stored separately from factual reliability. Event comparisons require at
+  least two publishers. Selection-framing remains unknown when source health or
+  acquisition coverage is insufficient.
+- Article and comparison work have reserved budget lanes, daily token ceilings,
+  and an input-hash result cache. The audit API and dashboard expose capture
+  scope, literal framing evidence, shadow status, budget denials, and cache hits.
 
 **Acceptance:** English and non-English fixtures join the same event when their
 grounded facts agree; ambiguous locations do not receive coordinates; forwarded
@@ -599,10 +620,12 @@ facts without being treated as neutral; high-reliability sources can be
 contradicted; all learned adjustments reconstruct from independent outcomes;
 historical re-correlation is resumable, reversible, cutoff-safe, and idempotent.
 
-Step 7 is complete: translation, attribution, media derivation, cross-source
-re-correlation, channel-profile auditability, ambiguous-location handling,
-copied-family independence, contradiction symmetry, cutoff safety, and
-idempotence are covered by the repository's fixture-backed acceptance suite.
+The original factual portion of step 7 is complete: translation, attribution,
+media derivation, cross-source re-correlation, channel-profile auditability,
+ambiguous-location handling, copied-family independence, contradiction symmetry,
+cutoff safety, and idempotence are fixture-backed. Corrective full-text and
+semantic-framing features remain in shadow until replay, symmetry, outage, and
+multi-publisher acceptance gates pass; they cannot change factual credibility.
 
 ### 8. Learn bounded regional activity baselines
 

@@ -1,0 +1,9 @@
+{
+  "schema":"replay-bundle-v1","bundle_key":"correction-v1","cutoff":"2026-01-03T03:00:00Z",
+  "sources":[{"id":"replay_a","name":"Replay A","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-a","allowed_hosts":["a.test"],"policy_version":"source-contract-v2"}}],
+  "documents":[
+    {"source_id":"replay_a","external_id":"correction-1","version":1,"title":"Bridge reported closed","url":"https://a.test/correction","summary":"Initial report said the bridge closed.","category":"news","captured_at":"2026-01-03T00:10:00Z","metadata":{"domain":"a.test"}},
+    {"source_id":"replay_a","external_id":"correction-1","version":2,"title":"Correction: bridge remains open","url":"https://a.test/correction","summary":"The outlet corrected its initial report.","category":"news","captured_at":"2026-01-03T01:10:00Z","metadata":{"domain":"a.test","correction":true}}
+  ],
+  "captures":[],"frozen_responses":[],"expected_gaps":[],"provenance":"synthetic-test-only"
+}

@@ -325,6 +325,9 @@ aside { display: grid; align-content: start; gap: 20px; }
 .source-card .health { grid-row: 1 / span 2; grid-column: 2; align-self: center; }
 .health { width: 8px; height: 8px; border-radius: 50%; background: #55d7a7; }
 .health.error { background: #f06c55; box-shadow: 0 0 10px rgba(240, 108, 85, 0.5); }
+.source-card.workload-disk-soft-limit,
+.source-card.workload-unknown { border-color: #d6a94c; }
+.source-card.workload-disk-hard-limit { border-color: #f06c55; }
 .notice { padding: 20px; color: #8fa8a6; font-size: 13px; line-height: 1.6; }
 .empty { padding: 30px 20px; color: #748d8b; text-align: center; }
 

@@ -50,9 +50,12 @@ class _ClosingConnection(sqlite3.Connection):
 
 
 class IntelligenceStore:
-    def __init__(self, path=DEFAULT_DB, migrations=MIGRATIONS):
+    def __init__(self, path=DEFAULT_DB, migrations=MIGRATIONS, clock=None,
+                 document_id_factory=None):
         self.path = Path(path)
         self.migrations = Path(migrations)
+        self.clock = clock or utc_now
+        self.document_id_factory = document_id_factory
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._migrate()
 
@@ -184,8 +187,10 @@ class IntelligenceStore:
                     license_name,license_url,attribution,usage_scope,
                     credentials_required,geographic_coverage,expected_latency,
                     independence_family,allowed_hosts,caveats,retention_days,
-                    policy_version,reviewed_at,created_at,updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    policy_version,reviewed_at,created_at,updated_at,
+                    article_acquisition_mode,article_hosts,article_max_bytes,
+                    article_requests_per_cycle,article_excerpt_display)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(source_id) DO UPDATE SET
                    access_class=excluded.access_class,
                    authority_class=excluded.authority_class,
@@ -200,7 +205,12 @@ class IntelligenceStore:
                    allowed_hosts=excluded.allowed_hosts,caveats=excluded.caveats,
                    retention_days=excluded.retention_days,
                    policy_version=excluded.policy_version,
-                   reviewed_at=excluded.reviewed_at,updated_at=excluded.updated_at""",
+                   reviewed_at=excluded.reviewed_at,updated_at=excluded.updated_at,
+                   article_acquisition_mode=excluded.article_acquisition_mode,
+                   article_hosts=excluded.article_hosts,
+                   article_max_bytes=excluded.article_max_bytes,
+                   article_requests_per_cycle=excluded.article_requests_per_cycle,
+                   article_excerpt_display=excluded.article_excerpt_display""",
                 (source_id,snapshot["access_class"],snapshot["authority_class"],
                  snapshot["evidence_role"],snapshot["license_name"],
                  snapshot["license_url"],snapshot["attribution"],
@@ -209,6 +219,11 @@ class IntelligenceStore:
                  snapshot["independence_family"],self._json(snapshot["allowed_hosts"]),
                  self._json(snapshot["caveats"]),snapshot["retention_days"],
                  snapshot["policy_version"],snapshot["reviewed_at"],now,now)
+                 + (snapshot["article_acquisition_mode"],
+                    self._json(snapshot["article_hosts"]),
+                    int(snapshot["article_max_bytes"]),
+                    int(snapshot["article_requests_per_cycle"]),
+                    int(snapshot["article_excerpt_display"]))
             )
             connection.execute(
                 """INSERT INTO source_contract_audits
@@ -230,8 +245,10 @@ class IntelligenceStore:
         for row in rows:
             item = dict(row)
             item["allowed_hosts"] = self._json_load(item.get("allowed_hosts"), [])
+            item["article_hosts"] = self._json_load(item.get("article_hosts"), [])
             item["caveats"] = self._json_load(item.get("caveats"), [])
             item["credentials_required"] = bool(item["credentials_required"])
+            item["article_excerpt_display"] = bool(item["article_excerpt_display"])
             output.append(item)
         return output
 
@@ -401,6 +418,15 @@ class IntelligenceStore:
 
         return result
 
+    def ingest_replay_item(self, source_id, item, captured_at):
+        """Import one ordered replay item without touching collector state."""
+        captured_at = normalize_timestamp(captured_at)
+        if not captured_at:
+            raise ValueError("Replay evidence requires a capture timestamp.")
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            return self._ingest_item(connection, source_id, item, captured_at)
+
     def _ingest_item(self, connection, source_id, item, now):
         if not isinstance(item, SourceItem):
             raise TypeError("Intelligence items must be SourceItem instances.")
@@ -469,7 +495,10 @@ class IntelligenceStore:
             )
             outcome = "updated"
         else:
-            document_id = str(uuid4())
+            document_id = (
+                str(self.document_id_factory(source_id, canonical_key, item))
+                if self.document_id_factory is not None else str(uuid4())
+            )
             version = 1
             connection.execute(
                 """
@@ -920,13 +949,916 @@ class IntelligenceStore:
                    WHERE julianday(started_at)>=julianday('now','-24 hours')
                    GROUP BY lane,status ORDER BY lane,status"""
             ).fetchall()
+            cache = connection.execute(
+                """SELECT COUNT(*) entries,COALESCE(SUM(hit_count),0) hits,
+                          MAX(last_used_at) latest_hit_at
+                   FROM intelligence_model_result_cache"""
+            ).fetchone()
         return {
             "policies": [dict(row) for row in policies],
             "usage": [dict(row) for row in usage],
             "lane_usage": [dict(row) for row in lanes],
             "attempts_24h": [dict(row) for row in attempts],
+            "result_cache": dict(cache),
             "next_hourly_reset_at": next_hour,
             "next_daily_reset_at": next_day,
+        }
+
+    def scheduler_cursor(self, engine):
+        with self._connect() as connection:
+            row = connection.execute(
+                """SELECT last_rotation_key FROM intelligence_scheduler_state
+                   WHERE engine=?""",
+                (str(engine)[:120],),
+            ).fetchone()
+        return str(row[0] or "") if row else ""
+
+    def advance_scheduler_cursor(self, engine, rotation_key):
+        engine = str(engine)[:120]
+        rotation_key = str(rotation_key or "")[:300]
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO intelligence_scheduler_state (
+                     engine,last_rotation_key,updated_at
+                   ) VALUES (?,?,?)
+                   ON CONFLICT(engine) DO UPDATE SET
+                     last_rotation_key=excluded.last_rotation_key,
+                     updated_at=excluded.updated_at""",
+                (engine, rotation_key, now),
+            )
+
+    def configure_workload_limits(self, engine, max_active_per_key,
+                                  max_active_global,
+                                  max_fresh_active_per_key=2,
+                                  max_fresh_active_global=10):
+        now = utc_now()
+        with self._connect() as connection:
+            connection.execute(
+                """INSERT INTO intelligence_workload_limits (
+                     engine,max_active_per_key,max_active_global,
+                     max_fresh_active_per_key,max_fresh_active_global,updated_at
+                   ) VALUES (?,?,?,?,?,?)
+                   ON CONFLICT(engine) DO UPDATE SET
+                     max_active_per_key=excluded.max_active_per_key,
+                     max_active_global=excluded.max_active_global,
+                     max_fresh_active_per_key=excluded.max_fresh_active_per_key,
+                     max_fresh_active_global=excluded.max_fresh_active_global,
+                     updated_at=excluded.updated_at""",
+                (
+                    str(engine)[:120], max(1, int(max_active_per_key)),
+                    max(1, int(max_active_global)),
+                    max(1, int(max_fresh_active_per_key)),
+                    max(1, int(max_fresh_active_global)), now,
+                ),
+            )
+
+    def article_analysis_overview(self, limit=100):
+        limit = max(1, min(500, int(limit)))
+        with self._connect() as connection:
+            tasks = connection.execute(
+                """SELECT status,COUNT(*) count FROM article_acquisition_tasks
+                   GROUP BY status ORDER BY status"""
+            ).fetchall()
+            active_publishers = connection.execute(
+                """SELECT COALESCE(NULLIF(documents.publisher_key,''),
+                                   tasks.source_id) publisher_key,
+                          COUNT(*) active_tasks,MIN(tasks.created_at) oldest_active_at
+                          ,SUM(tasks.work_class!='fresh') backfill_active_tasks
+                          ,SUM(tasks.work_class='fresh') fresh_active_tasks
+                   FROM article_acquisition_tasks tasks
+                   JOIN documents ON documents.id=tasks.document_id
+                   WHERE tasks.status IN ('pending','retry','running')
+                   GROUP BY COALESCE(NULLIF(documents.publisher_key,''),
+                                     tasks.source_id)
+                   ORDER BY publisher_key"""
+            ).fetchall()
+            limits = connection.execute(
+                """SELECT max_active_per_key,max_active_global,
+                          max_fresh_active_per_key,max_fresh_active_global
+                   FROM intelligence_workload_limits
+                   WHERE engine='article-acquisition'"""
+            ).fetchone()
+            captures = connection.execute(
+                """SELECT content_scope,COUNT(*) count,
+                          COALESCE(SUM(word_count),0) words
+                   FROM article_content_captures WHERE status='complete'
+                   GROUP BY content_scope ORDER BY content_scope"""
+            ).fetchall()
+            framing = connection.execute(
+                """SELECT status,COUNT(*) count,
+                          COALESCE(SUM(evidence_count),0) evidence_count
+                   FROM article_framing_assessments
+                   GROUP BY status ORDER BY status"""
+            ).fetchall()
+            recent = connection.execute(
+                """SELECT capture.id,capture.document_id,capture.content_scope,
+                          capture.word_count,capture.status,capture.extractor,
+                          capture.captured_at,documents.publisher_key,
+                          documents.publisher_label,documents.title,documents.url,
+                          CASE WHEN policies.article_excerpt_display=1
+                               THEN substr(capture.normalized_text,1,500)
+                               ELSE '' END excerpt
+                   FROM article_content_captures capture
+                   JOIN documents ON documents.id=capture.document_id
+                   JOIN source_policies policies ON policies.source_id=capture.source_id
+                   ORDER BY capture.captured_at DESC,capture.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        publisher_rows = [dict(row) for row in active_publishers]
+        active_total = sum(int(row["active_tasks"]) for row in publisher_rows)
+        backfill_active_total = sum(
+            int(row["backfill_active_tasks"] or 0) for row in publisher_rows
+        )
+        per_key_limit = int(limits[0]) if limits else 0
+        global_limit = int(limits[1]) if limits else 0
+        fresh_per_key_limit = int(limits[2]) if limits else 0
+        fresh_global_limit = int(limits[3]) if limits else 0
+        fresh_active_total = sum(
+            int(row["fresh_active_tasks"] or 0) for row in publisher_rows
+        )
+        above_limit = bool(
+            (global_limit and backfill_active_total > global_limit)
+            or any(
+                per_key_limit
+                and int(row["backfill_active_tasks"] or 0) > per_key_limit
+                for row in publisher_rows
+            )
+        )
+        at_limit = bool(
+            (global_limit and backfill_active_total >= global_limit)
+            or any(
+                per_key_limit
+                and int(row["backfill_active_tasks"] or 0) >= per_key_limit
+                for row in publisher_rows
+            )
+        )
+        for row in publisher_rows:
+            row["max_active_tasks"] = per_key_limit
+            row["max_fresh_active_tasks"] = fresh_per_key_limit
+            row["ceiling_status"] = (
+                "draining" if per_key_limit
+                and row["backfill_active_tasks"] > per_key_limit
+                else "backpressure-active"
+                if per_key_limit
+                and row["backfill_active_tasks"] >= per_key_limit
+                else "healthy"
+            )
+            row["fresh_ceiling_status"] = (
+                "backpressure-active"
+                if fresh_per_key_limit
+                and row["fresh_active_tasks"] >= fresh_per_key_limit
+                else "healthy"
+            )
+        readiness = self.comparison_readiness(window_minutes=60, limit=25)
+        return {
+            "tasks": [dict(row) for row in tasks],
+            "captures": [dict(row) for row in captures],
+            "framing": [dict(row) for row in framing],
+            "recent": [dict(row) for row in recent],
+            "queue_health": {
+                "status": (
+                    "draining" if above_limit else
+                    "backpressure-active" if at_limit else "healthy"
+                ),
+                "active_tasks": active_total,
+                "backfill_active_tasks": backfill_active_total,
+                "fresh_active_tasks": fresh_active_total,
+                "max_active_per_publisher": per_key_limit,
+                "max_active_global": global_limit,
+                "max_fresh_active_per_publisher": fresh_per_key_limit,
+                "max_fresh_active_global": fresh_global_limit,
+                "publishers": publisher_rows,
+            },
+            "comparison_readiness": {
+                "eligible_events": readiness["eligible_events"],
+                "comparisons": readiness["comparisons"],
+                "current_gate": readiness["current_gate"],
+                "publishers": readiness["publishers"],
+                "fusion_by_publisher": readiness["fusion_by_publisher"],
+                "event_ready": readiness["event_ready"],
+            },
+        }
+
+    def workload_queue_metrics(self, window_minutes=60, now=None):
+        window_minutes = max(15, min(1440, int(window_minutes)))
+        now = now or datetime.now(UTC)
+        cutoff = (now - timedelta(minutes=window_minutes)).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+        with self._connect() as connection:
+            limits = connection.execute(
+                """SELECT max_active_per_key,max_active_global,
+                          max_fresh_active_per_key,max_fresh_active_global
+                   FROM intelligence_workload_limits
+                   WHERE engine='article-acquisition'"""
+            ).fetchone()
+            rows = connection.execute(
+                """SELECT COALESCE(NULLIF(documents.publisher_key,''),
+                                   tasks.source_id) publisher_key,
+                          SUM(tasks.work_class!='fresh') backfill_active,
+                          SUM(tasks.work_class='fresh') fresh_active
+                   FROM article_acquisition_tasks tasks
+                   JOIN documents ON documents.id=tasks.document_id
+                   WHERE tasks.status IN ('pending','retry','running')
+                   GROUP BY COALESCE(NULLIF(documents.publisher_key,''),
+                                     tasks.source_id)"""
+            ).fetchall()
+            recent_completions = connection.execute(
+                """SELECT COUNT(*) FROM article_acquisition_tasks
+                   WHERE status='complete' AND updated_at>=?""", (cutoff,)
+            ).fetchone()[0]
+        per_key, global_limit, fresh_per_key, fresh_global = (
+            [int(value) for value in limits] if limits else (0, 0, 0, 0)
+        )
+        publishers = [dict(row) for row in rows]
+        backfill = sum(int(row["backfill_active"] or 0) for row in publishers)
+        fresh = sum(int(row["fresh_active"] or 0) for row in publishers)
+        over = bool(
+            (global_limit and backfill > global_limit)
+            or any(per_key and int(row["backfill_active"] or 0) > per_key
+                   for row in publishers)
+        )
+        at = bool(
+            over or (global_limit and backfill >= global_limit)
+            or any(per_key and int(row["backfill_active"] or 0) >= per_key
+                   for row in publishers)
+        )
+        return {
+            "backfill_active": backfill, "fresh_active": fresh,
+            "active_total": backfill + fresh,
+            "limits_known": limits is not None,
+            "max_active_per_publisher": per_key,
+            "max_active_global": global_limit,
+            "max_fresh_active_per_publisher": fresh_per_key,
+            "max_fresh_active_global": fresh_global,
+            "at_ceiling": at, "over_ceiling": over,
+            "recent_completions": int(recent_completions),
+        }
+
+    def record_workload_state(self, engine, status, reason, metrics,
+                              policy_version, checked_at=None):
+        checked_at = checked_at or utc_now()
+        engine = str(engine)[:120]
+        status = str(status)[:80]
+        reason = str(reason)[:200]
+        policy_version = str(policy_version)[:120]
+        encoded = json.dumps(metrics, separators=(",", ":"), sort_keys=True)
+        with self._connect() as connection:
+            previous = connection.execute(
+                "SELECT * FROM intelligence_workload_state WHERE engine=?",
+                (engine,),
+            ).fetchone()
+            changed = previous is None or (
+                previous["status"] != status or previous["reason"] != reason
+            )
+            first_entered = (
+                checked_at if changed else previous["first_entered_at"]
+            )
+            connection.execute(
+                """INSERT INTO intelligence_workload_state (
+                     engine,status,reason,metrics,policy_version,first_entered_at,
+                     last_checked_at,updated_at
+                   ) VALUES (?,?,?,?,?,?,?,?)
+                   ON CONFLICT(engine) DO UPDATE SET
+                     status=excluded.status,reason=excluded.reason,
+                     metrics=excluded.metrics,policy_version=excluded.policy_version,
+                     first_entered_at=excluded.first_entered_at,
+                     last_checked_at=excluded.last_checked_at,
+                     updated_at=excluded.updated_at""",
+                (engine, status, reason, encoded, policy_version, first_entered,
+                 checked_at, checked_at),
+            )
+            if changed:
+                connection.execute(
+                    """INSERT INTO intelligence_workload_transitions (
+                         engine,previous_status,new_status,reason,metrics,
+                         policy_version,transitioned_at
+                       ) VALUES (?,?,?,?,?,?,?)""",
+                    (engine, previous["status"] if previous else "", status,
+                     reason, encoded, policy_version, checked_at),
+                )
+        return changed
+
+    def workload_health(self, window_minutes=60, transition_limit=20):
+        window_minutes = max(15, min(1440, int(window_minutes)))
+        transition_limit = max(1, min(100, int(transition_limit)))
+        now = datetime.now(UTC)
+        cutoff = (now - timedelta(minutes=window_minutes)).isoformat(
+            timespec="seconds"
+        ).replace("+00:00", "Z")
+        queue = self.workload_queue_metrics(window_minutes, now=now)
+        with self._connect() as connection:
+            state = connection.execute(
+                "SELECT * FROM intelligence_workload_state WHERE engine=?",
+                ("article-acquisition",),
+            ).fetchone()
+            grouped = connection.execute(
+                """SELECT tasks.work_class,tasks.status,
+                          COALESCE(NULLIF(documents.publisher_key,''),
+                                   tasks.source_id) publisher_key,
+                          COUNT(*) count
+                   FROM article_acquisition_tasks tasks
+                   JOIN documents ON documents.id=tasks.document_id
+                   WHERE tasks.status IN ('pending','retry','running')
+                   GROUP BY tasks.work_class,tasks.status,
+                     COALESCE(NULLIF(documents.publisher_key,''),tasks.source_id)
+                   ORDER BY publisher_key,tasks.work_class,tasks.status"""
+            ).fetchall()
+            ages = connection.execute(
+                """SELECT created_at FROM article_acquisition_tasks
+                   WHERE status IN ('pending','retry','running')
+                   ORDER BY created_at LIMIT 2000"""
+            ).fetchall()
+            recent = connection.execute(
+                """SELECT
+                   (SELECT COUNT(*) FROM article_acquisition_tasks
+                    WHERE created_at>=?) enqueued,
+                   (SELECT COUNT(*) FROM article_acquisition_tasks
+                    WHERE status='complete' AND updated_at>=?) completed,
+                   (SELECT COUNT(*) FROM article_content_captures
+                    WHERE captured_at>=?) captured,
+                   (SELECT COUNT(*) FROM article_framing_assessments
+                    WHERE updated_at>=?) assessed,
+                   (SELECT COUNT(*) FROM article_acquisition_tasks
+                    WHERE status='retry' AND updated_at>=?) retries,
+                   (SELECT COUNT(*) FROM article_acquisition_tasks
+                    WHERE status='blocked' AND updated_at>=?) blocked,
+                   (SELECT COUNT(*) FROM article_acquisition_tasks
+                    WHERE status='running' AND lease_expires_at<=?) expired_leases""",
+                (cutoff, cutoff, cutoff, cutoff, cutoff, cutoff, utc_now()),
+            ).fetchone()
+            publishers = connection.execute(
+                """SELECT COALESCE(NULLIF(documents.publisher_key,''),
+                                   tasks.source_id) publisher_key,
+                          SUM(tasks.status IN ('pending','retry','running')) active,
+                          SUM(tasks.status='complete' AND tasks.updated_at>=?) completed
+                   FROM article_acquisition_tasks tasks
+                   JOIN documents ON documents.id=tasks.document_id
+                   GROUP BY COALESCE(NULLIF(documents.publisher_key,''),
+                                     tasks.source_id)
+                   ORDER BY publisher_key""", (cutoff,)
+            ).fetchall()
+            latency_rows = connection.execute(
+                """SELECT documents.retrieved_at,captures.captured_at,
+                          assessments.updated_at assessed_at
+                   FROM article_acquisition_tasks tasks
+                   JOIN documents ON documents.id=tasks.document_id
+                   LEFT JOIN article_content_captures captures
+                     ON captures.document_version_id=tasks.document_version_id
+                   LEFT JOIN article_framing_assessments assessments
+                     ON assessments.article_capture_id=captures.id
+                   WHERE tasks.work_class='fresh'
+                   ORDER BY tasks.updated_at DESC,tasks.id DESC LIMIT 500"""
+            ).fetchall()
+            transitions = connection.execute(
+                """SELECT previous_status,new_status,reason,policy_version,
+                          transitioned_at
+                   FROM intelligence_workload_transitions WHERE engine=?
+                   ORDER BY transitioned_at DESC,id DESC LIMIT ?""",
+                ("article-acquisition", transition_limit),
+            ).fetchall()
+        state_dict = dict(state) if state else {
+            "engine": "article-acquisition", "status": "unknown",
+            "reason": "not-yet-checked", "policy_version": "",
+            "first_entered_at": None, "last_checked_at": None,
+            "updated_at": None, "metrics": "{}",
+        }
+        persisted = self._json_load(state_dict.pop("metrics", "{}"), {})
+        age_seconds = sorted(
+            max(0.0, (now - _parse_utc(row["created_at"])).total_seconds())
+            for row in ages if _parse_utc(row["created_at"]) is not None
+        )
+        publisher_metrics = []
+        hours = window_minutes / 60
+        for row in publishers:
+            item = dict(row)
+            rate = int(item["completed"] or 0) / hours
+            item["completion_rate_per_hour"] = round(rate, 3)
+            item["drain_estimate_hours"] = (
+                round(int(item["active"] or 0) / rate, 2) if rate > 0 else None
+            )
+            publisher_metrics.append(item)
+        latency = {"retrieval_to_capture_seconds": [],
+                   "capture_to_assessment_seconds": [],
+                   "end_to_end_seconds": []}
+        for row in latency_rows:
+            retrieved = _parse_utc(row["retrieved_at"])
+            captured = _parse_utc(row["captured_at"])
+            assessed = _parse_utc(row["assessed_at"])
+            if retrieved and captured:
+                latency["retrieval_to_capture_seconds"].append(
+                    max(0, (captured - retrieved).total_seconds())
+                )
+            if captured and assessed:
+                latency["capture_to_assessment_seconds"].append(
+                    max(0, (assessed - captured).total_seconds())
+                )
+            if retrieved and assessed:
+                latency["end_to_end_seconds"].append(
+                    max(0, (assessed - retrieved).total_seconds())
+                )
+        return {
+            "state": state_dict,
+            "storage": persisted.get("storage", {}),
+            "queue": {**queue, "by_publisher_class_status": [
+                dict(row) for row in grouped
+            ], "oldest_age_seconds": age_seconds[-1] if age_seconds else None,
+                "median_age_seconds": _percentile(age_seconds, 50)},
+            "recent": {**dict(recent), "window_minutes": window_minutes},
+            "publishers": publisher_metrics,
+            "fresh_latency": {
+                key: {"sample_count": len(values),
+                      "p50": _percentile(values, 50),
+                      "p95": _percentile(values, 95)}
+                for key, values in latency.items()
+            },
+            "transitions": [dict(row) for row in transitions],
+            "sample_limit": 2000,
+        }
+
+    def publisher_framing_audit(self, publisher_key, limit=100):
+        publisher_key = str(publisher_key or "")[:300]
+        limit = max(1, min(500, int(limit)))
+        with self._connect() as connection:
+            assessments = connection.execute(
+                """SELECT assessment.*,capture.document_id,capture.captured_at,
+                          documents.title,documents.url
+                   FROM article_framing_assessments assessment
+                   JOIN article_content_captures capture
+                     ON capture.id=assessment.article_capture_id
+                   JOIN documents ON documents.id=capture.document_id
+                   WHERE assessment.publisher_key=?
+                   ORDER BY assessment.updated_at DESC LIMIT ?""",
+                (publisher_key, limit),
+            ).fetchall()
+            observations = connection.execute(
+                """SELECT observation.*,documents.title,documents.url
+                   FROM article_framing_observations observation
+                   JOIN documents ON documents.id=observation.document_id
+                   WHERE observation.publisher_key=?
+                   ORDER BY observation.created_at DESC,observation.id DESC LIMIT ?""",
+                (publisher_key, limit),
+            ).fetchall()
+            coverage = connection.execute(
+                """SELECT * FROM publisher_coverage_windows
+                   WHERE publisher_key=? ORDER BY window_end DESC LIMIT ?""",
+                (publisher_key, limit),
+            ).fetchall()
+        return {
+            "publisher_key": publisher_key,
+            "mode": "shadow",
+            "assessments": [
+                {**dict(row), "dimension_scores": self._json_load(
+                    row["dimension_scores"], {}
+                )} for row in assessments
+            ],
+            "observations": [dict(row) for row in observations],
+            "coverage": [dict(row) for row in coverage],
+        }
+
+    def event_framing_comparison_overview(self, limit=100):
+        limit = max(1, min(500, int(limit)))
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT comparison.*,events.title AS canonical_title,
+                          events.updated_at event_updated_at
+                   FROM event_publisher_comparisons comparison
+                   JOIN world_events events ON events.id=comparison.world_event_id
+                   ORDER BY comparison.created_at DESC,comparison.id DESC LIMIT ?""",
+                (limit,),
+            ).fetchall()
+        return {"comparisons": [
+            {
+                **dict(row),
+                "publisher_keys": self._json_load(row["publisher_keys"], []),
+                "shared_claims": self._json_load(row["shared_claims"], []),
+                "divergent_claims": self._json_load(row["divergent_claims"], []),
+                "framing_dimensions": self._json_load(
+                    row["framing_dimensions"], {}
+                ),
+            } for row in rows
+        ]}
+
+    def comparison_readiness(self, window_minutes=60, limit=100):
+        """Bounded engineering audit for the assessed-evidence comparison path."""
+        window_minutes = max(15, min(1440, int(window_minutes)))
+        limit = max(1, min(500, int(limit)))
+        fusion_method = "deterministic-event-fusion-v3"
+        comparison_method = "event-framing-comparison-v2"
+        with self._connect() as connection:
+            publishers = connection.execute(
+                """SELECT assessment.publisher_key,
+                          COUNT(*) complete_assessments,
+                          COUNT(DISTINCT capture.document_id) assessed_documents,
+                          COUNT(DISTINCT CASE WHEN observation.id IS NULL
+                            THEN capture.document_id END) awaiting_projection,
+                          MIN(CASE WHEN observation.id IS NULL
+                            THEN capture.captured_at END) oldest_projection_at
+                   FROM article_framing_assessments assessment
+                   JOIN article_content_captures capture
+                     ON capture.id=assessment.article_capture_id
+                    AND capture.status='complete'
+                   LEFT JOIN world_event_observations observation
+                     ON observation.document_version_id=capture.document_version_id
+                   WHERE assessment.status='complete'
+                   GROUP BY assessment.publisher_key
+                   ORDER BY assessment.publisher_key LIMIT ?""", (limit,)
+            ).fetchall()
+            fusion = connection.execute(
+                """SELECT documents.publisher_key,
+                          COUNT(*) assessed_observations,
+                          SUM(NOT EXISTS (
+                            SELECT 1 FROM world_event_fusion_decisions decision
+                            WHERE decision.observation_id=observation.id
+                              AND decision.method=?)) awaiting_fusion,
+                          MIN(CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM world_event_fusion_decisions decision
+                            WHERE decision.observation_id=observation.id
+                              AND decision.method=?)
+                            THEN observation.captured_at END) oldest_fusion_at
+                   FROM world_event_observations observation
+                   JOIN documents ON documents.id=observation.document_id
+                   WHERE EXISTS (
+                     SELECT 1 FROM article_content_captures capture
+                     JOIN article_framing_assessments assessment
+                       ON assessment.article_capture_id=capture.id
+                     WHERE capture.document_version_id=observation.document_version_id
+                       AND capture.status='complete'
+                       AND assessment.status='complete')
+                   GROUP BY documents.publisher_key
+                   ORDER BY documents.publisher_key LIMIT ?""",
+                (fusion_method, fusion_method, limit),
+            ).fetchall()
+            outcomes = connection.execute(
+                """SELECT decision.outcome,COUNT(*) count
+                   FROM world_event_fusion_decisions decision
+                   WHERE decision.method=?
+                   GROUP BY decision.outcome ORDER BY decision.outcome""",
+                (fusion_method,),
+            ).fetchall()
+            event_buckets = connection.execute(
+                """WITH counts AS (
+                     SELECT event.id,COUNT(DISTINCT assessment.publisher_key) publishers
+                     FROM world_events event
+                     LEFT JOIN world_event_memberships membership
+                       ON membership.world_event_id=event.id AND membership.active=1
+                     LEFT JOIN world_event_observations observation
+                       ON observation.id=membership.observation_id
+                     LEFT JOIN article_content_captures capture
+                       ON capture.document_version_id=observation.document_version_id
+                      AND capture.status='complete'
+                     LEFT JOIN article_framing_assessments assessment
+                       ON assessment.article_capture_id=capture.id
+                      AND assessment.status='complete'
+                     WHERE event.status='active' GROUP BY event.id
+                   ) SELECT CASE WHEN publishers=0 THEN 'zero'
+                                 WHEN publishers=1 THEN 'one' ELSE 'multiple' END bucket,
+                            COUNT(*) count FROM counts GROUP BY bucket"""
+            ).fetchall()
+            gates = connection.execute(
+                """WITH stats AS (
+                     SELECT event.id,
+                       COUNT(DISTINCT documents.publisher_key) member_publishers,
+                       COUNT(DISTINCT CASE WHEN capture.status='complete'
+                         THEN documents.publisher_key END) captured_publishers,
+                       COUNT(DISTINCT CASE WHEN assessment.status='complete'
+                         THEN documents.publisher_key END) assessed_publishers,
+                       COUNT(DISTINCT CASE WHEN assessment.status='complete'
+                           AND COALESCE(sources.last_error,'')=''
+                         THEN documents.publisher_key END) healthy_publishers,
+                       COUNT(DISTINCT CASE WHEN assessment.status='complete'
+                           AND COALESCE(sources.last_error,'')=''
+                         THEN COALESCE(NULLIF(documents.reporting_family_key,''),
+                           NULLIF(documents.publisher_key,''),documents.source_id)
+                         END) independent_families
+                     FROM world_events event
+                     JOIN world_event_memberships membership
+                       ON membership.world_event_id=event.id AND membership.active=1
+                     JOIN world_event_observations observation
+                       ON observation.id=membership.observation_id
+                      AND observation.status='active'
+                     JOIN documents ON documents.id=observation.document_id
+                     JOIN sources ON sources.id=observation.source_id
+                     LEFT JOIN article_content_captures capture
+                       ON capture.document_version_id=observation.document_version_id
+                     LEFT JOIN article_framing_assessments assessment
+                       ON assessment.article_capture_id=capture.id
+                     WHERE event.status='active' GROUP BY event.id
+                   ) SELECT
+                     SUM(member_publishers<2) publisher,
+                     SUM(member_publishers>=2 AND captured_publishers<2) capture,
+                     SUM(captured_publishers>=2 AND assessed_publishers<2) framing,
+                     SUM(assessed_publishers>=2 AND healthy_publishers<2) health,
+                     SUM(healthy_publishers>=2 AND independent_families<2) family,
+                     SUM(member_publishers>=2 AND
+                         1.0*captured_publishers/member_publishers<.8) coverage
+                   FROM stats"""
+            ).fetchone()
+            eligible = connection.execute(
+                """SELECT event.id
+                   FROM world_events event
+                   JOIN world_event_memberships membership
+                     ON membership.world_event_id=event.id AND membership.active=1
+                   JOIN world_event_observations observation
+                     ON observation.id=membership.observation_id
+                    AND observation.status='active'
+                   JOIN documents ON documents.id=observation.document_id
+                   JOIN sources ON sources.id=observation.source_id
+                   JOIN article_content_captures capture
+                     ON capture.document_version_id=observation.document_version_id
+                    AND capture.status='complete'
+                   JOIN article_framing_assessments assessment
+                     ON assessment.article_capture_id=capture.id
+                    AND assessment.status='complete'
+                   WHERE event.status='active' AND COALESCE(sources.last_error,'')=''
+                   GROUP BY event.id
+                   HAVING COUNT(DISTINCT documents.publisher_key)>=2
+                      AND COUNT(DISTINCT COALESCE(
+                        NULLIF(documents.reporting_family_key,''),
+                        NULLIF(documents.publisher_key,''),documents.source_id))>=2"""
+            ).fetchall()
+            comparison_count = connection.execute(
+                "SELECT COUNT(*) FROM event_publisher_comparisons WHERE method=?",
+                (comparison_method,),
+            ).fetchone()[0]
+            event_ready = connection.execute(
+                """SELECT event.id event_id,event.title,
+                          MIN(observation.captured_at) oldest_evidence_at,
+                          COUNT(DISTINCT documents.publisher_key) member_publishers,
+                          COUNT(DISTINCT COALESCE(
+                            NULLIF(documents.reporting_family_key,''),
+                            NULLIF(documents.publisher_key,''),documents.source_id
+                          )) independent_families,
+                          COUNT(DISTINCT CASE WHEN capture.status='complete'
+                            THEN documents.publisher_key END) captured_publishers,
+                          COUNT(DISTINCT CASE WHEN assessment.status='complete'
+                            THEN documents.publisher_key END) assessed_publishers,
+                          GROUP_CONCAT(DISTINCT documents.publisher_key) member_keys,
+                          GROUP_CONCAT(DISTINCT CASE WHEN assessment.status='complete'
+                            THEN documents.publisher_key END) assessed_keys,
+                          GROUP_CONCAT(DISTINCT CASE WHEN capture.id IS NULL
+                            AND (policies.article_acquisition_mode='publisher-page'
+                              OR (versions.metadata LIKE
+                                '%publisher_feed_full_content%' AND
+                                  length(versions.content)>=500))
+                            AND COALESCE(sources.last_error,'')=''
+                            THEN documents.publisher_key END) acquisition_keys,
+                          GROUP_CONCAT(DISTINCT CASE WHEN capture.status='complete'
+                            AND capture.word_count>=80
+                            AND (assessment.article_capture_id IS NULL OR
+                              assessment.input_hash!=capture.content_hash OR
+                              (assessment.status='needs-model' AND
+                               julianday(assessment.updated_at)<
+                                 julianday('now','-6 hours')))
+                            THEN documents.publisher_key END) framing_keys,
+                          GROUP_CONCAT(DISTINCT CASE WHEN assessment.status='needs-model'
+                            AND assessment.input_hash=capture.content_hash
+                            AND julianday(assessment.updated_at)>=
+                                julianday('now','-6 hours')
+                            THEN documents.publisher_key END) cooldown_keys,
+                          GROUP_CONCAT(DISTINCT CASE WHEN capture.id IS NULL
+                            AND policies.article_acquisition_mode!='publisher-page'
+                            AND NOT (versions.metadata LIKE
+                              '%publisher_feed_full_content%' AND
+                              length(versions.content)>=500)
+                            THEN documents.publisher_key END) policy_ineligible_keys,
+                          GROUP_CONCAT(DISTINCT CASE WHEN
+                            COALESCE(sources.last_error,'')!=''
+                            THEN documents.publisher_key END) unhealthy_keys,
+                          GROUP_CONCAT(DISTINCT task.status) task_statuses,
+                          MAX(task.last_error) latest_task_error,
+                          MAX(task.updated_at) latest_task_updated_at
+                   FROM world_events event
+                   JOIN world_event_memberships membership
+                     ON membership.world_event_id=event.id AND membership.active=1
+                   JOIN world_event_observations observation
+                     ON observation.id=membership.observation_id
+                    AND observation.status='active'
+                   JOIN documents ON documents.id=observation.document_id
+                   JOIN document_versions versions
+                     ON versions.id=observation.document_version_id
+                   JOIN sources ON sources.id=observation.source_id
+                   LEFT JOIN source_policies policies
+                     ON policies.source_id=observation.source_id
+                   LEFT JOIN article_content_captures capture
+                     ON capture.document_version_id=observation.document_version_id
+                   LEFT JOIN article_framing_assessments assessment
+                     ON assessment.article_capture_id=capture.id
+                   LEFT JOIN article_acquisition_tasks task
+                     ON task.document_version_id=observation.document_version_id
+                    AND task.method='article-acquisition-v1'
+                   WHERE event.status='active'
+                   GROUP BY event.id
+                   HAVING member_publishers>=2 AND independent_families>=2
+                   ORDER BY oldest_evidence_at,event.id LIMIT ?""", (limit,)
+            ).fetchall()
+            event_ready_recent = connection.execute(
+                """SELECT
+                     (SELECT COUNT(*) FROM article_acquisition_tasks
+                      WHERE priority>=2 AND
+                        julianday(created_at)>=julianday('now',?)) enqueued,
+                     (SELECT COUNT(*) FROM article_acquisition_tasks
+                      WHERE priority>=2 AND status='complete' AND
+                        julianday(updated_at)>=julianday('now',?)) captured,
+                     (SELECT COUNT(DISTINCT assessment.article_capture_id)
+                      FROM article_framing_assessments assessment
+                      JOIN article_content_captures capture
+                        ON capture.id=assessment.article_capture_id
+                      JOIN world_event_observations observation
+                        ON observation.document_version_id=capture.document_version_id
+                      JOIN world_event_memberships membership
+                        ON membership.observation_id=observation.id
+                       AND membership.active=1
+                      WHERE assessment.status='complete' AND
+                        julianday(assessment.updated_at)>=julianday('now',?)
+                        AND EXISTS (
+                          SELECT 1 FROM world_event_memberships peer_membership
+                          JOIN world_event_observations peer_observation
+                            ON peer_observation.id=peer_membership.observation_id
+                          JOIN documents peer_document
+                            ON peer_document.id=peer_observation.document_id
+                          WHERE peer_membership.world_event_id=
+                                membership.world_event_id
+                            AND peer_membership.active=1
+                          GROUP BY peer_membership.world_event_id
+                          HAVING COUNT(DISTINCT peer_document.publisher_key)>=2)
+                     ) assessed""",
+                tuple(f"-{window_minutes} minutes" for _ in range(3)),
+            ).fetchone()
+            backlog = connection.execute(
+                """SELECT documents.publisher_key,COUNT(*) total,
+                          SUM(EXISTS (
+                            SELECT 1 FROM article_content_captures capture
+                            JOIN article_framing_assessments assessment
+                              ON assessment.article_capture_id=capture.id
+                            WHERE capture.document_version_id=observation.document_version_id
+                              AND capture.status='complete'
+                              AND assessment.status='complete')) comparison_ready,
+                          MIN(observation.captured_at) oldest_captured_at
+                   FROM world_event_observations observation
+                   JOIN documents ON documents.id=observation.document_id
+                   JOIN sources ON sources.id=observation.source_id
+                   WHERE NOT EXISTS (
+                     SELECT 1 FROM world_event_fusion_decisions decision
+                     WHERE decision.observation_id=observation.id AND decision.method=?)
+                     AND sources.kind NOT IN (
+                       'private_mail','prediction_market','weather_forecast',
+                       'infrastructure_reference')
+                   GROUP BY documents.publisher_key
+                   ORDER BY oldest_captured_at LIMIT ?""",
+                (fusion_method, limit),
+            ).fetchall()
+            latest_comparisons = connection.execute(
+                """SELECT comparison.world_event_id,events.title,
+                          comparison.publisher_keys,comparison.source_count,
+                          comparison.evidence_cutoff_at,comparison.status,
+                          comparison.input_hash,comparison.created_at
+                   FROM event_publisher_comparisons comparison
+                   JOIN world_events events ON events.id=comparison.world_event_id
+                   WHERE comparison.method=?
+                   ORDER BY comparison.created_at DESC,comparison.id DESC LIMIT ?""",
+                (comparison_method, limit),
+            ).fetchall()
+            recent = connection.execute(
+                """SELECT
+                     (SELECT COUNT(*) FROM world_event_observations observation
+                      WHERE julianday(observation.created_at)>=julianday('now',?)
+                        AND EXISTS (
+                          SELECT 1 FROM article_content_captures capture
+                          JOIN article_framing_assessments assessment
+                            ON assessment.article_capture_id=capture.id
+                          WHERE capture.document_version_id=observation.document_version_id
+                            AND assessment.status='complete')) projected,
+                     (SELECT COUNT(DISTINCT decision.observation_id)
+                      FROM world_event_fusion_decisions decision
+                      WHERE decision.method=? AND
+                        julianday(decision.created_at)>=julianday('now',?)) fused""",
+                (f"-{window_minutes} minutes", fusion_method,
+                 f"-{window_minutes} minutes"),
+            ).fetchone()
+            latest = connection.execute(
+                """SELECT decision.observation_id,decision.candidate_event_id,
+                          decision.chosen_event_id,decision.outcome,decision.score,
+                          decision.cutoff_at,decision.feature_version,
+                          decision.created_at
+                   FROM world_event_fusion_decisions decision
+                   WHERE decision.method=?
+                   ORDER BY decision.created_at DESC,decision.id DESC LIMIT ?""",
+                (fusion_method, limit),
+            ).fetchall()
+        publisher_rows = [dict(row) for row in publishers]
+        waiting_projection = sum(row["awaiting_projection"] or 0
+                                 for row in publisher_rows)
+        fusion_rows = [dict(row) for row in fusion]
+        waiting_fusion = sum(row["awaiting_fusion"] or 0 for row in fusion_rows)
+        eligible_count = len(eligible)
+        now_value = datetime.now(UTC)
+        projection_ages = _timestamp_age_stats(
+            [row.get("oldest_projection_at") for row in publisher_rows], now_value
+        )
+        fusion_ages = _timestamp_age_stats(
+            [row.get("oldest_fusion_at") for row in fusion_rows], now_value
+        )
+        blocked = {key: int(gates[key] or 0) for key in (
+            "publisher", "capture", "framing", "health", "family", "coverage"
+        )}
+        event_rows = []
+        event_state_counts = Counter()
+        event_ages = []
+        for raw in event_ready:
+            item = dict(raw)
+            assessed_keys = _csv_values(item.pop("assessed_keys", ""))
+            item["member_keys"] = _csv_values(item.get("member_keys"))
+            item["assessed_keys"] = assessed_keys
+            for key in (
+                "acquisition_keys", "framing_keys", "cooldown_keys",
+                "policy_ineligible_keys", "unhealthy_keys", "task_statuses",
+            ):
+                item[key] = [value for value in _csv_values(item.get(key))
+                             if value not in assessed_keys]
+            potential = set(assessed_keys)
+            for key in ("acquisition_keys", "framing_keys", "cooldown_keys"):
+                potential.update(item[key])
+            if item["assessed_publishers"] >= 2:
+                state = "comparison-ready"
+            elif len(potential) < 2 and item["unhealthy_keys"]:
+                state = "source-unhealthy"
+            elif len(potential) < 2:
+                state = "policy-ineligible"
+            elif item["framing_keys"]:
+                state = "awaiting-framing"
+            elif item["cooldown_keys"]:
+                state = "model-cooldown"
+            elif item["acquisition_keys"]:
+                state = (
+                    "awaiting-capture" if any(status in {
+                        "pending", "retry", "running"
+                    } for status in item["task_statuses"])
+                    else "awaiting-enqueue"
+                )
+            else:
+                state = "policy-ineligible"
+            item["next_stage"] = state
+            event_state_counts[state] += 1
+            parsed = _parse_utc(item.get("oldest_evidence_at"))
+            if parsed is not None and state not in {
+                "comparison-ready", "policy-ineligible"
+            }:
+                event_ages.append(max(0, (now_value - parsed).total_seconds()))
+            event_rows.append(item)
+        eligibility_gate = next(
+            (f"{key}-gate" for key in (
+                "health", "family", "framing", "capture", "publisher"
+            ) if blocked[key]),
+            "multi-publisher-event",
+        )
+        actionable_gate = next((f"event-ready-{state}" for state in (
+            "awaiting-framing", "model-cooldown", "awaiting-capture",
+            "awaiting-enqueue",
+        ) if event_state_counts[state]), eligibility_gate)
+        gate = (
+            "projection-backlog" if waiting_projection else
+            "fusion-backlog" if waiting_fusion else
+            actionable_gate if not eligible_count else
+            "comparison-current" if comparison_count else "comparison-run"
+        )
+        return {
+            "methods": {"fusion": fusion_method,
+                        "comparison": comparison_method},
+            "publishers": publisher_rows, "fusion_by_publisher": fusion_rows,
+            "fusion_outcomes": [dict(row) for row in outcomes],
+            "event_assessed_publisher_buckets": [dict(row) for row in event_buckets],
+            "blocked_events": blocked,
+            "eligible_events": eligible_count,
+            "comparisons": int(comparison_count),
+            "fusion_backlog": [dict(row) for row in backlog],
+            "queue_ages_seconds": {
+                "projection": projection_ages, "fusion": fusion_ages,
+            },
+            "recent_throughput": dict(recent),
+            "window_minutes": window_minutes, "current_gate": gate,
+            "latest_fusion_decisions": [dict(row) for row in latest],
+            "latest_comparisons": [{
+                **dict(row),
+                "publisher_keys": self._json_load(row["publisher_keys"], []),
+            } for row in latest_comparisons],
+            "event_ready": {
+                "events": event_rows,
+                "state_counts": dict(sorted(event_state_counts.items())),
+                "queue_age_seconds": {
+                    "sample_count": len(event_ages),
+                    "oldest": round(max(event_ages), 3) if event_ages else None,
+                    "median": _percentile(event_ages, 50),
+                },
+                "recent_throughput": dict(event_ready_recent),
+                "drain_state": (
+                    "clear" if not any(state in event_state_counts for state in (
+                        "awaiting-enqueue", "awaiting-capture",
+                        "awaiting-framing", "model-cooldown"
+                    )) else "active"
+                ),
+            },
         }
 
     def epistemic_health(self):
@@ -2578,3 +3510,43 @@ def normalize_timestamp(value):
         "+00:00",
         "Z"
     )
+
+
+def _parse_utc(value):
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _percentile(values, percentile):
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    index = max(0, min(
+        len(ordered) - 1,
+        int(((float(percentile) / 100) * len(ordered)) + 0.999999) - 1,
+    ))
+    return round(ordered[index], 3)
+
+
+def _timestamp_age_stats(values, now):
+    ages = []
+    for value in values:
+        parsed = _parse_utc(value)
+        if parsed is not None:
+            ages.append(max(0.0, (now - parsed).total_seconds()))
+    return {
+        "sample_count": len(ages),
+        "oldest": round(max(ages), 3) if ages else None,
+        "median": _percentile(ages, 50),
+    }
+
+
+def _csv_values(value):
+    return sorted({item for item in str(value or "").split(",") if item})

@@ -15,6 +15,7 @@ from agent.intelligence.claim_extraction import (
 )
 from agent.intelligence.epistemic_backfill import EpistemicBackfill
 from agent.intelligence.geospatial import SituationGeography
+from agent.models.base import ModelUnavailable
 from agent.models.router import ModelRouter
 
 
@@ -230,6 +231,8 @@ class UnderstandingEngine:
         )
 
     def _synthesize_situations(self, situation_ids):
+        if not self._model_budget_available():
+            return 0
         providers = getattr(self.router, "providers", None)
         if providers is not None:
             usable = False
@@ -260,9 +263,14 @@ class UnderstandingEngine:
 
         synthesized = 0
         for offset in range(0, len(packets), self.synthesis_batch_size):
+            if not self._model_budget_available():
+                break
             batch = packets[offset:offset + self.synthesis_batch_size]
             drafts = self._generate_synthesis_batch(batch)
-            if self._challenge_enabled() and drafts:
+            if (
+                self._challenge_enabled() and drafts
+                and self._model_budget_available()
+            ):
                 drafts = self._challenge_synthesis_batch(batch, drafts)
             for packet in batch:
                 situation_id = packet["situation"]["id"]
@@ -277,6 +285,15 @@ class UnderstandingEngine:
                 )
                 synthesized += 1
         return synthesized
+
+    def _model_budget_available(self):
+        available = getattr(self.router, "budget_available", None)
+        if not callable(available):
+            return True
+        try:
+            return bool(available())
+        except Exception:
+            return True
 
     def _generate_synthesis_batch(self, packets):
         if len(packets) == 1:
@@ -293,6 +310,12 @@ class UnderstandingEngine:
                 routing="world_understanding"
             )
             return self._validate_batch(payload, packets)
+        except ModelUnavailable as exc:
+            print(f"Worldview batch synthesis unavailable: {exc}")
+            return {
+                packet["situation"]["id"]: self._fallback_synthesis(packet)
+                for packet in packets
+            }
         except Exception as exc:
             print(f"Worldview batch synthesis unavailable: {exc}")
 
@@ -315,6 +338,9 @@ class UnderstandingEngine:
                     routing="world_understanding"
                 )
                 return self._validate_synthesis(payload, packet)
+            except ModelUnavailable as exc:
+                error = exc
+                break
             except Exception as exc:
                 error = exc
         print(

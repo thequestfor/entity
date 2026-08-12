@@ -1008,7 +1008,7 @@ function renderReputations(reputations) {
       `${reputation.assessment_confirmed_count ?? reputation.confirmed_count ?? 0} confirmed · ` +
       `${reputation.assessment_refuted_count ?? reputation.contradicted_count ?? 0} refuted · ` +
       `${reputation.assessment_mixed_count ?? 0} mixed · ` +
-      `${Math.round(Number(reputation.assessment_framing_signal ?? reputation.framing_prior ?? 0) * 100)}% framing signal · ${salt}`;
+      `${Math.round(Number(reputation.assessment_framing_signal ?? reputation.framing_prior ?? 0) * 100)}% structural framing signal (legacy) · ${salt}`;
     outcomes.title = reputation.latest_outcome_reason ||
       "This measures corroborated factual reporting, not neutrality or framing.";
     card.append(title, score, outcomes);
@@ -1026,10 +1026,11 @@ function renderReputations(reputations) {
     inspect.addEventListener("click", async () => {
       elements.publisherAudit.textContent = "Loading publisher audit…";
       try {
-        const audit = await request(
-          `/api/intelligence/publisher-audit?publisher=${encodeURIComponent(reputation.publisher_key)}`
-        );
-        renderPublisherAudit(audit);
+        const [audit, framing] = await Promise.all([
+          request(`/api/intelligence/publisher-audit?publisher=${encodeURIComponent(reputation.publisher_key)}`),
+          request(`/api/intelligence/framing-v2?publisher=${encodeURIComponent(reputation.publisher_key)}`)
+        ]);
+        renderPublisherAudit(audit, framing);
       } catch (error) {
         elements.publisherAudit.textContent = `Audit unavailable: ${error.message}`;
       }
@@ -1057,7 +1058,7 @@ function renderUnresolvedEnrichment(items) {
   }
 }
 
-function renderPublisherAudit(audit) {
+function renderPublisherAudit(audit, framing = {}) {
   elements.publisherAudit.replaceChildren();
   const heading = document.createElement("strong");
   heading.textContent = `Audit: ${audit.publisher_key}`;
@@ -1072,7 +1073,7 @@ function renderPublisherAudit(audit) {
       `${Math.round(Number(assessment.attribution_quality) * 100)}% · revision ` +
       `${Math.round(Number(assessment.revision_discipline) * 100)}% · independence ` +
       `${Math.round(Number(assessment.independence_confidence) * 100)}% · timeliness ` +
-      `${Math.round(Number(assessment.timeliness_score) * 100)}% · framing ` +
+      `${Math.round(Number(assessment.timeliness_score) * 100)}% · structural framing (legacy) ` +
       `${Math.round(Number(assessment.framing_signal) * 100)}%`;
     elements.publisherAudit.append(row);
   }
@@ -1082,6 +1083,20 @@ function renderPublisherAudit(audit) {
     `${audit.reporting_families?.length ?? 0} reporting families · ` +
     `${audit.history?.length ?? 0} immutable assessment revisions`;
   elements.publisherAudit.append(summary);
+  const semantic = document.createElement("p");
+  semantic.textContent =
+    `Semantic framing v2 (${framing.mode ?? "shadow"}): ` +
+    `${framing.assessments?.length ?? 0} analyzed article(s), ` +
+    `${framing.observations?.length ?? 0} literal evidence span(s). ` +
+    "These observations do not change factual credibility while in shadow mode.";
+  elements.publisherAudit.append(semantic);
+  for (const observation of (framing.observations ?? []).slice(0, 12)) {
+    const evidence = document.createElement("blockquote");
+    evidence.textContent =
+      `${observation.dimension} · ${Math.round(Number(observation.strength) * 100)}% · ` +
+      `“${observation.evidence_span}” — ${observation.explanation}`;
+    elements.publisherAudit.append(evidence);
+  }
   for (const family of (audit.reporting_families ?? []).slice(0, 10)) {
     const button = document.createElement("button");
     button.type = "button";
@@ -1133,7 +1148,7 @@ function renderForecasts(forecasts, calibration) {
   }
 }
 
-function renderEpistemicHealth(health, enrichment = {}, budget = {}) {
+function renderEpistemicHealth(health, enrichment = {}, budget = {}, articleAnalysis = {}, workload = {}, comparisonReadiness = {}) {
   elements.epistemicHealth.replaceChildren();
   const card = (titleText, detailText) => {
     const node = document.createElement("div");
@@ -1164,9 +1179,66 @@ function renderEpistemicHealth(health, enrichment = {}, budget = {}) {
     .reduce((sum, item) => sum + Number(item.count || 0), 0);
   const budgetSummary = card(
     "Reasoning capacity",
-    `${hourly?.model_calls ?? 0} calls this hour · ${daily?.model_calls ?? 0} today · ${denied} denied in 24h · daily reset ${formatTime(budget.next_daily_reset_at)}`
+    `${hourly?.model_calls ?? 0} calls this hour · ${daily?.model_calls ?? 0} today · ${budget.result_cache?.hits ?? 0} cache hits · ${denied} denied in 24h · daily reset ${formatTime(budget.next_daily_reset_at)}`
   );
-  elements.epistemicHealth.append(targetSummary, forecastSummary, modelSummary, enrichmentSummary, budgetSummary);
+  const captured = (articleAnalysis.captures ?? []).reduce(
+    (sum, item) => sum + Number(item.count || 0), 0
+  );
+  const framed = (articleAnalysis.framing ?? []).reduce(
+    (sum, item) => sum + Number(item.count || 0), 0
+  );
+  const articleSummary = card(
+    "Article analysis (shadow)",
+    `${captured} publisher-supplied captures · ${framed} semantic framing assessments`
+  );
+  const workloadState = workload.state ?? {};
+  const storage = workload.storage ?? {};
+  const queue = workload.queue ?? {};
+  const recentWork = workload.recent ?? {};
+  const latency = workload.fresh_latency?.end_to_end_seconds ?? {};
+  const publisherRates = workload.publishers ?? [];
+  const completionRate = publisherRates.reduce(
+    (sum, item) => sum + Number(item.completion_rate_per_hour || 0), 0
+  );
+  const drainEstimates = publisherRates
+    .map((item) => item.drain_estimate_hours)
+    .filter((value) => value != null);
+  const drainEstimate = drainEstimates.length ? Math.max(...drainEstimates) : null;
+  const gib = (value) => value == null ? "unknown" : `${(Number(value) / (1024 ** 3)).toFixed(2)} GiB`;
+  const workloadSummary = card(
+    `Article workload · ${workloadState.status ?? "unknown"}`,
+    `${gib(storage.combined_bytes)} / ${gib(storage.soft_limit_bytes)} soft / ${gib(storage.hard_limit_bytes)} hard · ` +
+    `${queue.backfill_active ?? 0} backfill + ${queue.fresh_active ?? 0} fresh active · ` +
+    `${completionRate.toFixed(1)}/h completion rate · drain ${drainEstimate == null ? "unknown" : drainEstimate.toFixed(1) + "h"} · ` +
+    `age oldest/median ${queue.oldest_age_seconds == null ? "unknown" : Math.round(queue.oldest_age_seconds / 60) + "m"}/${queue.median_age_seconds == null ? "unknown" : Math.round(queue.median_age_seconds / 60) + "m"} · ` +
+    `fresh p50/p95 ${latency.p50 == null ? "unknown" : Math.round(latency.p50 / 60) + "m"}/${latency.p95 == null ? "unknown" : Math.round(latency.p95 / 60) + "m"} · ` +
+    ((workloadState.status === "disk-hard-limit") ? "all publisher-page capture paused" :
+      (["disk-soft-limit", "unknown"].includes(workloadState.status) ? "historical publisher-page capture paused" : "capture scheduling active"))
+  );
+  workloadSummary.classList.add(`workload-${workloadState.status ?? "unknown"}`);
+  const recentTransitions = workload.transitions?.slice(0, 3) ?? [];
+  const transitionSummary = card(
+    "Recent workload transitions",
+    recentTransitions.length
+      ? recentTransitions.map((item) => `${item.previous_status || "initial"} → ${item.new_status} · ${item.reason} · ${formatTime(item.transitioned_at)}`).join(" | ")
+      : "No durable transition recorded yet"
+  );
+  const projectionQueue = (comparisonReadiness.publishers ?? []).reduce(
+    (sum, item) => sum + Number(item.awaiting_projection || 0), 0
+  );
+  const fusionQueue = (comparisonReadiness.fusion_by_publisher ?? []).reduce(
+    (sum, item) => sum + Number(item.awaiting_fusion || 0), 0
+  );
+  const readinessSummary = card(
+    "Cross-publisher readiness (shadow)",
+    `${projectionQueue} assessed documents awaiting projection · ${fusionQueue} assessed observations awaiting v3 fusion · ` +
+    `${comparisonReadiness.eligible_events ?? 0} eligible events · ${comparisonReadiness.comparisons ?? 0} v2 comparisons · ` +
+    `${comparisonReadiness.event_ready?.state_counts?.["awaiting-enqueue"] ?? 0} awaiting event-ready enqueue · ` +
+    `${comparisonReadiness.event_ready?.state_counts?.["awaiting-capture"] ?? 0} awaiting capture · ` +
+    `${comparisonReadiness.event_ready?.state_counts?.["awaiting-framing"] ?? 0} awaiting framing · ` +
+    `${comparisonReadiness.event_ready?.state_counts?.["policy-ineligible"] ?? 0} policy-ineligible · gate ${comparisonReadiness.current_gate ?? "unknown"}`
+  );
+  elements.epistemicHealth.append(targetSummary, forecastSummary, modelSummary, enrichmentSummary, budgetSummary, articleSummary, workloadSummary, readinessSummary, transitionSummary);
 }
 
 async function refresh() {
@@ -1179,7 +1251,7 @@ async function refresh() {
     const mapQuery = new URLSearchParams(categoryQuery);
     mapQuery.set("located", "1");
     mapQuery.set("limit", "200");
-    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, enrichment, budget, earlyReports, unresolvedEnrichment, canonicalEvents, aircraftResponse, fusion] = await Promise.all([
+    const [overview, documents, sources, situations, geography, briefing, reputations, forecasts, epistemicHealth, enrichment, budget, articleAnalysis, workload, comparisonReadiness, earlyReports, unresolvedEnrichment, canonicalEvents, aircraftResponse, fusion] = await Promise.all([
       request("/api/intelligence/overview"),
       request(`/api/intelligence/documents${category}`),
       request("/api/intelligence/sources"),
@@ -1191,6 +1263,9 @@ async function refresh() {
       request("/api/intelligence/epistemic-health"),
       request("/api/intelligence/open-source-enrichment"),
       request("/api/intelligence/reasoning-budget"),
+      request("/api/intelligence/article-analysis"),
+      request("/api/intelligence/workload-health"),
+      request("/api/intelligence/comparison-readiness?limit=25"),
       request("/api/intelligence/early-reports?limit=30"),
       request("/api/intelligence/enrichment-queue?limit=30"),
       request("/api/intelligence/world-events?limit=30"),
@@ -1210,7 +1285,7 @@ async function refresh() {
     renderBriefing(briefing);
     renderReputations(reputations.reputations ?? []);
     renderForecasts(forecasts.forecasts ?? [], forecasts.calibration ?? {});
-    renderEpistemicHealth(epistemicHealth, enrichment, budget);
+    renderEpistemicHealth(epistemicHealth, enrichment, budget, articleAnalysis, workload, comparisonReadiness);
     renderEarlyReports(earlyReports.reports ?? []);
     renderUnresolvedEnrichment(unresolvedEnrichment.items ?? []);
     renderCanonicalEvents(canonicalEvents.events ?? []);

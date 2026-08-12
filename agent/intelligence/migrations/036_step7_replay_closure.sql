@@ -1,0 +1,17 @@
+CREATE INDEX idx_fusion_decisions_observation_method
+ON world_event_fusion_decisions(observation_id,method,outcome);
+
+CREATE INDEX idx_world_observations_capture_id
+ON world_event_observations(captured_at,id);
+
+CREATE INDEX idx_world_observations_document_version
+ON world_event_observations(document_version_id,document_id);
+
+CREATE INDEX idx_article_framing_status_capture
+ON article_framing_assessments(status,article_capture_id,publisher_key);
+
+CREATE INDEX idx_article_captures_document_status
+ON article_content_captures(document_id,status,document_version_id,id);
+
+CREATE INDEX idx_event_comparisons_method_event
+ON event_publisher_comparisons(method,world_event_id,input_hash);

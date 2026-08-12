@@ -63,8 +63,10 @@ class IntelligenceConfig:
     max_hypotheses_per_situation: int = 5
     model_hypothesis_generation_enabled: bool = False
     intelligence_evaluations_enabled: bool = True
-    reasoning_hourly_model_calls: int = 24
-    reasoning_daily_model_calls: int = 200
+    reasoning_hourly_model_calls: int = 36
+    reasoning_daily_model_calls: int = 300
+    reasoning_daily_input_tokens: int = 1_000_000
+    reasoning_daily_output_tokens: int = 250_000
     reasoning_job_lease_seconds: int = 120
     reasoning_forecast_hourly_reserve: int = 2
     reasoning_forecast_daily_reserve: int = 12
@@ -74,8 +76,20 @@ class IntelligenceConfig:
     reasoning_grounding_daily_reserve: int = 40
     reasoning_grounding_hourly_calls: int = 8
     reasoning_grounding_daily_calls: int = 60
-    reasoning_worldview_hourly_calls: int = 12
-    reasoning_worldview_daily_calls: int = 100
+    reasoning_worldview_hourly_calls: int = 4
+    reasoning_worldview_daily_calls: int = 20
+    reasoning_article_hourly_reserve: int = 2
+    reasoning_article_daily_reserve: int = 30
+    reasoning_article_hourly_calls: int = 8
+    reasoning_article_daily_calls: int = 100
+    reasoning_article_fresh_hourly_reserve: int = 2
+    reasoning_article_fresh_daily_reserve: int = 12
+    reasoning_article_fresh_hourly_calls: int = 4
+    reasoning_article_fresh_daily_calls: int = 40
+    reasoning_comparison_hourly_reserve: int = 1
+    reasoning_comparison_daily_reserve: int = 15
+    reasoning_comparison_hourly_calls: int = 4
+    reasoning_comparison_daily_calls: int = 40
     active_acquisition_enabled: bool = False
     active_acquisition_per_cycle: int = 5
     cluster_auto_link_threshold: float = 0.82
@@ -144,6 +158,29 @@ class IntelligenceConfig:
     open_source_model_calls_per_cycle: int = 1
     open_source_model_reports_per_call: int = 5
     open_source_enrichment_poll_seconds: int = 300
+    article_acquisition_enabled: bool = True
+    article_acquisition_batch_size: int = 5
+    article_acquisition_poll_seconds: int = 600
+    article_acquisition_event_ready_per_cycle: int = 2
+    article_acquisition_max_active_per_publisher: int = 25
+    article_acquisition_max_active_global: int = 100
+    article_fresh_window_minutes: int = 30
+    article_fresh_max_active_per_publisher: int = 2
+    article_fresh_max_active_global: int = 10
+    workload_health_window_minutes: int = 60
+    intelligence_disk_soft_limit_bytes: int = 2_147_483_648
+    intelligence_disk_hard_limit_bytes: int = 3_221_225_472
+    intelligence_replay_max_items: int = 2_000
+    intelligence_replay_max_bytes: int = 100_000_000
+    intelligence_replay_batch_size: int = 100
+    intelligence_replay_max_passes: int = 50
+    semantic_framing_enabled: bool = True
+    semantic_framing_batch_size: int = 5
+    semantic_framing_model_calls_per_cycle: int = 4
+    semantic_framing_poll_seconds: int = 600
+    semantic_framing_event_ready_per_cycle: int = 2
+    event_framing_comparison_enabled: bool = True
+    event_framing_comparison_batch_size: int = 20
     geospatial_features_enabled: bool = True
     geospatial_feature_batch_size: int = 100
     environment_layers_enabled: bool = True
@@ -163,8 +200,11 @@ class IntelligenceConfig:
     nga_wpi_poll_seconds: int = 604800
     world_graph_enabled: bool = True
     world_graph_batch_size: int = 100
+    world_graph_comparison_ready_per_cycle: int = 20
     event_fusion_enabled: bool = True
     event_fusion_batch_size: int = 100
+    event_fusion_comparison_ready_per_cycle: int = 20
+    event_fusion_recent_per_cycle: int = 20
     event_fusion_auto_link_threshold: float = 0.82
     event_fusion_review_threshold: float = 0.65
     event_fusion_max_candidates: int = 100
@@ -210,8 +250,9 @@ class IntelligenceConfig:
     x_poll_seconds: int = 900
     x_max_results: int = 25
     news_enabled: bool = True
-    news_rss_feeds: tuple[tuple[str, str, float], ...] = DEFAULT_NEWS_RSS_FEEDS
+    news_rss_feeds: tuple[tuple, ...] = DEFAULT_NEWS_RSS_FEEDS
     news_poll_seconds: int = 300
+    news_article_requests_per_cycle: int = 2
     polymarket_enabled: bool = True
     polymarket_poll_seconds: int = 300
     polymarket_max_markets: int = 50
@@ -347,10 +388,18 @@ class IntelligenceConfig:
                 "ENTITY_INTELLIGENCE_EVALUATIONS_ENABLED", True
             ),
             reasoning_hourly_model_calls=_env_int(
-                "ENTITY_REASONING_HOURLY_MODEL_CALLS",24,minimum=1,maximum=1000
+                "ENTITY_REASONING_HOURLY_MODEL_CALLS",36,minimum=1,maximum=1000
             ),
             reasoning_daily_model_calls=_env_int(
-                "ENTITY_REASONING_DAILY_MODEL_CALLS",200,minimum=1,maximum=10000
+                "ENTITY_REASONING_DAILY_MODEL_CALLS",300,minimum=1,maximum=10000
+            ),
+            reasoning_daily_input_tokens=_env_int(
+                "ENTITY_REASONING_DAILY_INPUT_TOKENS",1_000_000,
+                minimum=10_000,maximum=100_000_000
+            ),
+            reasoning_daily_output_tokens=_env_int(
+                "ENTITY_REASONING_DAILY_OUTPUT_TOKENS",250_000,
+                minimum=10_000,maximum=20_000_000
             ),
             reasoning_job_lease_seconds=_env_int(
                 "ENTITY_REASONING_JOB_LEASE_SECONDS",120,minimum=30,maximum=900
@@ -388,11 +437,55 @@ class IntelligenceConfig:
                 minimum=1,maximum=1000
             ),
             reasoning_worldview_hourly_calls=_env_int(
-                "ENTITY_REASONING_WORLDVIEW_HOURLY_CALLS",12,
+                "ENTITY_REASONING_WORLDVIEW_HOURLY_CALLS",4,
                 minimum=1,maximum=100
             ),
             reasoning_worldview_daily_calls=_env_int(
-                "ENTITY_REASONING_WORLDVIEW_DAILY_CALLS",100,
+                "ENTITY_REASONING_WORLDVIEW_DAILY_CALLS",20,
+                minimum=1,maximum=1000
+            ),
+            reasoning_article_hourly_reserve=_env_int(
+                "ENTITY_REASONING_ARTICLE_HOURLY_RESERVE",2,minimum=0,maximum=100
+            ),
+            reasoning_article_daily_reserve=_env_int(
+                "ENTITY_REASONING_ARTICLE_DAILY_RESERVE",30,minimum=0,maximum=1000
+            ),
+            reasoning_article_hourly_calls=_env_int(
+                "ENTITY_REASONING_ARTICLE_HOURLY_CALLS",8,minimum=1,maximum=100
+            ),
+            reasoning_article_daily_calls=_env_int(
+                "ENTITY_REASONING_ARTICLE_DAILY_CALLS",100,minimum=1,maximum=1000
+            ),
+            reasoning_article_fresh_hourly_reserve=_env_int(
+                "ENTITY_REASONING_ARTICLE_FRESH_HOURLY_RESERVE",2,
+                minimum=0,maximum=100
+            ),
+            reasoning_article_fresh_daily_reserve=_env_int(
+                "ENTITY_REASONING_ARTICLE_FRESH_DAILY_RESERVE",12,
+                minimum=0,maximum=1000
+            ),
+            reasoning_article_fresh_hourly_calls=_env_int(
+                "ENTITY_REASONING_ARTICLE_FRESH_HOURLY_CALLS",4,
+                minimum=1,maximum=100
+            ),
+            reasoning_article_fresh_daily_calls=_env_int(
+                "ENTITY_REASONING_ARTICLE_FRESH_DAILY_CALLS",40,
+                minimum=1,maximum=1000
+            ),
+            reasoning_comparison_hourly_reserve=_env_int(
+                "ENTITY_REASONING_COMPARISON_HOURLY_RESERVE",1,
+                minimum=0,maximum=100
+            ),
+            reasoning_comparison_daily_reserve=_env_int(
+                "ENTITY_REASONING_COMPARISON_DAILY_RESERVE",15,
+                minimum=0,maximum=1000
+            ),
+            reasoning_comparison_hourly_calls=_env_int(
+                "ENTITY_REASONING_COMPARISON_HOURLY_CALLS",4,
+                minimum=1,maximum=100
+            ),
+            reasoning_comparison_daily_calls=_env_int(
+                "ENTITY_REASONING_COMPARISON_DAILY_CALLS",40,
                 minimum=1,maximum=1000
             ),
             active_acquisition_enabled=_env_bool(
@@ -572,6 +665,89 @@ class IntelligenceConfig:
                 "ENTITY_OPEN_SOURCE_ENRICHMENT_POLL_SECONDS", 300,
                 minimum=30, maximum=86400
             ),
+            article_acquisition_enabled=_env_bool(
+                "ENTITY_ARTICLE_ACQUISITION_ENABLED", True
+            ),
+            article_acquisition_batch_size=_env_int(
+                "ENTITY_ARTICLE_ACQUISITION_BATCH_SIZE", 5,
+                minimum=1, maximum=25
+            ),
+            article_acquisition_poll_seconds=_env_int(
+                "ENTITY_ARTICLE_ACQUISITION_POLL_SECONDS", 600,
+                minimum=60, maximum=86400
+            ),
+            article_acquisition_event_ready_per_cycle=_env_int(
+                "ENTITY_ARTICLE_ACQUISITION_EVENT_READY_PER_CYCLE", 2,
+                minimum=0, maximum=25
+            ),
+            article_acquisition_max_active_per_publisher=_env_int(
+                "ENTITY_ARTICLE_ACQUISITION_MAX_ACTIVE_PER_PUBLISHER", 25,
+                minimum=1, maximum=10000
+            ),
+            article_acquisition_max_active_global=_env_int(
+                "ENTITY_ARTICLE_ACQUISITION_MAX_ACTIVE_GLOBAL", 100,
+                minimum=1, maximum=100000
+            ),
+            article_fresh_window_minutes=_env_int(
+                "ENTITY_ARTICLE_FRESH_WINDOW_MINUTES", 30,
+                minimum=5, maximum=1440
+            ),
+            article_fresh_max_active_per_publisher=_env_int(
+                "ENTITY_ARTICLE_FRESH_MAX_ACTIVE_PER_PUBLISHER", 2,
+                minimum=1, maximum=100
+            ),
+            article_fresh_max_active_global=_env_int(
+                "ENTITY_ARTICLE_FRESH_MAX_ACTIVE_GLOBAL", 10,
+                minimum=1, maximum=1000
+            ),
+            workload_health_window_minutes=_env_int(
+                "ENTITY_WORKLOAD_HEALTH_WINDOW_MINUTES", 60,
+                minimum=15, maximum=1440
+            ),
+            intelligence_disk_soft_limit_bytes=_env_disk_limits()[0],
+            intelligence_disk_hard_limit_bytes=_env_disk_limits()[1],
+            intelligence_replay_max_items=_env_int(
+                "ENTITY_INTELLIGENCE_REPLAY_MAX_ITEMS", 2000,
+                minimum=1, maximum=10000
+            ),
+            intelligence_replay_max_bytes=_env_int(
+                "ENTITY_INTELLIGENCE_REPLAY_MAX_BYTES", 100_000_000,
+                minimum=1_000_000, maximum=1_000_000_000
+            ),
+            intelligence_replay_batch_size=_env_int(
+                "ENTITY_INTELLIGENCE_REPLAY_BATCH_SIZE", 100,
+                minimum=1, maximum=500
+            ),
+            intelligence_replay_max_passes=_env_int(
+                "ENTITY_INTELLIGENCE_REPLAY_MAX_PASSES", 50,
+                minimum=1, maximum=500
+            ),
+            semantic_framing_enabled=_env_bool(
+                "ENTITY_SEMANTIC_FRAMING_ENABLED", True
+            ),
+            semantic_framing_batch_size=_env_int(
+                "ENTITY_SEMANTIC_FRAMING_BATCH_SIZE", 5,
+                minimum=1, maximum=25
+            ),
+            semantic_framing_model_calls_per_cycle=_env_int(
+                "ENTITY_SEMANTIC_FRAMING_MODEL_CALLS_PER_CYCLE", 4,
+                minimum=0, maximum=10
+            ),
+            semantic_framing_poll_seconds=_env_int(
+                "ENTITY_SEMANTIC_FRAMING_POLL_SECONDS", 600,
+                minimum=60, maximum=86400
+            ),
+            semantic_framing_event_ready_per_cycle=_env_int(
+                "ENTITY_SEMANTIC_FRAMING_EVENT_READY_PER_CYCLE", 2,
+                minimum=0, maximum=25
+            ),
+            event_framing_comparison_enabled=_env_bool(
+                "ENTITY_EVENT_FRAMING_COMPARISON_ENABLED", True
+            ),
+            event_framing_comparison_batch_size=_env_int(
+                "ENTITY_EVENT_FRAMING_COMPARISON_BATCH_SIZE", 20,
+                minimum=1, maximum=100
+            ),
             geospatial_features_enabled=_env_bool("ENTITY_GEOSPATIAL_FEATURES_ENABLED", True),
             geospatial_feature_batch_size=_env_int("ENTITY_GEOSPATIAL_FEATURE_BATCH_SIZE", 100, minimum=1, maximum=500),
             environment_layers_enabled=_env_bool(
@@ -628,9 +804,21 @@ class IntelligenceConfig:
             ),
             world_graph_enabled=_env_bool("ENTITY_WORLD_GRAPH_ENABLED", True),
             world_graph_batch_size=_env_int("ENTITY_WORLD_GRAPH_BATCH_SIZE", 100, minimum=2, maximum=500),
+            world_graph_comparison_ready_per_cycle=_env_int(
+                "ENTITY_WORLD_GRAPH_COMPARISON_READY_PER_CYCLE", 20,
+                minimum=0, maximum=500
+            ),
             event_fusion_enabled=_env_bool("ENTITY_EVENT_FUSION_ENABLED", True),
             event_fusion_batch_size=_env_int(
                 "ENTITY_EVENT_FUSION_BATCH_SIZE", 100, minimum=1, maximum=500
+            ),
+            event_fusion_comparison_ready_per_cycle=_env_int(
+                "ENTITY_EVENT_FUSION_COMPARISON_READY_PER_CYCLE", 20,
+                minimum=0, maximum=500
+            ),
+            event_fusion_recent_per_cycle=_env_int(
+                "ENTITY_EVENT_FUSION_RECENT_PER_CYCLE", 20,
+                minimum=0, maximum=500
             ),
             event_fusion_auto_link_threshold=_env_float(
                 "ENTITY_EVENT_FUSION_AUTO_LINK_THRESHOLD", .82,
@@ -774,6 +962,10 @@ class IntelligenceConfig:
             news_poll_seconds=_env_int(
                 "ENTITY_NEWS_POLL_SECONDS", 300, minimum=60
             ),
+            news_article_requests_per_cycle=_env_int(
+                "ENTITY_NEWS_ARTICLE_REQUESTS_PER_CYCLE", 2,
+                minimum=1, maximum=25
+            ),
             polymarket_enabled=_env_bool(
                 "ENTITY_POLYMARKET_ENABLED", True
             ),
@@ -805,6 +997,24 @@ def _env_int(name, default, minimum=0, maximum=None):
     return min(maximum, value) if maximum is not None else value
 
 
+def _env_disk_limits():
+    soft_default = 2_147_483_648
+    hard_default = 3_221_225_472
+    minimum_gap = 67_108_864
+    try:
+        soft = int(os.getenv(
+            "ENTITY_INTELLIGENCE_DISK_SOFT_LIMIT_BYTES", str(soft_default)
+        ))
+        hard = int(os.getenv(
+            "ENTITY_INTELLIGENCE_DISK_HARD_LIMIT_BYTES", str(hard_default)
+        ))
+    except ValueError:
+        return soft_default, hard_default
+    if soft < minimum_gap or hard - soft < minimum_gap:
+        return soft_default, hard_default
+    return soft, hard
+
+
 def _env_float(name, default, minimum=0.0, maximum=None):
     try:
         value = float(os.getenv(name, str(default)))
@@ -829,9 +1039,15 @@ def _env_news_feeds(value):
             credibility = float(parts[2]) if len(parts) > 2 else 0.8
         except ValueError:
             credibility = 0.8
-        feeds.append((
-            parts[0], parts[1], max(0.0, min(1.0, credibility))
-        ))
+        mode = parts[3].lower() if len(parts) > 3 else "feed-only"
+        if mode not in {"feed-only", "publisher-page"}:
+            mode = "feed-only"
+        hosts = tuple(
+            host.strip().lower() for host in (parts[4] if len(parts) > 4 else "").split(",")
+            if host.strip()
+        )
+        feeds.append((parts[0], parts[1], max(0.0, min(1.0, credibility)),
+                      mode, hosts))
     return tuple(feeds)
 
 

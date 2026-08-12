@@ -1,0 +1,7 @@
+{
+  "schema":"replay-bundle-v1","bundle_key":"no-event-v1","cutoff":"2026-01-06T03:00:00Z",
+  "sources":[{"id":"replay_a","name":"Replay A","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-a","allowed_hosts":["a.test"],"policy_version":"source-contract-v2"}}],
+  "documents":[],"captures":[],"frozen_responses":[],
+  "expected_gaps":[{"source_id":"replay_a","start":"2026-01-06T00:00:00Z","end":"2026-01-06T03:00:00Z","status":"observed-no-event"}],
+  "provenance":"synthetic-test-only"
+}

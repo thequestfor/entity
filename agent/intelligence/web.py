@@ -147,6 +147,52 @@ class _DashboardHandler(SimpleHTTPRequestHandler):
             )
             return
 
+        if parsed.path == "/api/intelligence/article-analysis":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.article_analysis_overview(
+                limit=_query_int(query, "limit", 100)
+            ))
+            return
+
+        if parsed.path == "/api/intelligence/workload-health":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.workload_health(
+                window_minutes=_query_int(
+                    query, "window_minutes", 60, minimum=15, maximum=1440
+                ),
+                transition_limit=_query_int(
+                    query, "transition_limit", 20, minimum=1, maximum=100
+                ),
+            ))
+            return
+
+        if parsed.path == "/api/intelligence/framing-v2":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.publisher_framing_audit(
+                (query.get("publisher") or [""])[0],
+                limit=_query_int(query, "limit", 100),
+            ))
+            return
+
+        if parsed.path == "/api/intelligence/event-framing-comparisons":
+            query = parse_qs(parsed.query)
+            self._send_json(
+                self.server.intelligence_store.event_framing_comparison_overview(
+                    limit=_query_int(query, "limit", 100)
+                )
+            )
+            return
+
+        if parsed.path == "/api/intelligence/comparison-readiness":
+            query = parse_qs(parsed.query)
+            self._send_json(self.server.intelligence_store.comparison_readiness(
+                window_minutes=_query_int(
+                    query, "window_minutes", 60, minimum=15, maximum=1440
+                ),
+                limit=_query_int(query, "limit", 100),
+            ))
+            return
+
         if parsed.path == "/api/intelligence/early-reports":
             query = parse_qs(parsed.query)
             self._send_json({
@@ -456,11 +502,16 @@ class IntelligenceDashboard:
             self._thread = None
 
 
-def _query_int(query, name, default):
+def _query_int(query, name, default, minimum=None, maximum=None):
     try:
-        return int((query.get(name) or [default])[0])
+        value = int((query.get(name) or [default])[0])
     except (TypeError, ValueError):
-        return default
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
 
 
 def _query_bool(query, name, default=False):

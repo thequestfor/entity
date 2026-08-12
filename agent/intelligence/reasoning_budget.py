@@ -1,7 +1,8 @@
 """Quota and audit wrapper for background intelligence model calls."""
 
 import hashlib
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 
 from agent.models.base import ModelUnavailable
 from agent.intelligence.store import utc_now
@@ -9,14 +10,27 @@ from agent.intelligence.store import utc_now
 
 class ReasoningBudget:
     def __init__(self, store, hourly_calls=24, daily_calls=200,
+                 daily_input_tokens=1_000_000,
+                 daily_output_tokens=250_000,
                  forecast_hourly_reserve=0, forecast_daily_reserve=0,
                  forecast_hourly_calls=None, forecast_daily_calls=None,
                  grounding_hourly_reserve=0, grounding_daily_reserve=0,
                  grounding_hourly_calls=None, grounding_daily_calls=None,
-                 worldview_hourly_calls=None, worldview_daily_calls=None):
+                 worldview_hourly_calls=None, worldview_daily_calls=None,
+                 article_hourly_reserve=0, article_daily_reserve=0,
+                 article_hourly_calls=None, article_daily_calls=None,
+                 article_fresh_hourly_reserve=0,
+                 article_fresh_daily_reserve=0,
+                 article_fresh_hourly_calls=None,
+                 article_fresh_daily_calls=None,
+                 comparison_hourly_reserve=0, comparison_daily_reserve=0,
+                 comparison_hourly_calls=None, comparison_daily_calls=None):
         self.store = store
         self.hourly_calls = max(1, int(hourly_calls))
         self.daily_calls = max(self.hourly_calls, int(daily_calls))
+        self.daily_input_tokens = max(10_000, int(daily_input_tokens))
+        self.daily_output_tokens = max(10_000, int(daily_output_tokens))
+        self._lane_cooldowns = {}
         self.policies = {
             "worldview": self._policy(
                 worldview_hourly_calls or self.hourly_calls,
@@ -31,6 +45,21 @@ class ReasoningBudget:
                 forecast_hourly_calls or self.hourly_calls,
                 forecast_daily_calls or self.daily_calls,
                 forecast_hourly_reserve, forecast_daily_reserve,
+            ),
+            "article": self._policy(
+                article_hourly_calls or self.hourly_calls,
+                article_daily_calls or self.daily_calls,
+                article_hourly_reserve, article_daily_reserve,
+            ),
+            "article-fresh": self._policy(
+                article_fresh_hourly_calls or self.hourly_calls,
+                article_fresh_daily_calls or self.daily_calls,
+                article_fresh_hourly_reserve, article_fresh_daily_reserve,
+            ),
+            "comparison": self._policy(
+                comparison_hourly_calls or self.hourly_calls,
+                comparison_daily_calls or self.daily_calls,
+                comparison_hourly_reserve, comparison_daily_reserve,
             ),
         }
         self._sync_policies()
@@ -76,6 +105,9 @@ class ReasoningBudget:
     def acquire(self, prompt, estimated_output_tokens=1000, lane="worldview",
                 operation="model-call"):
         now = datetime.now(UTC)
+        cooldown = self.cooldown_reason(lane, now)
+        if cooldown:
+            raise ModelUnavailable(cooldown)
         now_text = utc_now()
         hour = now.strftime("%Y-%m-%dT%H:00:00Z")
         day = now.strftime("%Y-%m-%dT00:00:00Z")
@@ -86,6 +118,7 @@ class ReasoningBudget:
             lane, self._policy(self.hourly_calls, self.daily_calls, 0, 0)
         )
         denial = ""
+        denial_bucket = ""
         attempt_id = None
         with self.store._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -98,9 +131,28 @@ class ReasoningBudget:
                 lane_used = self._lane_usage(connection, kind, start, lane)
                 if used >= total_limit:
                     denial = f"Intelligence {kind}ly reasoning budget exhausted"
+                    denial_bucket = kind
                     break
+                if kind == "day":
+                    token_row = connection.execute(
+                        """SELECT estimated_input_tokens,estimated_output_tokens
+                           FROM intelligence_budget_usage
+                           WHERE bucket_type='day' AND bucket_start=?""",
+                        (start,),
+                    ).fetchone()
+                    used_input = int(token_row[0] or 0) if token_row else 0
+                    used_output = int(token_row[1] or 0) if token_row else 0
+                    if used_input + input_tokens > self.daily_input_tokens:
+                        denial = "Intelligence daily input-token budget exhausted"
+                        denial_bucket = "day"
+                        break
+                    if used_output + int(estimated_output_tokens) > self.daily_output_tokens:
+                        denial = "Intelligence daily output-token budget exhausted"
+                        denial_bucket = "day"
+                        break
                 if lane_used >= policy[limit_key]:
                     denial = f"Intelligence {lane} {kind}ly lane budget exhausted"
+                    denial_bucket = kind
                     break
                 other_reserve = sum(
                     max(0, item[reserve_key] - self._lane_usage(
@@ -113,6 +165,7 @@ class ReasoningBudget:
                     denial = (
                         f"Intelligence {kind}ly reserved lane capacity protected"
                     )
+                    denial_bucket = kind
                     break
             status = "budget-denied" if denial else "reserved"
             attempt_id = connection.execute(
@@ -162,8 +215,33 @@ class ReasoningBudget:
                         ),
                     )
         if denial:
+            self._set_cooldown(lane, denial, denial_bucket, now)
             raise ModelUnavailable(denial)
         return attempt_id
+
+    def _set_cooldown(self, lane, reason, bucket, now):
+        if bucket == "day":
+            expires = (
+                now.replace(hour=0, minute=0, second=0, microsecond=0)
+                + timedelta(days=1)
+            )
+        else:
+            expires = (
+                now.replace(minute=0, second=0, microsecond=0)
+                + timedelta(hours=1)
+            )
+        self._lane_cooldowns[str(lane)] = (expires, str(reason))
+
+    def cooldown_reason(self, lane, now=None):
+        now = now or datetime.now(UTC)
+        value = self._lane_cooldowns.get(str(lane))
+        if not value:
+            return ""
+        expires, reason = value
+        if now >= expires:
+            self._lane_cooldowns.pop(str(lane), None)
+            return ""
+        return reason
 
     def _usage(self, connection, kind, start):
         row = connection.execute(
@@ -206,6 +284,9 @@ class BudgetedModelRouter:
     def for_lane(self, lane):
         return BudgetedModelRouter(self._router, self.budget, lane)
 
+    def budget_available(self):
+        return not self.budget.cooldown_reason(self.lane)
+
     def _provider_name(self):
         value = getattr(self._router, "last_provider_name", None)
         if value:
@@ -222,6 +303,10 @@ class BudgetedModelRouter:
         operation = kwargs.pop("_budget_operation", None) or kwargs.get(
             "routing", "model-json"
         )
+        cache_hash = self._cache_hash(prompt, args, kwargs)
+        cached = self._cached(cache_hash, operation)
+        if cached is not None:
+            return cached
         attempt = self.budget.acquire(prompt, lane=self.lane, operation=operation)
         try:
             result = self._router.generate_json(prompt, *args, **kwargs)
@@ -236,7 +321,53 @@ class BudgetedModelRouter:
             )
             raise ValueError("Model JSON response was not an object")
         self.budget.finish(attempt, "completed", self._provider_name())
+        self._store_cache(cache_hash, operation, result)
         return result
+
+    def _cache_hash(self, prompt, args, kwargs):
+        material = {
+            "prompt": str(prompt), "args": [str(value) for value in args],
+            "kwargs": {key: str(value) for key, value in sorted(kwargs.items())},
+        }
+        return hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _cached(self, input_hash, operation):
+        with self.budget.store._connect() as connection:
+            row = connection.execute(
+                """SELECT response_json FROM intelligence_model_result_cache
+                   WHERE input_hash=? AND lane=? AND operation=?""",
+                (input_hash, self.lane, operation),
+            ).fetchone()
+            if not row:
+                return None
+            connection.execute(
+                """UPDATE intelligence_model_result_cache
+                   SET hit_count=hit_count+1,last_used_at=?
+                   WHERE input_hash=? AND lane=? AND operation=?""",
+                (utc_now(), input_hash, self.lane, operation),
+            )
+        try:
+            value = json.loads(row[0])
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _store_cache(self, input_hash, operation, result):
+        now = utc_now()
+        with self.budget.store._connect() as connection:
+            connection.execute(
+                """INSERT OR REPLACE INTO intelligence_model_result_cache (
+                     input_hash,lane,operation,response_json,provider,created_at,
+                     last_used_at,hit_count
+                   ) VALUES (?,?,?,?,?,?,?,COALESCE((SELECT hit_count FROM
+                     intelligence_model_result_cache WHERE input_hash=? AND lane=?
+                     AND operation=?),0))""",
+                (input_hash, self.lane, operation,
+                 json.dumps(result, sort_keys=True, separators=(",", ":")),
+                 self._provider_name(), now, now, input_hash, self.lane, operation),
+            )
 
     def generate(self, prompt, *args, **kwargs):
         operation = kwargs.pop("_budget_operation", None) or "model-text"

@@ -186,8 +186,13 @@ ENTITY_GLOBAL_WEATHER_ENABLED=false
 ENTITY_GLOBAL_WEATHER_GRID_DEGREES=30
 ENTITY_OURAIRPORTS_ENABLED=true
 ENTITY_NGA_WPI_ENABLED=true
+ENTITY_WORLD_GRAPH_COMPARISON_READY_PER_CYCLE=20
 ENTITY_EVENT_FUSION_ENABLED=true
 ENTITY_EVENT_FUSION_BATCH_SIZE=100
+ENTITY_EVENT_FUSION_COMPARISON_READY_PER_CYCLE=20
+ENTITY_EVENT_FUSION_RECENT_PER_CYCLE=20
+# These bounded reserves prioritize already-assessed evidence through projection
+# and fusion. They do not add model calls, network acquisition, or factual weight.
 # NASA FIRMS is opt-in and requires a free MAP_KEY.
 ENTITY_FIRMS_ENABLED=false
 ENTITY_FIRMS_MAP_KEY=
@@ -238,13 +243,68 @@ review; copied or syndicated reports count as one independent reporting family.
 Event aliases and immutable versions preserve history across correction, merge,
 split, reattribution, and rollback operations.
 
-Direct news collection uses publisher-supplied RSS or Atom metadata rather than
-scraping full articles. `ENTITY_NEWS_RSS_FEEDS` entries use
-`Publisher name|feed URL|baseline credibility`, separated by `||`; an explicitly
-empty value disables all default feeds. BBC World, NPR World, UN News, Deutsche
-Welle, Al Jazeera, France 24, and The Guardian World are configured by default,
-and each document retains its publisher, domain, feed URL, article link, byline,
-and feed categories.
+Direct news collection always retains publisher-supplied RSS or Atom metadata
+and preserves publisher-supplied full feed content when present. Optional page
+capture is conservative and policy-gated: it is disabled per feed by default,
+allows only HTTPS publisher hosts listed by the operator, validates redirects
+and public DNS addresses, caps response size and batch work, and extracts text
+without executing JavaScript. `ENTITY_NEWS_RSS_FEEDS` entries use
+`Publisher name|feed URL|baseline credibility|article mode|article hosts`,
+separated by `||`; mode is `feed-only` (the default) or `publisher-page`, and
+hosts are comma-separated. An explicitly empty value disables all default
+feeds. Each document retains its publisher, domain, feed URL, article link,
+byline, feed categories, capture scope, and immutable content hash.
+
+Page-capture work is bounded by per-publisher and global active-task ceilings.
+At a ceiling, existing tasks drain without enqueueing more. Semantic framing
+rotates durably across publishers and preserves retry progress, preventing
+high-volume publishers from starving peers.
+
+New developments also have a separately bounded fast path. Articles retrieved
+within the configured freshness window may use two reserved task slots per
+publisher and ten globally even while historical backfill is over its ceiling.
+Fresh captures use a separate model-budget lane with protected hourly and daily
+capacity; this does not bypass source request limits, literal-span validation,
+or shadow-only framing gates.
+
+```dotenv
+ENTITY_ARTICLE_ACQUISITION_MAX_ACTIVE_PER_PUBLISHER=25
+ENTITY_ARTICLE_ACQUISITION_MAX_ACTIVE_GLOBAL=100
+ENTITY_ARTICLE_ACQUISITION_EVENT_READY_PER_CYCLE=2
+ENTITY_ARTICLE_FRESH_WINDOW_MINUTES=30
+ENTITY_ARTICLE_FRESH_MAX_ACTIVE_PER_PUBLISHER=2
+ENTITY_ARTICLE_FRESH_MAX_ACTIVE_GLOBAL=10
+ENTITY_WORKLOAD_HEALTH_WINDOW_MINUTES=60
+ENTITY_INTELLIGENCE_DISK_SOFT_LIMIT_BYTES=2147483648
+ENTITY_INTELLIGENCE_DISK_HARD_LIMIT_BYTES=3221225472
+ENTITY_INTELLIGENCE_REPLAY_MAX_ITEMS=2000
+ENTITY_INTELLIGENCE_REPLAY_MAX_BYTES=100000000
+ENTITY_INTELLIGENCE_REPLAY_BATCH_SIZE=100
+ENTITY_INTELLIGENCE_REPLAY_MAX_PASSES=50
+ENTITY_SEMANTIC_FRAMING_EVENT_READY_PER_CYCLE=2
+```
+
+Workload health includes the SQLite database, WAL, and SHM files. At the 2 GiB
+soft limit, historical article capture pauses while bounded fresh capture keeps
+running. At the 3 GiB hard limit, all publisher-page capture pauses; analysis of
+already captured evidence continues. Inspect the current state at
+`/api/intelligence/workload-health` or on the epistemic-health dashboard.
+
+Run a bounded, offline replay fixture with:
+
+```bash
+python -m agent.intelligence.replay --fixture publisher_imbalance
+```
+
+Replay creates a fresh temporary database, uses frozen synthetic evidence and
+model results, makes no network requests, and emits only a canonical run ID,
+cutoff, bounded counts, and result fingerprint. Pass `--output NEW_DIRECTORY`
+to retain its private replay database, `manifest.json`, and `summary.json`.
+
+The event-ready reserves prioritize already-linked independent
+multi-publisher evidence within the same acquisition ceilings and model-call
+allowance. They do not enable new publisher hosts, bypass feed-only policies,
+or change evidence weight, fusion, or shadow comparison eligibility.
 
 Polymarket collection uses its public Gamma market-data API and needs no account,
 API key, wallet, or trading permissions. Entity polls active markets by 24-hour

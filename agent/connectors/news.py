@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ElementTree
 
 from agent.connectors.mail_common import clean_html, normalize_mail_time
 from agent.intelligence.models import ConnectorBatch, SourceItem
+from agent.intelligence.source_registry import SourcePolicy
 from agent.intelligence.store import utc_now
 
 
@@ -25,6 +26,9 @@ class NewsFeedConnector:
         max_items=50,
         poll_seconds=300,
         fetch_xml=None,
+        article_acquisition_mode="feed-only",
+        article_hosts=(),
+        article_requests_per_cycle=2,
         enabled=True
     ):
         self.name = str(name or "News feed").strip()
@@ -36,6 +40,28 @@ class NewsFeedConnector:
         self.max_items = max(1, int(max_items))
         self.poll_seconds = max(60, int(poll_seconds))
         self._fetch_xml_override = fetch_xml
+        mode = str(article_acquisition_mode or "feed-only").strip().lower()
+        self.article_acquisition_mode = (
+            mode if mode in {"feed-only", "publisher-page"} else "feed-only"
+        )
+        feed_host = urllib.parse.urlsplit(self.base_url).hostname or ""
+        self.article_hosts = tuple(
+            sorted({str(value).lower().strip() for value in article_hosts if value})
+        ) or ((feed_host.lower(),) if feed_host else ())
+        self.source_policy = SourcePolicy(
+            "public", "journalistic", "report", f"publisher:{digest}",
+            (feed_host.lower(),) if feed_host else (),
+            "Publisher terms require review", self.base_url, self.name,
+            "local-analysis-review-required", False, "publisher coverage", "minutes",
+            ("RSS metadata is discovery; article retrieval requires explicit policy.",),
+            article_acquisition_mode=self.article_acquisition_mode,
+            article_hosts=self.article_hosts,
+            article_max_bytes=2_000_000,
+            article_requests_per_cycle=max(
+                1, min(25, int(article_requests_per_cycle))
+            ),
+            article_excerpt_display=True,
+        )
         self.enabled = bool(enabled and self.base_url)
 
     def poll(self, cursor=None):
@@ -62,11 +88,10 @@ class NewsFeedConnector:
             or _child_text(node, "id")
             or _stable_id(url, title)
         )
-        summary = _clean_feed_text(
-            _child_text(node, "description")
-            or _child_text(node, "summary")
-            or _child_text(node, "content")
-        )
+        description = _child_text(node, "description") or _child_text(node, "summary")
+        supplied_content = _clean_feed_text(_child_text(node, "content"))
+        summary = _clean_feed_text(description or supplied_content)
+        full_content = supplied_content if len(supplied_content) >= 500 else ""
         published = (
             _child_text(node, "pubDate")
             or _child_text(node, "published")
@@ -79,6 +104,7 @@ class NewsFeedConnector:
             title=_clean_feed_text(title),
             url=url,
             summary=summary,
+            content=full_content,
             published_at=normalize_mail_time(published),
             category="traditional-news",
             metadata={
@@ -87,7 +113,10 @@ class NewsFeedConnector:
                 "feed_url": self.base_url,
                 "author": _child_text(node, "creator") or _child_text(node, "author"),
                 "feed_categories": categories,
-                "content_scope": "publisher_feed_metadata"
+                "content_scope": (
+                    "publisher_feed_full_content" if full_content
+                    else "publisher_feed_metadata"
+                )
             }
         )
 

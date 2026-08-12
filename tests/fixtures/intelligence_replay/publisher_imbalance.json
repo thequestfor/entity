@@ -1,0 +1,25 @@
+{
+  "schema": "replay-bundle-v1",
+  "bundle_key": "publisher-imbalance-v1",
+  "cutoff": "2026-01-01T01:00:00Z",
+  "sources": [
+    {"id":"replay_a","name":"Replay A","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-a","allowed_hosts":["a.test"],"policy_version":"source-contract-v2"}},
+    {"id":"replay_b","name":"Replay B","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-b","allowed_hosts":["b.test"],"policy_version":"source-contract-v2"}},
+    {"id":"replay_c","name":"Replay C","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"family-c","allowed_hosts":["c.test"],"policy_version":"source-contract-v2"}}
+  ],
+  "documents": [
+    {"source_id":"replay_a","external_id":"a1","version":1,"title":"Harbor terminal closes after fire","url":"https://a.test/a1","summary":"A fire closed the harbor terminal.","category":"news","published_at":"2026-01-01T00:00:00Z","captured_at":"2026-01-01T00:01:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"a.test"}},
+    {"source_id":"replay_a","external_id":"a2","version":1,"title":"Harbor terminal closes after fire","url":"https://a.test/a2","summary":"Follow-up report on the same closure.","category":"news","published_at":"2026-01-01T00:02:00Z","captured_at":"2026-01-01T00:03:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"a.test"}},
+    {"source_id":"replay_a","external_id":"a3","version":1,"title":"Harbor terminal closes after fire","url":"https://a.test/a3","summary":"Another update on the harbor closure.","category":"news","published_at":"2026-01-01T00:04:00Z","captured_at":"2026-01-01T00:05:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"a.test"}},
+    {"source_id":"replay_b","external_id":"b1","version":1,"title":"Harbor terminal closes after fire","url":"https://b.test/b1","summary":"An independent report described the closure.","category":"news","published_at":"2026-01-01T00:01:00Z","captured_at":"2026-01-01T00:02:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"b.test"}},
+    {"source_id":"replay_c","external_id":"c1","version":1,"title":"Harbor terminal closes after fire","url":"https://c.test/c1","summary":"A third outlet reported the terminal closure.","category":"news","published_at":"2026-01-01T00:02:00Z","captured_at":"2026-01-01T00:04:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"c.test"}}
+  ],
+  "captures": [
+    {"source_id":"replay_a","external_id":"a1","version":1,"url":"https://a.test/a1","title":"Harbor terminal closes after fire","captured_at":"2026-01-01T00:01:30Z","normalized_text":"Officials described the harbor terminal closure as severe while crews contained the fire.","content_hash":"70bcbae7115069250a52f052cc400fb86eaf2ba82f7978e7bb6296cfe4a27179"},
+    {"source_id":"replay_b","external_id":"b1","version":1,"url":"https://b.test/b1","title":"Harbor terminal closes after fire","captured_at":"2026-01-01T00:02:30Z","normalized_text":"Officials described the harbor terminal closure as severe while crews contained the fire.","content_hash":"70bcbae7115069250a52f052cc400fb86eaf2ba82f7978e7bb6296cfe4a27179"},
+    {"source_id":"replay_c","external_id":"c1","version":1,"url":"https://c.test/c1","title":"Harbor terminal closes after fire","captured_at":"2026-01-01T00:04:30Z","normalized_text":"Officials described the harbor terminal closure as severe while crews contained the fire.","content_hash":"70bcbae7115069250a52f052cc400fb86eaf2ba82f7978e7bb6296cfe4a27179"}
+  ],
+  "frozen_responses": [{"method":"semantic-framing-v2","version":"semantic-framing-v2","content_hash":"70bcbae7115069250a52f052cc400fb86eaf2ba82f7978e7bb6296cfe4a27179","response":{"observations":[{"dimension":"emotional_intensity","direction":"present","strength":0.7,"confidence":0.8,"evidence":"severe","explanation":"Uses an intensity descriptor."}]}}],
+  "expected_gaps": [],
+  "provenance": "synthetic-test-only"
+}

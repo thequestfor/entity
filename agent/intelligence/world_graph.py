@@ -9,6 +9,7 @@ from agent.intelligence.store import utc_now
 
 DOCUMENT_LANE = "document-observations-v1"
 SITUATION_LANE = "situation-events-v1"
+READINESS_SCHEDULER = "world-graph-comparison-ready"
 METHOD = "direct-world-graph-projection-v1"
 
 
@@ -24,10 +25,15 @@ class WorldGraphResult:
 class WorldEventGraphEngine:
     """Project stored facts without attempting cross-event semantic fusion."""
 
-    def __init__(self, store, enabled=True, batch_size=100):
+    def __init__(self, store, enabled=True, batch_size=100, clock=None,
+                 comparison_ready_per_cycle=20):
         self.store = store
         self.enabled = bool(enabled)
         self.batch_size = max(2, min(500, int(batch_size)))
+        self.clock = clock or utc_now
+        self.comparison_ready_per_cycle = max(
+            0, min(self.batch_size, int(comparison_ready_per_cycle))
+        )
 
     def run_batch(self):
         if not self.enabled:
@@ -35,7 +41,7 @@ class WorldEventGraphEngine:
         situation_limit = max(1, self.batch_size // 4)
         document_limit = self.batch_size - situation_limit
         with self.store._connect() as connection:
-            now = utc_now()
+            now = self.clock()
             situation_result = self._run_situations(
                 connection, situation_limit, now
             )
@@ -113,8 +119,6 @@ class WorldEventGraphEngine:
 
     def _run_documents(self, connection, limit, now):
         cursor = self._state(connection, DOCUMENT_LANE, now)
-        recent_limit = min(20, max(1, limit // 5)) if limit > 1 else 0
-        historical_limit = limit - recent_limit
         selection = """SELECT versions.id cursor_id,versions.id version_id,
                    COALESCE(NULLIF(enrichment.translated_title,''),versions.title) title,
                    COALESCE(NULLIF(enrichment.translated_summary,''),versions.summary) summary,
@@ -123,6 +127,7 @@ class WorldEventGraphEngine:
                    versions.metadata version_metadata,
                    documents.id document_id,documents.source_id,
                    documents.external_id,documents.category,documents.status,
+                   documents.publisher_key,
                    documents.latitude,documents.longitude,documents.updated_at document_updated_at,
                    enrichment.detected_language,enrichment.translated_content,
                    enrichment.event_time enrichment_event_time,
@@ -147,18 +152,63 @@ class WorldEventGraphEngine:
                      'private_mail', 'prediction_market',
                      'weather_forecast', 'infrastructure_reference'
                    )"""
+        readiness_limit = min(limit, self.comparison_ready_per_cycle)
+        readiness = connection.execute(
+            "WITH eligible AS (" + selection.format(condition="""
+              NOT EXISTS (SELECT 1 FROM world_event_observations observations
+                          WHERE observations.document_version_id=versions.id)
+              AND EXISTS (
+                SELECT 1 FROM article_content_captures captures
+                JOIN article_framing_assessments assessments
+                  ON assessments.article_capture_id=captures.id
+                WHERE captures.document_version_id=versions.id
+                  AND captures.status='complete'
+                  AND assessments.status='complete'
+              )""") + """), ranked AS (
+                SELECT eligible.*,ROW_NUMBER() OVER (
+                  PARTITION BY COALESCE(NULLIF(publisher_key,''),source_id)
+                  ORDER BY captured_at,cursor_id
+                ) publisher_rank FROM eligible
+              ) SELECT * FROM ranked WHERE publisher_rank<=?
+                ORDER BY publisher_key,publisher_rank LIMIT ?""",
+            (readiness_limit, min(5000, max(readiness_limit * 100,
+                                            readiness_limit))),
+        ).fetchall() if readiness_limit else []
+        ready_buckets = {}
+        for row in readiness:
+            key = row["publisher_key"] or row["source_id"]
+            ready_buckets.setdefault(key, []).append(row)
+        ready_rows = []
+        keys = _rotated_keys(
+            ready_buckets, self.store.scheduler_cursor(READINESS_SCHEDULER)
+        )
+        rank = 0
+        while len(ready_rows) < readiness_limit:
+            added = False
+            for key in keys:
+                if rank < len(ready_buckets[key]):
+                    ready_rows.append(ready_buckets[key][rank])
+                    added = True
+                    if len(ready_rows) >= readiness_limit:
+                        break
+            if not added:
+                break
+            rank += 1
+        ordinary_limit = max(0, limit - len(ready_rows))
+        recent_limit = min(20, max(1, ordinary_limit // 5)) if ordinary_limit > 1 else 0
+        historical_limit = ordinary_limit - recent_limit
+        needs_projection = "NOT EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id) OR EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id AND ((enrichment.updated_at IS NOT NULL AND (observations.enrichment_updated_at='' OR julianday(enrichment.updated_at)>julianday(observations.enrichment_updated_at))) OR julianday(documents.updated_at)>julianday(COALESCE(NULLIF(observations.enrichment_updated_at,''),observations.created_at))))"
         recent = connection.execute(
-            selection.format(
-                condition="NOT EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id) OR EXISTS (SELECT 1 FROM world_event_observations observations WHERE observations.document_version_id=versions.id AND ((enrichment.updated_at IS NOT NULL AND (observations.enrichment_updated_at='' OR julianday(enrichment.updated_at)>julianday(observations.enrichment_updated_at))) OR julianday(documents.updated_at)>julianday(COALESCE(NULLIF(observations.enrichment_updated_at,''),observations.created_at))))"
-            ) + " ORDER BY versions.id DESC LIMIT ?", (recent_limit,)
+            selection.format(condition=needs_projection)
+            + " ORDER BY versions.id DESC LIMIT ?", (recent_limit,)
         ).fetchall() if recent_limit else []
         historical = connection.execute(
-            selection.format(condition="versions.id>?")
-            + " ORDER BY versions.id LIMIT ?", (cursor, historical_limit)
+            selection.format(condition=needs_projection)
+            + " ORDER BY versions.id LIMIT ?", (historical_limit,)
         ).fetchall()
         rows = []
         seen = set()
-        for row in [*recent, *historical]:
+        for row in [*ready_rows, *recent, *historical]:
             if row["version_id"] in seen:
                 continue
             seen.add(row["version_id"])
@@ -202,6 +252,12 @@ class WorldEventGraphEngine:
                        updated_at=? WHERE id=?""",
                     (event_id, event_id, now, event_id)
                 )
+        if ready_rows:
+            _advance_scheduler_cursor(
+                connection, READINESS_SCHEDULER,
+                ready_rows[-1]["publisher_key"] or ready_rows[-1]["source_id"],
+                now,
+            )
         self._finish_lane(
             connection, DOCUMENT_LANE, historical,
             events + observations, now, processed_count=len(rows)
@@ -411,3 +467,25 @@ def _load_json(value, default):
         return json.loads(value or "")
     except (TypeError, ValueError):
         return default
+
+
+def _rotated_keys(buckets, cursor):
+    keys = sorted(buckets)
+    if not keys or not cursor:
+        return keys
+    for index, key in enumerate(keys):
+        if key > cursor:
+            return keys[index:] + keys[:index]
+    return keys
+
+
+def _advance_scheduler_cursor(connection, engine, rotation_key, now):
+    connection.execute(
+        """INSERT INTO intelligence_scheduler_state (
+             engine,last_rotation_key,updated_at
+           ) VALUES (?,?,?)
+           ON CONFLICT(engine) DO UPDATE SET
+             last_rotation_key=excluded.last_rotation_key,
+             updated_at=excluded.updated_at""",
+        (str(engine)[:120], str(rotation_key or "")[:300], now),
+    )

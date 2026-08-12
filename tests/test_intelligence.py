@@ -63,6 +63,10 @@ from agent.intelligence.environment_layers import EnvironmentLayerEngine
 from agent.intelligence.event_fusion import EventFusionEngine, FusionResult
 from agent.intelligence.location_inference import DocumentLocationInferenceEngine
 from agent.intelligence.open_source_enrichment import OpenSourceEnrichmentEngine
+from agent.intelligence.article_acquisition import ArticleAcquisitionEngine
+from agent.intelligence.framing import (
+    EventFramingComparisonEngine, SemanticFramingEngine
+)
 from agent.intelligence.media_derivation import PublicMediaDerivationEngine
 from agent.intelligence.publisher_assessment import PublisherAssessmentEngine
 from agent.intelligence.event_assessment import CanonicalEventAssessmentEngine
@@ -86,6 +90,11 @@ from agent.intelligence.worker import IntelligenceWorker
 class IntelligenceConfigTests(unittest.TestCase):
     def test_publisher_profiles_are_opt_in(self):
         self.assertEqual((), IntelligenceConfig().publisher_profiles)
+
+    def test_event_ready_reserves_are_conservative_defaults(self):
+        config = IntelligenceConfig()
+        self.assertEqual(2, config.article_acquisition_event_ready_per_cycle)
+        self.assertEqual(2, config.semantic_framing_event_ready_per_cycle)
 
 
 class IntelligenceStoreTests(unittest.TestCase):
@@ -137,7 +146,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             ).fetchone()[0]
             journal = connection.execute("PRAGMA journal_mode").fetchone()[0]
 
-        self.assertEqual(31, version)
+        self.assertEqual(36, version)
         self.assertEqual("wal", journal.lower())
         self.assertEqual(0o600, self.path.stat().st_mode & 0o777)
 
@@ -757,6 +766,82 @@ class IntelligenceStoreTests(unittest.TestCase):
         self.assertGreaterEqual(len(detail["versions"]), 1)
         self.assertEqual(FusionResult(), engine.run_batch())
 
+    def test_event_fusion_v3_reconciles_legacy_membership_as_retain(self):
+        self.store.ingest_items("fixture", [SourceItem(
+            "legacy", "Isolated port fire", "https://example.test/legacy",
+            published_at="2026-08-08T10:00:00Z",
+            category="traditional-news", latitude=10, longitude=20,
+        )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        with self.store._connect() as connection:
+            observation_id = connection.execute(
+                "SELECT id FROM world_event_observations"
+            ).fetchone()[0]
+            connection.execute(
+                """INSERT INTO world_events (
+                     id,event_type,category,title,status,severity,confidence,
+                     geometry,country_code,country_name,first_seen_at,last_seen_at,
+                     source_count,observation_count,properties,method,created_at,updated_at
+                   ) VALUES ('legacy-event','news','traditional-news',
+                     'Isolated port fire','active',0,.5,'{}','','',?,?,1,1,'{}',
+                     'deterministic-event-fusion-v1',?,?)""",
+                (now, now, now, now),
+            )
+            connection.execute(
+                """INSERT INTO world_event_memberships (
+                     id,observation_id,world_event_id,active,valid_from,
+                     action,method,created_at
+                   ) VALUES ('legacy-membership',?,'legacy-event',1,?,
+                     'create','deterministic-event-fusion-v1',?)""",
+                (observation_id, now, now),
+            )
+            connection.execute(
+                "UPDATE world_event_observations SET world_event_id='legacy-event' WHERE id=?",
+                (observation_id,),
+            )
+        engine = EventFusionEngine(self.store, batch_size=20)
+        result = engine.run_batch()
+        with self.store._connect() as connection:
+            outcomes = connection.execute(
+                """SELECT outcome,candidate_event_id,chosen_event_id
+                   FROM world_event_fusion_decisions
+                   WHERE observation_id=? AND method=?""",
+                (observation_id, "deterministic-event-fusion-v3"),
+            ).fetchall()
+            active = connection.execute(
+                """SELECT COUNT(*) FROM world_event_memberships
+                   WHERE observation_id=? AND active=1""", (observation_id,)
+            ).fetchone()[0]
+        self.assertEqual(1, result.processed)
+        self.assertEqual(["retain"], [row["outcome"] for row in outcomes])
+        self.assertEqual(outcomes[0]["candidate_event_id"],
+                         outcomes[0]["chosen_event_id"])
+        self.assertEqual(1, active)
+
+    def test_event_fusion_v3_finds_observation_behind_legacy_cursor(self):
+        self.store.ingest_items("fixture", [SourceItem(
+            "old", "Old report projected late", "https://example.test/old",
+            published_at="2026-01-01T00:00:00Z", category="traditional-news",
+        )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        with self.store._connect() as connection:
+            connection.execute(
+                """INSERT INTO world_event_fusion_state
+                   (lane,cursor_version_id,started_at,updated_at)
+                   VALUES ('world-event-observations-v3',999999,?,?)""",
+                (now, now),
+            )
+        result = EventFusionEngine(self.store, batch_size=20).run_batch()
+        with self.store._connect() as connection:
+            decisions = connection.execute(
+                """SELECT COUNT(*) FROM world_event_fusion_decisions
+                   WHERE method='deterministic-event-fusion-v3'"""
+            ).fetchone()[0]
+        self.assertEqual(1, result.processed)
+        self.assertEqual(1, decisions)
+
     def test_canonical_event_assessment_separates_corroboration_from_early_signals(self):
         for source_id in ("assessment_a", "assessment_b"):
             self.store.register_source(source_id, source_id, "test", credibility=.8)
@@ -814,7 +899,7 @@ class IntelligenceStoreTests(unittest.TestCase):
             decisions = connection.execute(
                 """SELECT COUNT(*) FROM world_event_fusion_decisions
                    WHERE observation_id=? AND method=?""",
-                (observation["id"], "deterministic-event-fusion-v2"),
+                (observation["id"], "deterministic-event-fusion-v3"),
             ).fetchone()[0]
 
         self.assertEqual(0, refreshed.observations)
@@ -1024,7 +1109,7 @@ class IntelligenceStoreTests(unittest.TestCase):
         policies = self.store.list_source_policies()
         self.assertEqual("report", policies[0]["evidence_role"])
         self.assertEqual(["contract.example.test"], policies[0]["allowed_hosts"])
-        self.assertEqual("source-contract-v1", policies[0]["policy_version"])
+        self.assertEqual("source-contract-v2", policies[0]["policy_version"])
         self.assertEqual(policy_for(connector), validate_connector_contract(connector))
         with self.assertRaises(ConnectorContractError):
             validate_connector_url(connector, "https://untrusted.example/api")
@@ -1475,6 +1560,847 @@ class UnderstandingEngineTests(unittest.TestCase):
         with self.assertRaises(ModelUnavailable):
             bounded.generate_json("three")
 
+    def test_reasoning_json_results_are_cached_without_spending_twice(self):
+        class Router:
+            last_provider_name = "fixture-model"
+
+            def __init__(self):
+                self.calls = 0
+
+            def generate_json(self, *args, **kwargs):
+                self.calls += 1
+                return {"answer": "same"}
+
+        router = Router()
+        bounded = BudgetedModelRouter(
+            router, ReasoningBudget(self.store, hourly_calls=2, daily_calls=2),
+            lane="article",
+        )
+        first = bounded.generate_json("identical", routing="world_understanding")
+        second = bounded.generate_json("identical", routing="world_understanding")
+        overview = self.store.reasoning_budget_overview()
+
+        self.assertEqual(first, second)
+        self.assertEqual(1, router.calls)
+        self.assertEqual(1, overview["result_cache"]["entries"])
+        self.assertEqual(1, overview["result_cache"]["hits"])
+
+    def test_article_capture_and_source_blind_literal_span_framing(self):
+        article = " ".join(
+            ["Officials described the disruption as catastrophic."] * 100
+        )
+        connector = NewsFeedConnector(
+            "Synthetic Publisher", "https://news.test/feed",
+            article_acquisition_mode="publisher-page",
+            article_hosts=("news.test",),
+        )
+        self.store.register_source(
+            connector.source_id, connector.name, connector.kind,
+            base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+        )
+        self.store.register_source_policy(
+            connector.source_id, connector.source_policy
+        )
+        self.store.ingest_items(connector.source_id, [SourceItem(
+            "article-1", "Officials report disruption",
+            "https://news.test/articles/one", summary="Short feed summary",
+            category="traditional-news",
+            metadata={"publisher": connector.name, "domain": "news.test"},
+        )])
+
+        capture = ArticleAcquisitionEngine(
+            self.store, enabled=True, fetch_html=lambda *_: {
+                "status": 200, "final_url": "https://news.test/articles/one",
+                "headers": {}, "body": f"<article><p>{article}</p></article>",
+            },
+        ).run_batch()
+
+        class Router:
+            last_provider_name = "fixture-model"
+
+            def __init__(self):
+                self.prompt = ""
+
+            def generate_json(self, prompt, *args, **kwargs):
+                self.prompt = prompt
+                return {"observations": [{
+                    "dimension": "emotional_intensity", "direction": "present",
+                    "strength": .8, "confidence": .9,
+                    "evidence": "described the disruption as catastrophic",
+                    "explanation": "Uses an emotionally intense descriptor.",
+                }, {
+                    "dimension": "loaded_language", "direction": "present",
+                    "strength": 1, "confidence": .9,
+                    "evidence": "invented evidence that is not in the article",
+                    "explanation": "Must be rejected.",
+                }]}
+
+        router = Router()
+        result = SemanticFramingEngine(
+            self.store, router=router, model_calls_per_cycle=1
+        ).run_batch()
+        audit = self.store.publisher_framing_audit(
+            "domain:news.test"
+        )
+        comparison = EventFramingComparisonEngine(self.store).run_batch()
+
+        self.assertEqual(1, capture["captured"])
+        self.assertEqual(1, result.completed)
+        self.assertNotIn("Synthetic Publisher", router.prompt)
+        self.assertEqual(1, len(audit["observations"]))
+        self.assertEqual(
+            "described the disruption as catastrophic",
+            audit["observations"][0]["evidence_span"],
+        )
+        self.assertEqual("shadow", audit["mode"])
+        self.assertEqual(1, self.store.article_analysis_overview()["captures"][0]["count"])
+        self.assertEqual(1, comparison["coverage_windows"])
+
+    def test_article_capture_blocks_redirect_outside_policy_host(self):
+        connector = NewsFeedConnector(
+            "Synthetic Publisher", "https://news.test/feed",
+            article_acquisition_mode="publisher-page",
+            article_hosts=("news.test",),
+        )
+        self.store.register_source(
+            connector.source_id, connector.name, connector.kind,
+            base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+        )
+        self.store.register_source_policy(connector.source_id, connector.source_policy)
+        self.store.ingest_items(connector.source_id, [SourceItem(
+            "article-redirect", "Redirecting report",
+            "https://news.test/articles/redirect", category="traditional-news",
+            metadata={"publisher": connector.name},
+        )])
+        result = ArticleAcquisitionEngine(
+            self.store, enabled=True, fetch_html=lambda *_: {
+                "status": 200, "final_url": "https://unapproved.test/article",
+                "headers": {}, "body": "<article>" + ("word " * 300) + "</article>",
+            },
+        ).run_batch()
+        with self.store._connect() as connection:
+            task = connection.execute(
+                "SELECT status,last_error FROM article_acquisition_tasks"
+            ).fetchone()
+            captures = connection.execute(
+                "SELECT COUNT(*) FROM article_content_captures"
+            ).fetchone()[0]
+
+        self.assertEqual(0, result["captured"])
+        self.assertEqual("blocked", task["status"])
+        self.assertEqual("article-host-not-allowed", task["last_error"])
+        self.assertEqual(0, captures)
+
+    def test_event_framing_comparison_requires_two_captured_publishers(self):
+        for label, host in (("Publisher Alpha", "alpha.test"),
+                            ("Publisher Beta", "beta.test")):
+            connector = NewsFeedConnector(
+                label, f"https://{host}/feed",
+                article_acquisition_mode="publisher-page", article_hosts=(host,),
+            )
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(
+                connector.source_id, connector.source_policy
+            )
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                f"report-{host}", "Shared event report", f"https://{host}/report",
+                category="traditional-news",
+                metadata={"publisher": label, "domain": host},
+            )])
+        ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=5, fetch_html=lambda url, *_: {
+                "status": 200, "final_url": url, "headers": {},
+                "body": "<article><p>" + ("Supported report wording. " * 120)
+                        + "</p></article>",
+            },
+        ).run_batch()
+        now = datetime.now(UTC).isoformat().replace("+00:00", "Z")
+        with self.store._connect() as connection:
+            rows = connection.execute(
+                """SELECT documents.id document_id,documents.source_id,
+                          documents.publisher_key,versions.id version_id,
+                          capture.id capture_id,capture.content_hash
+                   FROM documents
+                   JOIN document_versions versions ON versions.document_id=documents.id
+                   JOIN article_content_captures capture
+                     ON capture.document_version_id=versions.id
+                   WHERE documents.publisher_key IN ('domain:alpha.test','domain:beta.test')
+                   ORDER BY documents.publisher_key"""
+            ).fetchall()
+            connection.execute(
+                """INSERT INTO world_events (
+                     id,event_type,category,title,status,severity,confidence,
+                     geometry,country_code,country_name,first_seen_at,last_seen_at,
+                     source_count,observation_count,properties,method,created_at,updated_at
+                   ) VALUES ('event-framing','reported-event','traditional-news',
+                     'Shared event','active',.4,.6,'{}','','',?,?,2,2,'{}',
+                     'fixture',?,?)""", (now, now, now, now),
+            )
+            for index, row in enumerate(rows):
+                observation_id = f"framing-observation-{index}"
+                connection.execute(
+                    """INSERT INTO world_event_observations (
+                         id,world_event_id,document_version_id,document_id,source_id,
+                         external_id,observation_kind,captured_at,geometry,payload_hash,
+                         properties,created_at
+                       ) VALUES (?,'event-framing',?,?,?,?,? ,?,'{}',?,'{}',?)""",
+                    (observation_id, row["version_id"], row["document_id"],
+                     row["source_id"], f"external-{index}", "report", now,
+                     f"payload-{index}", now),
+                )
+                connection.execute(
+                    """INSERT INTO world_event_memberships (
+                         id,observation_id,world_event_id,active,valid_from,
+                         action,method,created_at
+                       ) VALUES (?,?,'event-framing',1,?,'attach','fixture',?)""",
+                    (f"membership-{index}", observation_id, now, now),
+                )
+                connection.execute(
+                    """INSERT INTO article_framing_assessments (
+                         article_capture_id,publisher_key,dimension_scores,
+                         evidence_count,confidence,status,method,input_hash,updated_at
+                       ) VALUES (?,?,?,1,.8,'complete','fixture',?,?)""",
+                    (row["capture_id"], row["publisher_key"],
+                     json.dumps({"loaded_language": .2 + index * .5}),
+                     row["content_hash"], now),
+                )
+
+        engine = EventFramingComparisonEngine(self.store)
+        result = engine.run_batch()
+        repeated = engine.run_batch()
+        comparisons = self.store.event_framing_comparison_overview()["comparisons"]
+
+        self.assertEqual(1, result["comparisons"])
+        self.assertEqual(0, repeated["comparisons"])
+        self.assertEqual(2, comparisons[0]["source_count"])
+        self.assertEqual("event-framing-comparison-v2", comparisons[0]["method"])
+        self.assertEqual(
+            ["domain:alpha.test", "domain:beta.test"],
+            comparisons[0]["publisher_keys"],
+        )
+
+    def test_event_ready_reserves_complete_approved_multi_publisher_event(self):
+        connectors = []
+        for label, host in (("Ready Alpha", "ready-alpha.test"),
+                            ("Ready Beta", "ready-beta.test")):
+            connector = NewsFeedConnector(
+                label, f"https://{host}/feed",
+                article_acquisition_mode="publisher-page",
+                article_hosts=(host,),
+            )
+            connectors.append(connector)
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(
+                connector.source_id, connector.source_policy
+            )
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                f"ready-{host}", "Harbor fire reported in Test City",
+                f"https://{host}/report", category="traditional-news",
+                published_at="2026-08-11T10:00:00Z",
+                latitude=10.0, longitude=20.0,
+                metadata={"publisher": label, "domain": host},
+            )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        EventFusionEngine(self.store, batch_size=20).run_batch()
+        self.assertEqual(1, len(self.store.list_world_events()))
+
+        acquisition = ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=1,
+            event_ready_per_cycle=1,
+            fetch_html=lambda url, *_: {
+                "status": 200, "final_url": url, "headers": {},
+                "body": "<article><p>" +
+                        ("Supported report wording. " * 120) +
+                        "</p></article>",
+            },
+        )
+        acquisition.run_batch()
+        acquisition.run_batch()
+        with self.store._connect() as connection:
+            captures = connection.execute(
+                "SELECT COUNT(*) FROM article_content_captures WHERE status='complete'"
+            ).fetchone()[0]
+            ready_tasks = connection.execute(
+                "SELECT COUNT(*) FROM article_acquisition_tasks WHERE priority>=2"
+            ).fetchone()[0]
+        self.assertEqual(2, captures)
+        self.assertGreaterEqual(ready_tasks, 1)
+
+        class Router:
+            def budget_available(self):
+                return True
+
+            def generate_json(self, *_args, **_kwargs):
+                return {"observations": [{
+                    "dimension": "emotional_intensity",
+                    "direction": "present", "strength": .4,
+                    "confidence": .8,
+                    "evidence": "Supported report wording.",
+                    "explanation": "Literal fixture evidence.",
+                }]}
+
+        framing = SemanticFramingEngine(
+            self.store, router=Router(), batch_size=2,
+            model_calls_per_cycle=2, event_ready_per_cycle=2,
+        ).run_batch()
+        comparison = EventFramingComparisonEngine(self.store).run_batch()
+        readiness = self.store.comparison_readiness(limit=20)
+
+        self.assertEqual(2, framing.completed)
+        self.assertEqual(1, comparison["comparisons"])
+        self.assertEqual(1, readiness["eligible_events"])
+        self.assertEqual(1, readiness["comparisons"])
+        self.assertEqual(
+            "comparison-ready",
+            readiness["event_ready"]["events"][0]["next_stage"],
+        )
+
+    def test_event_ready_reserve_never_fetches_feed_only_peer(self):
+        page = NewsFeedConnector(
+            "Ready Page", "https://ready-page.test/feed",
+            article_acquisition_mode="publisher-page",
+            article_hosts=("ready-page.test",),
+        )
+        feed = NewsFeedConnector(
+            "Ready Feed", "https://ready-feed.test/feed"
+        )
+        for connector in (page, feed):
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(
+                connector.source_id, connector.source_policy
+            )
+            host = "ready-page.test" if connector is page else "ready-feed.test"
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                host, "Shared feed-only policy event", f"https://{host}/report",
+                category="traditional-news", latitude=10, longitude=20,
+                published_at="2026-08-11T10:00:00Z",
+                metadata={"publisher": connector.name, "domain": host},
+            )])
+        WorldEventGraphEngine(self.store, batch_size=20).run_batch()
+        EventFusionEngine(self.store, batch_size=20).run_batch()
+        requested = []
+        acquisition = ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=2, event_ready_per_cycle=2,
+            fetch_html=lambda url, *_: requested.append(url) or {
+                "status": 200, "final_url": url, "headers": {},
+                "body": "<article>" + ("Allowed page text. " * 100) +
+                        "</article>",
+            },
+        )
+        with self.store._connect() as connection:
+            candidates = acquisition._event_ready_enqueue_candidates(
+                connection, 2
+            )
+        acquisition.run_batch()
+        readiness = self.store.comparison_readiness(limit=20)
+
+        self.assertEqual([], candidates)
+        self.assertEqual(["https://ready-page.test/report"], requested)
+        self.assertEqual(
+            "policy-ineligible",
+            readiness["event_ready"]["events"][0]["next_stage"],
+        )
+
+    def test_article_enqueue_round_robins_high_and_low_volume_publishers(self):
+        source_ids = []
+        for index, count in enumerate((20, 1, 1)):
+            host = f"publisher-{index}.test"
+            connector = NewsFeedConnector(
+                f"Publisher {index}", f"https://{host}/feed",
+                article_acquisition_mode="publisher-page", article_hosts=(host,),
+            )
+            source_ids.append(connector.source_id)
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(
+                connector.source_id, connector.source_policy
+            )
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                f"item-{index}-{item}", f"Report {index}-{item}",
+                f"https://{host}/report/{item}", category="traditional-news",
+                metadata={"domain": host},
+            ) for item in range(count)])
+
+        ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=2, fetch_html=lambda url, *_: {
+                "status": 200, "final_url": url, "headers": {},
+                "body": "<article>" + ("complete article text " * 100) + "</article>",
+            },
+        ).run_batch()
+        with self.store._connect() as connection:
+            queued = {
+                row[0] for row in connection.execute(
+                    "SELECT DISTINCT source_id FROM article_acquisition_tasks"
+                )
+            }
+
+        self.assertEqual(set(source_ids), queued)
+
+    def test_framing_call_cap_leaves_unattempted_articles_immediately_eligible(self):
+        connector = NewsFeedConnector(
+            "Full Feed", "https://full-feed.test/feed"
+        )
+        self.store.register_source(
+            connector.source_id, connector.name, connector.kind,
+            base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+        )
+        self.store.register_source_policy(connector.source_id, connector.source_policy)
+        text = "publisher supplied full article " * 120
+        self.store.ingest_items(connector.source_id, [SourceItem(
+            f"full-{index}", f"Full article {index}",
+            f"https://full-feed.test/article/{index}", content=text,
+            category="traditional-news",
+            metadata={
+                "domain": "full-feed.test",
+                "content_scope": "publisher_feed_full_content",
+            },
+        ) for index in range(3)])
+        ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=5
+        ).run_batch()
+
+        class Router:
+            def generate_json(self, *args, **kwargs):
+                return {"observations": []}
+
+        result = SemanticFramingEngine(
+            self.store, router=Router(), batch_size=3,
+            model_calls_per_cycle=1,
+        ).run_batch()
+
+        class CooledRouter:
+            def budget_available(self):
+                return False
+
+            def generate_json(self, *args, **kwargs):
+                raise AssertionError("cooled framing lane must not call the model")
+
+        cooled = SemanticFramingEngine(
+            self.store, router=CooledRouter(), batch_size=3,
+            model_calls_per_cycle=3,
+        ).run_batch()
+        with self.store._connect() as connection:
+            assessed = connection.execute(
+                "SELECT COUNT(*) FROM article_framing_assessments"
+            ).fetchone()[0]
+
+        self.assertEqual(1, result.processed)
+        self.assertEqual(1, result.model_calls)
+        self.assertEqual(1, assessed)
+        self.assertEqual(0, cooled.processed)
+        self.assertEqual(0, cooled.model_calls)
+
+    def test_framing_round_robin_cursor_survives_engine_reconstruction(self):
+        text = "publisher supplied article evidence " * 120
+        for index in range(3):
+            host = f"framing-{index}.test"
+            connector = NewsFeedConnector(
+                f"Framing {index}", f"https://{host}/feed"
+            )
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(
+                connector.source_id, connector.source_policy
+            )
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                f"framing-{index}-{item}", f"Framing report {index}-{item}",
+                f"https://{host}/article/{item}", content=f"marker-{index} {text}",
+                category="traditional-news", metadata={
+                    "domain": host,
+                    "content_scope": "publisher_feed_full_content",
+                },
+            ) for item in range(2)])
+        ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=10
+        ).run_batch()
+
+        class Router:
+            def __init__(self):
+                self.markers = []
+
+            def generate_json(self, prompt, *args, **kwargs):
+                marker = re.search(r"marker-(\d)", prompt).group(1)
+                self.markers.append(marker)
+                return {"observations": []}
+
+        router = Router()
+        SemanticFramingEngine(
+            self.store, router=router, batch_size=2, model_calls_per_cycle=2
+        ).run_batch()
+        first_cursor = self.store.scheduler_cursor("semantic-framing")
+        SemanticFramingEngine(
+            self.store, router=router, batch_size=2, model_calls_per_cycle=2
+        ).run_batch()
+
+        self.assertEqual(["0", "1", "2", "0"], router.markers)
+        self.assertEqual("domain:framing-1.test", first_cursor)
+        self.assertEqual(
+            "domain:framing-0.test",
+            self.store.scheduler_cursor("semantic-framing"),
+        )
+
+    def test_framing_prioritizes_old_retry_and_cooldown_does_not_move_cursor(self):
+        host = "retry-framing.test"
+        connector = NewsFeedConnector("Retry Framing", f"https://{host}/feed")
+        self.store.register_source(
+            connector.source_id, connector.name, connector.kind,
+            base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+        )
+        self.store.register_source_policy(connector.source_id, connector.source_policy)
+        text = "complete publisher supplied article evidence " * 120
+        self.store.ingest_items(connector.source_id, [SourceItem(
+            f"retry-framing-{index}", f"Retry framing {index}",
+            f"https://{host}/article/{index}",
+            content=f"candidate-{index} {text}", category="traditional-news",
+            metadata={"domain": host,
+                      "content_scope": "publisher_feed_full_content"},
+        ) for index in range(2)])
+        ArticleAcquisitionEngine(self.store, enabled=True).run_batch()
+        old = (datetime.now(UTC) - timedelta(hours=7)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        with self.store._connect() as connection:
+            captures = connection.execute(
+                "SELECT * FROM article_content_captures ORDER BY id"
+            ).fetchall()
+            connection.execute(
+                """INSERT INTO article_framing_assessments (
+                     article_capture_id,publisher_key,dimension_scores,
+                     evidence_count,confidence,status,method,input_hash,updated_at
+                   ) VALUES (?,?, '{}',0,0,'needs-model','fixture',?,?)""",
+                (captures[0]["id"], f"domain:{host}",
+                 captures[0]["content_hash"], old),
+            )
+
+        class Router:
+            def __init__(self):
+                self.prompt = ""
+
+            def generate_json(self, prompt, *args, **kwargs):
+                self.prompt = prompt
+                return {"observations": []}
+
+        router = Router()
+        SemanticFramingEngine(
+            self.store, router=router, batch_size=1, model_calls_per_cycle=1
+        ).run_batch()
+        self.assertIn("candidate-0", router.prompt)
+        cursor = self.store.scheduler_cursor("semantic-framing")
+
+        class CooledRouter:
+            def budget_available(self):
+                return False
+
+            def generate_json(self, *args, **kwargs):
+                raise AssertionError("cooled router must not be called")
+
+        result = SemanticFramingEngine(
+            self.store, router=CooledRouter(), batch_size=1,
+            model_calls_per_cycle=1,
+        ).run_batch()
+        self.assertEqual(0, result.processed)
+        self.assertEqual(cursor, self.store.scheduler_cursor("semantic-framing"))
+
+    def test_article_queue_caps_preserve_excess_and_report_backpressure(self):
+        for index in range(2):
+            host = f"queue-cap-{index}.test"
+            connector = NewsFeedConnector(
+                f"Queue Cap {index}", f"https://{host}/feed",
+                article_acquisition_mode="publisher-page", article_hosts=(host,),
+            )
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(connector.source_id, connector.source_policy)
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                f"queue-cap-{index}-{item}", f"Queue cap {index}-{item}",
+                f"https://{host}/article/{item}", category="traditional-news",
+                metadata={"domain": host},
+            ) for item in range(5)])
+
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE documents SET retrieved_at=datetime('now','-1 day')"
+            )
+
+        engine = ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=2,
+            max_active_per_publisher=2, max_active_global=3,
+        )
+        self.assertEqual(3, engine._enqueue())
+        self.assertEqual(0, engine._enqueue())
+        overview = self.store.article_analysis_overview()["queue_health"]
+        self.assertEqual(3, overview["active_tasks"])
+        self.assertEqual("backpressure-active", overview["status"])
+        self.assertLessEqual(
+            max(row["active_tasks"] for row in overview["publishers"]), 2
+        )
+
+        lower = ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=2,
+            max_active_per_publisher=1, max_active_global=1,
+        )
+        self.assertEqual(0, lower._enqueue())
+        with self.store._connect() as connection:
+            self.assertEqual(
+                3, connection.execute(
+                    "SELECT COUNT(*) FROM article_acquisition_tasks"
+                ).fetchone()[0]
+            )
+        self.assertEqual(
+            "draining", self.store.article_analysis_overview()[
+                "queue_health"
+            ]["status"],
+        )
+
+    def test_fresh_article_uses_reserved_capacity_over_saturated_backfill(self):
+        host = "fresh-capacity.test"
+        connector = NewsFeedConnector(
+            "Fresh Capacity", f"https://{host}/feed",
+            article_acquisition_mode="publisher-page", article_hosts=(host,),
+        )
+        self.store.register_source(
+            connector.source_id, connector.name, connector.kind,
+            base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+        )
+        self.store.register_source_policy(connector.source_id, connector.source_policy)
+        self.store.ingest_items(connector.source_id, [SourceItem(
+            "old-backfill", "Old backfill", f"https://{host}/old",
+            category="traditional-news", metadata={"domain": host},
+        )])
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE documents SET retrieved_at=datetime('now','-1 day')"
+            )
+        engine = ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=1,
+            max_active_per_publisher=1, max_active_global=1,
+            max_fresh_active_per_publisher=1, max_fresh_active_global=1,
+        )
+        self.assertEqual(1, engine._enqueue())
+
+        self.store.ingest_items(connector.source_id, [SourceItem(
+            "breaking-report", "Breaking report", f"https://{host}/breaking",
+            category="traditional-news", metadata={"domain": host},
+        )])
+        self.assertEqual(1, engine._enqueue())
+        with self.store._connect() as connection:
+            classes = {
+                row["work_class"]: row["count"]
+                for row in connection.execute(
+                    """SELECT work_class,COUNT(*) count
+                       FROM article_acquisition_tasks GROUP BY work_class"""
+                )
+            }
+        self.assertEqual({"backfill": 1, "fresh": 1}, classes)
+        health = self.store.article_analysis_overview()["queue_health"]
+        self.assertEqual(2, health["active_tasks"])
+        self.assertEqual(1, health["backfill_active_tasks"])
+        self.assertEqual(1, health["fresh_active_tasks"])
+        selected = engine._select_tasks()
+        self.assertEqual("fresh", selected[0]["work_class"])
+
+    def test_fresh_reasoning_lane_remains_available_after_backfill_exhausts(self):
+        class Router:
+            def generate_json(self, *args, **kwargs):
+                return {"observations": []}
+
+        budget = ReasoningBudget(
+            self.store, hourly_calls=5, daily_calls=10,
+            article_hourly_calls=1, article_daily_calls=2,
+            article_fresh_hourly_reserve=1,
+            article_fresh_daily_reserve=1,
+            article_fresh_hourly_calls=2,
+            article_fresh_daily_calls=3,
+        )
+        backfill = BudgetedModelRouter(Router(), budget, lane="article")
+        fresh = BudgetedModelRouter(Router(), budget, lane="article-fresh")
+        backfill.generate_json("backfill one")
+        with self.assertRaises(ModelUnavailable):
+            backfill.generate_json("backfill two")
+
+        self.assertTrue(fresh.generate_json("fresh development") == {
+            "observations": []
+        })
+        with self.store._connect() as connection:
+            usage = {
+                row["lane"]: row["model_calls"]
+                for row in connection.execute(
+                    """SELECT lane,model_calls
+                       FROM intelligence_budget_lane_usage
+                       WHERE bucket_type='hour'"""
+                )
+            }
+        self.assertEqual(1, usage["article"])
+        self.assertEqual(1, usage["article-fresh"])
+
+    def test_framing_uses_fresh_lane_while_backfill_lane_is_cooled(self):
+        host = "fresh-framing.test"
+        connector = NewsFeedConnector("Fresh Framing", f"https://{host}/feed")
+        self.store.register_source(
+            connector.source_id, connector.name, connector.kind,
+            base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+        )
+        self.store.register_source_policy(connector.source_id, connector.source_policy)
+        text = "publisher supplied fast development evidence " * 120
+        self.store.ingest_items(connector.source_id, [SourceItem(
+            "fresh-framing", "Fresh framing report",
+            f"https://{host}/fresh", content=text,
+            category="traditional-news", metadata={
+                "domain": host,
+                "content_scope": "publisher_feed_full_content",
+            },
+        )])
+        ArticleAcquisitionEngine(self.store, enabled=True).run_batch()
+
+        class CooledRouter:
+            def budget_available(self):
+                return False
+
+            def generate_json(self, *args, **kwargs):
+                raise AssertionError("backfill lane must remain unused")
+
+        class FreshRouter:
+            def __init__(self):
+                self.calls = 0
+
+            def budget_available(self):
+                return True
+
+            def generate_json(self, *args, **kwargs):
+                self.calls += 1
+                return {"observations": []}
+
+        fresh = FreshRouter()
+        result = SemanticFramingEngine(
+            self.store, router=CooledRouter(), fresh_router=fresh,
+            batch_size=1, model_calls_per_cycle=1,
+        ).run_batch()
+
+        self.assertEqual(1, fresh.calls)
+        self.assertEqual(1, result.processed)
+        self.assertEqual(1, result.rejected)
+
+    def test_enqueue_rotation_survives_global_cap_and_engine_reconstruction(self):
+        for index in range(3):
+            host = f"enqueue-rotation-{index}.test"
+            connector = NewsFeedConnector(
+                f"Enqueue Rotation {index}", f"https://{host}/feed",
+                article_acquisition_mode="publisher-page", article_hosts=(host,),
+            )
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(connector.source_id, connector.source_policy)
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                f"enqueue-rotation-{index}", f"Enqueue rotation {index}",
+                f"https://{host}/article", category="traditional-news",
+                metadata={"domain": host},
+            )])
+
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE documents SET retrieved_at=datetime('now','-1 day')"
+            )
+
+        for _ in range(3):
+            engine = ArticleAcquisitionEngine(
+                self.store, enabled=True, batch_size=1,
+                max_active_per_publisher=1, max_active_global=1,
+            )
+            self.assertEqual(1, engine._enqueue())
+            with self.store._connect() as connection:
+                connection.execute(
+                    """UPDATE article_acquisition_tasks SET status='complete'
+                       WHERE status='pending'"""
+                )
+
+        with self.store._connect() as connection:
+            publishers = connection.execute(
+                """SELECT DISTINCT documents.publisher_key
+                   FROM article_acquisition_tasks tasks
+                   JOIN documents ON documents.id=tasks.document_id"""
+            ).fetchall()
+        self.assertEqual(3, len(publishers))
+
+    def test_acquisition_reclaims_only_expired_leases_and_selects_fairly(self):
+        for index in range(2):
+            host = f"lease-{index}.test"
+            connector = NewsFeedConnector(
+                f"Lease {index}", f"https://{host}/feed",
+                article_acquisition_mode="publisher-page", article_hosts=(host,),
+            )
+            self.store.register_source(
+                connector.source_id, connector.name, connector.kind,
+                base_url=connector.base_url, poll_seconds=connector.poll_seconds,
+            )
+            self.store.register_source_policy(connector.source_id, connector.source_policy)
+            self.store.ingest_items(connector.source_id, [SourceItem(
+                f"lease-{index}-{item}", f"Lease {index}-{item}",
+                f"https://{host}/article/{item}", category="traditional-news",
+                metadata={"domain": host},
+            ) for item in range(2)])
+        with self.store._connect() as connection:
+            connection.execute(
+                "UPDATE documents SET retrieved_at=datetime('now','-1 day')"
+            )
+        engine = ArticleAcquisitionEngine(
+            self.store, enabled=True, batch_size=2,
+            max_active_per_publisher=5, max_active_global=10,
+        )
+        self.assertEqual(4, engine._enqueue())
+        past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        future = (datetime.now(UTC) + timedelta(minutes=5)).isoformat().replace(
+            "+00:00", "Z"
+        )
+        with self.store._connect() as connection:
+            tasks = connection.execute(
+                "SELECT id FROM article_acquisition_tasks ORDER BY id"
+            ).fetchall()
+            connection.execute(
+                """UPDATE article_acquisition_tasks SET status='running',
+                   lease_expires_at=? WHERE id=?""", (past, tasks[0]["id"])
+            )
+            connection.execute(
+                """UPDATE article_acquisition_tasks SET status='running',
+                   lease_expires_at=? WHERE id=?""", (future, tasks[1]["id"])
+            )
+            for task in tasks[:2]:
+                connection.execute(
+                    """INSERT INTO article_extraction_attempts
+                       (task_id,status,started_at) VALUES (?,'started',?)""",
+                    (task["id"], past),
+                )
+
+        self.assertEqual(1, engine._recover_expired_leases())
+        with self.store._connect() as connection:
+            states = connection.execute(
+                "SELECT status FROM article_acquisition_tasks ORDER BY id LIMIT 2"
+            ).fetchall()
+        self.assertEqual(["retry", "running"], [row["status"] for row in states])
+
+        selected = engine._select_tasks()
+        self.assertEqual(2, len(selected))
+        self.assertEqual(2, len({task["publisher_key"] for task in selected}))
+        self.assertEqual("retry", selected[0]["status"])
+
     def test_weighted_job_lanes_prevent_gap_starvation(self):
         queue=ReasoningJobQueue(self.store,lease_seconds=30)
         for index in range(4):
@@ -1538,6 +2464,9 @@ class UnderstandingEngineTests(unittest.TestCase):
         grounding.generate_json("ground two")
         with self.assertRaises(ModelUnavailable):
             grounding.generate_json("ground denied")
+        self.assertFalse(grounding.budget_available())
+        with self.assertRaises(ModelUnavailable):
+            grounding.generate_json("ground denied again")
 
         overview = self.store.reasoning_budget_overview()
         statuses = {
@@ -2965,6 +3894,22 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual("https://atom.example/report", item.url)
         self.assertEqual(["Politics"], item.metadata["feed_categories"])
 
+    def test_news_connector_preserves_publisher_supplied_full_feed_content(self):
+        body = " ".join(["Publisher supplied article sentence."] * 100)
+        xml = f"""<feed xmlns='http://www.w3.org/2005/Atom'>
+          <entry><id>tag:example,full</id><title>Full feed report</title>
+          <link rel='alternate' href='https://atom.example/full'/>
+          <summary>Short summary</summary><content type='html'>{body}</content>
+          <updated>2026-07-22T12:00:00Z</updated></entry></feed>""".encode()
+        item = NewsFeedConnector(
+            "Atom News", "https://atom.example/feed", fetch_xml=lambda _: xml
+        ).poll().items[0]
+
+        self.assertGreater(len(item.content), 500)
+        self.assertEqual(
+            "publisher_feed_full_content", item.metadata["content_scope"]
+        )
+
     def test_news_connector_tolerates_gzip_bom_and_invalid_control_byte(self):
         import gzip
 
@@ -3975,6 +4920,27 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 ) as response:
                     reasoning_budget = json.loads(response.read())
                 with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/article-analysis",
+                    timeout=2
+                ) as response:
+                    article_analysis = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/framing-v2?publisher=fixture",
+                    timeout=2
+                ) as response:
+                    framing_v2 = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url + "api/intelligence/event-framing-comparisons",
+                    timeout=2
+                ) as response:
+                    framing_comparisons = json.loads(response.read())
+                with urllib.request.urlopen(
+                    dashboard.url
+                    + "api/intelligence/comparison-readiness?window_minutes=60&limit=25",
+                    timeout=2
+                ) as response:
+                    comparison_readiness = json.loads(response.read())
+                with urllib.request.urlopen(
                     dashboard.url + "api/intelligence/event-fusion",
                     timeout=2
                 ) as response:
@@ -4024,6 +4990,19 @@ class IntelligenceDashboardTests(unittest.TestCase):
                 self.assertIn("totals", media_derivations)
                 self.assertIn("reports", early_reports)
                 self.assertIn("policies", reasoning_budget)
+                self.assertIn("result_cache", reasoning_budget)
+                self.assertIn("captures", article_analysis)
+                self.assertEqual("shadow", framing_v2["mode"])
+                self.assertIn("comparisons", framing_comparisons)
+                self.assertEqual(
+                    "deterministic-event-fusion-v3",
+                    comparison_readiness["methods"]["fusion"],
+                )
+                self.assertIn("event_ready", comparison_readiness)
+                self.assertIn("state_counts", comparison_readiness["event_ready"])
+                self.assertNotIn(
+                    "normalized_text", json.dumps(comparison_readiness)
+                )
                 self.assertGreaterEqual(fusion_overview["active_memberships"], 1)
                 self.assertIn("reviews", fusion_reviews)
                 self.assertIn("versions", world_event_detail)

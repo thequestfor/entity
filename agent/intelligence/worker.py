@@ -52,6 +52,11 @@ from agent.intelligence.event_fusion import EventFusionEngine
 from agent.intelligence.location_inference import DocumentLocationInferenceEngine
 from agent.intelligence.open_source_enrichment import OpenSourceEnrichmentEngine
 from agent.intelligence.media_derivation import PublicMediaDerivationEngine
+from agent.intelligence.article_acquisition import ArticleAcquisitionEngine
+from agent.intelligence.workload import WorkloadMonitor
+from agent.intelligence.framing import (
+    SemanticFramingEngine, EventFramingComparisonEngine
+)
 from agent.intelligence.publisher_assessment import PublisherAssessmentEngine
 from agent.intelligence.event_assessment import CanonicalEventAssessmentEngine
 from agent.intelligence.source_registry import (
@@ -98,6 +103,12 @@ class IntelligenceWorker:
         open_source_enrichment_engine=None,
         open_source_enrichment_poll_seconds=300,
         media_derivation_engine=None,
+        workload_monitor=None,
+        article_acquisition_engine=None,
+        article_acquisition_poll_seconds=600,
+        semantic_framing_engine=None,
+        semantic_framing_poll_seconds=600,
+        event_framing_comparison_engine=None,
         geospatial_engine=None,
         environment_layer_engine=None,
         world_graph_engine=None,
@@ -157,6 +168,19 @@ class IntelligenceWorker:
         )
         self._next_open_source_enrichment_at = 0.0
         self.media_derivation_engine = media_derivation_engine
+        self.workload_monitor = workload_monitor
+        self.article_acquisition_engine = article_acquisition_engine
+        self.article_acquisition_poll_seconds = max(
+            60, int(article_acquisition_poll_seconds)
+        )
+        self._next_article_acquisition_at = 0.0
+        self._article_acquisition_thread = None
+        self.semantic_framing_engine = semantic_framing_engine
+        self.semantic_framing_poll_seconds = max(
+            60, int(semantic_framing_poll_seconds)
+        )
+        self._next_semantic_framing_at = 0.0
+        self.event_framing_comparison_engine = event_framing_comparison_engine
         self.geospatial_engine = geospatial_engine
         self.environment_layer_engine = environment_layer_engine
         self.world_graph_engine = world_graph_engine
@@ -360,15 +384,22 @@ class IntelligenceWorker:
             ),
             *[
                 NewsFeedConnector(
-                    name=name,
-                    feed_url=url,
-                    credibility=credibility,
+                    name=definition[0],
+                    feed_url=definition[1],
+                    credibility=definition[2],
+                    article_acquisition_mode=(
+                        definition[3] if len(definition) > 3 else "feed-only"
+                    ),
+                    article_hosts=(definition[4] if len(definition) > 4 else ()),
                     poll_seconds=config.news_poll_seconds,
                     timeout=config.request_timeout_seconds,
                     max_items=config.max_items_per_source,
+                    article_requests_per_cycle=(
+                        config.news_article_requests_per_cycle
+                    ),
                     enabled=config.news_enabled
                 )
-                for name, url, credibility in config.news_rss_feeds
+                for definition in config.news_rss_feeds
             ]
         ]
         reputation = ReputationEngine(
@@ -414,6 +445,8 @@ class IntelligenceWorker:
         budget = ReasoningBudget(
             store, hourly_calls=config.reasoning_hourly_model_calls,
             daily_calls=config.reasoning_daily_model_calls,
+            daily_input_tokens=config.reasoning_daily_input_tokens,
+            daily_output_tokens=config.reasoning_daily_output_tokens,
             forecast_hourly_reserve=config.reasoning_forecast_hourly_reserve,
             forecast_daily_reserve=config.reasoning_forecast_daily_reserve,
             forecast_hourly_calls=config.reasoning_forecast_hourly_calls,
@@ -424,6 +457,26 @@ class IntelligenceWorker:
             grounding_daily_calls=config.reasoning_grounding_daily_calls,
             worldview_hourly_calls=config.reasoning_worldview_hourly_calls,
             worldview_daily_calls=config.reasoning_worldview_daily_calls,
+            article_hourly_reserve=config.reasoning_article_hourly_reserve,
+            article_daily_reserve=config.reasoning_article_daily_reserve,
+            article_hourly_calls=config.reasoning_article_hourly_calls,
+            article_daily_calls=config.reasoning_article_daily_calls,
+            article_fresh_hourly_reserve=(
+                config.reasoning_article_fresh_hourly_reserve
+            ),
+            article_fresh_daily_reserve=(
+                config.reasoning_article_fresh_daily_reserve
+            ),
+            article_fresh_hourly_calls=(
+                config.reasoning_article_fresh_hourly_calls
+            ),
+            article_fresh_daily_calls=(
+                config.reasoning_article_fresh_daily_calls
+            ),
+            comparison_hourly_reserve=config.reasoning_comparison_hourly_reserve,
+            comparison_daily_reserve=config.reasoning_comparison_daily_reserve,
+            comparison_hourly_calls=config.reasoning_comparison_hourly_calls,
+            comparison_daily_calls=config.reasoning_comparison_daily_calls,
         )
         bounded_router = BudgetedModelRouter(understanding.router, budget)
         understanding.router = bounded_router
@@ -452,6 +505,44 @@ class IntelligenceWorker:
             timeout=config.request_timeout_seconds,
             whisper_model=config.telegram_media_whisper_model,
             retention_hours=config.telegram_media_retention_hours,
+        )
+        workload_monitor = WorkloadMonitor(
+            store, window_minutes=config.workload_health_window_minutes,
+            disk_soft_limit_bytes=config.intelligence_disk_soft_limit_bytes,
+            disk_hard_limit_bytes=config.intelligence_disk_hard_limit_bytes,
+        )
+        article_acquisition_engine = ArticleAcquisitionEngine(
+            store, enabled=config.article_acquisition_enabled,
+            batch_size=config.article_acquisition_batch_size,
+            event_ready_per_cycle=(
+                config.article_acquisition_event_ready_per_cycle
+            ),
+            timeout=config.request_timeout_seconds,
+            max_active_per_publisher=(
+                config.article_acquisition_max_active_per_publisher
+            ),
+            max_active_global=config.article_acquisition_max_active_global,
+            fresh_window_minutes=config.article_fresh_window_minutes,
+            max_fresh_active_per_publisher=(
+                config.article_fresh_max_active_per_publisher
+            ),
+            max_fresh_active_global=config.article_fresh_max_active_global,
+            workload_monitor=workload_monitor,
+        )
+        semantic_framing_engine = SemanticFramingEngine(
+            store, router=bounded_router.for_lane("article"),
+            fresh_router=bounded_router.for_lane("article-fresh"),
+            enabled=config.semantic_framing_enabled,
+            batch_size=config.semantic_framing_batch_size,
+            model_calls_per_cycle=config.semantic_framing_model_calls_per_cycle,
+            fresh_window_minutes=config.article_fresh_window_minutes,
+            event_ready_per_cycle=(
+                config.semantic_framing_event_ready_per_cycle
+            ),
+        )
+        event_framing_comparison_engine = EventFramingComparisonEngine(
+            store, enabled=config.event_framing_comparison_enabled,
+            batch_size=config.event_framing_comparison_batch_size,
         )
         belief_revision = BeliefRevisionEngine(
             store,
@@ -521,7 +612,10 @@ class IntelligenceWorker:
         )
         world_graph_engine = WorldEventGraphEngine(
             store, enabled=config.world_graph_enabled,
-            batch_size=config.world_graph_batch_size
+            batch_size=config.world_graph_batch_size,
+            comparison_ready_per_cycle=(
+                config.world_graph_comparison_ready_per_cycle
+            ),
         )
         event_fusion_engine = EventFusionEngine(
             store, enabled=config.event_fusion_enabled,
@@ -529,7 +623,11 @@ class IntelligenceWorker:
             auto_link_threshold=config.event_fusion_auto_link_threshold,
             review_threshold=config.event_fusion_review_threshold,
             max_candidates=config.event_fusion_max_candidates,
-            lookback_days=config.event_fusion_lookback_days
+            lookback_days=config.event_fusion_lookback_days,
+            comparison_ready_per_cycle=(
+                config.event_fusion_comparison_ready_per_cycle
+            ),
+            recent_per_cycle=config.event_fusion_recent_per_cycle,
         )
         publisher_assessment = PublisherAssessmentEngine(
             store, prior_strength=config.reputation_prior_strength,
@@ -572,6 +670,14 @@ class IntelligenceWorker:
                 config.open_source_enrichment_poll_seconds
             ),
             media_derivation_engine=media_derivation_engine,
+            workload_monitor=workload_monitor,
+            article_acquisition_engine=article_acquisition_engine,
+            article_acquisition_poll_seconds=(
+                config.article_acquisition_poll_seconds
+            ),
+            semantic_framing_engine=semantic_framing_engine,
+            semantic_framing_poll_seconds=config.semantic_framing_poll_seconds,
+            event_framing_comparison_engine=event_framing_comparison_engine,
             geospatial_engine=geospatial_engine,
             environment_layer_engine=environment_layer_engine,
             world_graph_engine=world_graph_engine,
@@ -589,6 +695,13 @@ class IntelligenceWorker:
             return
 
         self._stop.clear()
+        if self.article_acquisition_engine is not None:
+            self._article_acquisition_thread = threading.Thread(
+                target=self._run_article_acquisition,
+                name="entity-article-acquisition-worker",
+                daemon=True,
+            )
+            self._article_acquisition_thread.start()
         self._thread = threading.Thread(
             target=self._run,
             name="entity-intelligence-worker",
@@ -601,8 +714,11 @@ class IntelligenceWorker:
 
         if self._thread:
             self._thread.join(timeout=3)
+        if self._article_acquisition_thread:
+            self._article_acquisition_thread.join(timeout=3)
 
         self._thread = None
+        self._article_acquisition_thread = None
 
     def run_once(self, force=False):
         now = time.monotonic()
@@ -633,6 +749,25 @@ class IntelligenceWorker:
         changed = sum(outcome.result.changed for outcome in outcomes)
         if self.aircraft_monitor is not None:
             self.aircraft_monitor.run_if_due(force=force)
+        if (
+            self.article_acquisition_engine is not None
+            and not self._article_acquisition_running
+            and (force or changed or now >= self._next_article_acquisition_at)
+        ):
+            try:
+                if self.workload_monitor is not None:
+                    try:
+                        self.workload_monitor.refresh()
+                    except Exception as exc:
+                        print("Workload health refresh failed:", type(exc).__name__)
+                articles = self.article_acquisition_engine.run_batch()
+                changed += articles["captured"]
+            except Exception as exc:
+                print("Article acquisition failed:", type(exc).__name__)
+            finally:
+                self._next_article_acquisition_at = (
+                    now + self.article_acquisition_poll_seconds
+                )
         if self.media_derivation_engine is not None:
             try:
                 media = self.media_derivation_engine.run_batch()
@@ -654,6 +789,18 @@ class IntelligenceWorker:
             finally:
                 self._next_open_source_enrichment_at = (
                     now + self.open_source_enrichment_poll_seconds
+                )
+        if (
+            self.semantic_framing_engine is not None
+            and (force or changed or now >= self._next_semantic_framing_at)
+        ):
+            try:
+                self.semantic_framing_engine.run_batch()
+            except Exception as exc:
+                print("Semantic framing analysis failed:", type(exc).__name__)
+            finally:
+                self._next_semantic_framing_at = (
+                    now + self.semantic_framing_poll_seconds
                 )
         if (
             self.location_inference_engine is not None
@@ -751,6 +898,12 @@ class IntelligenceWorker:
             except Exception as exc:
                 print("World event fusion cycle failed:", type(exc).__name__)
 
+        if self.event_framing_comparison_engine is not None:
+            try:
+                self.event_framing_comparison_engine.run_batch()
+            except Exception as exc:
+                print("Event framing comparison failed:", type(exc).__name__)
+
         if self.event_assessment_engine is not None:
             try:
                 self.event_assessment_engine.run_batch()
@@ -778,6 +931,11 @@ class IntelligenceWorker:
         except Exception as exc:
             print("Publisher assessment cycle failed:", type(exc).__name__)
         finally:
+            if self.workload_monitor is not None:
+                try:
+                    self.workload_monitor.refresh()
+                except Exception as exc:
+                    print("Workload health refresh failed:", type(exc).__name__)
             if activity_started:
                 self._emit_activity(
                     "intelligence_finished",
@@ -885,6 +1043,29 @@ class IntelligenceWorker:
                 print("Intelligence worker cycle failed:", exc)
 
             self._stop.wait(self.loop_seconds)
+
+    @property
+    def _article_acquisition_running(self):
+        return bool(
+            self._article_acquisition_thread
+            and self._article_acquisition_thread.is_alive()
+        )
+
+    def _run_article_acquisition(self):
+        while not self._stop.is_set():
+            try:
+                if self.workload_monitor is not None:
+                    try:
+                        self.workload_monitor.refresh()
+                    except Exception as exc:
+                        print(
+                            "Workload health refresh failed:",
+                            type(exc).__name__,
+                        )
+                self.article_acquisition_engine.run_batch()
+            except Exception as exc:
+                print("Article acquisition failed:", type(exc).__name__)
+            self._stop.wait(self.article_acquisition_poll_seconds)
 
     def _poll_connector(self, connector):
         source_id = connector.source_id

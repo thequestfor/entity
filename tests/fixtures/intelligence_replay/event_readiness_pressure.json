@@ -1,0 +1,28 @@
+{
+  "schema": "replay-bundle-v1",
+  "bundle_key": "event-readiness-pressure-v1",
+  "cutoff": "2026-01-01T02:00:00Z",
+  "sources": [
+    {"id":"pressure_a","name":"Pressure A","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"pressure-family-a","allowed_hosts":["pressure-a.test"],"article_acquisition_mode":"publisher-page","article_hosts":["pressure-a.test"],"article_max_bytes":1000000,"article_requests_per_cycle":1,"policy_version":"source-contract-v2"}},
+    {"id":"pressure_b","name":"Pressure B","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"pressure-family-b","allowed_hosts":["pressure-b.test"],"article_acquisition_mode":"publisher-page","article_hosts":["pressure-b.test"],"article_max_bytes":1000000,"article_requests_per_cycle":1,"policy_version":"source-contract-v2"}},
+    {"id":"pressure_feed","name":"Pressure Feed Only","kind":"traditional_news","policy":{"access_class":"public","authority_class":"journalistic","evidence_role":"report","independence_family":"pressure-family-feed","allowed_hosts":["pressure-feed.test"],"article_acquisition_mode":"feed-only","policy_version":"source-contract-v2"}}
+  ],
+  "documents": [
+    {"source_id":"pressure_a","external_id":"a1","version":1,"title":"Harbor terminal closes after fire","url":"https://pressure-a.test/a1","summary":"A fire closed the harbor terminal.","category":"news","published_at":"2026-01-01T00:00:00Z","captured_at":"2026-01-01T00:01:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"pressure-a.test"}},
+    {"source_id":"pressure_a","external_id":"a2","version":1,"title":"Harbor terminal closes after fire","url":"https://pressure-a.test/a2","summary":"Ordinary backlog item two.","category":"news","published_at":"2026-01-01T00:02:00Z","captured_at":"2026-01-01T00:03:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"pressure-a.test"}},
+    {"source_id":"pressure_a","external_id":"a3","version":1,"title":"Harbor terminal closes after fire","url":"https://pressure-a.test/a3","summary":"Ordinary backlog item three.","category":"news","published_at":"2026-01-01T00:04:00Z","captured_at":"2026-01-01T00:05:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"pressure-a.test"}},
+    {"source_id":"pressure_a","external_id":"a4","version":1,"title":"Harbor terminal closes after fire","url":"https://pressure-a.test/a4","summary":"Ordinary backlog item four.","category":"news","published_at":"2026-01-01T00:06:00Z","captured_at":"2026-01-01T00:07:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"pressure-a.test"}},
+    {"source_id":"pressure_a","external_id":"a5","version":1,"title":"Harbor terminal closes after fire","url":"https://pressure-a.test/a5","summary":"Ordinary backlog item five.","category":"news","published_at":"2026-01-01T00:08:00Z","captured_at":"2026-01-01T00:09:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"pressure-a.test"}},
+    {"source_id":"pressure_b","external_id":"b1","version":1,"title":"Harbor terminal closes after fire","url":"https://pressure-b.test/b1","summary":"An independent peer report.","category":"news","published_at":"2026-01-01T00:01:00Z","captured_at":"2026-01-01T00:02:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"pressure-b.test"}},
+    {"source_id":"pressure_feed","external_id":"f1","version":1,"title":"Harbor terminal closes after fire","url":"https://pressure-feed.test/f1","summary":"A feed-only peer remains visible.","category":"news","published_at":"2026-01-01T00:03:00Z","captured_at":"2026-01-01T00:04:00Z","latitude":10.0,"longitude":20.0,"metadata":{"domain":"pressure-feed.test"}}
+  ],
+  "captures": [
+    {"source_id":"pressure_a","external_id":"a1","version":1,"url":"https://pressure-a.test/a1","title":"Harbor terminal closes after fire","captured_at":"2026-01-01T00:01:30Z","normalized_text":"Officials described the harbor terminal closure as severe while crews contained the fire.","content_hash":"70bcbae7115069250a52f052cc400fb86eaf2ba82f7978e7bb6296cfe4a27179"},
+    {"source_id":"pressure_b","external_id":"b1","version":1,"url":"https://pressure-b.test/b1","title":"Harbor terminal closes after fire","captured_at":"2026-01-01T00:02:30Z","normalized_text":"Officials described the harbor terminal closure as severe while crews contained the fire.","content_hash":"70bcbae7115069250a52f052cc400fb86eaf2ba82f7978e7bb6296cfe4a27179"}
+  ],
+  "frozen_responses": [
+    {"method":"semantic-framing-v2","version":"semantic-framing-v2","content_hash":"70bcbae7115069250a52f052cc400fb86eaf2ba82f7978e7bb6296cfe4a27179","response":{"observations":[{"dimension":"emotional_intensity","direction":"present","strength":0.7,"confidence":0.8,"evidence":"severe","explanation":"Uses an intensity descriptor."}]}}
+  ],
+  "expected_gaps": [],
+  "provenance": "synthetic-test-only"
+}
